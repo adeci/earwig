@@ -86,6 +86,7 @@
           vm-niri = vmTest ./nix/tests/niri.nix;
           vm-sway = vmTest ./nix/tests/sway.nix;
           vm-models = vmTest ./nix/tests/models.nix;
+          vm-gnome = vmTest ./nix/tests/gnome.nix;
         }
       );
     };

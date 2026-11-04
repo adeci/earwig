@@ -176,7 +176,7 @@ impl PortalInserter {
     }
 
     /// Insert with exactly `method`, without falling back to the other one.
-    pub fn insert_with(&mut self, method: InsertMethod, text: &str) -> Result<(), InsertError> {
+    fn insert_with(&mut self, method: InsertMethod, text: &str) -> Result<(), InsertError> {
         let job = match method {
             InsertMethod::PortalType => Job::Type(text.to_owned()),
             InsertMethod::PortalPaste => Job::Paste(text.to_owned()),
