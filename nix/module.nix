@@ -82,6 +82,9 @@ in
         }) cfg.models
       ))
     ];
+    # earwig looks for pre-installed models in $XDG_DATA_DIRS/earwig/models;
+    # /run/current-system/sw/share only carries the subtrees listed here.
+    environment.pathsToLink = [ "/share/earwig" ];
 
     environment.etc."xdg/earwig/config.toml" = lib.mkIf (cfg.settings != { }) {
       source = configFile;
