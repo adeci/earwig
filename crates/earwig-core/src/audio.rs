@@ -419,7 +419,8 @@ impl Worker {
     }
 
     fn deliver(&mut self, pcm: &[f32]) {
-        let Some(recording) = &mut self.recording else {
+        // The resampler returns nothing until it has a full chunk.
+        let (Some(recording), false) = (&mut self.recording, pcm.is_empty()) else {
             return;
         };
         let id = recording.id;

@@ -331,7 +331,8 @@ impl Model for TranscribeModel {
     }
 
     fn feed(&mut self, pcm: &[f32]) -> anyhow::Result<Option<Partial>> {
-        if !self.active {
+        // transcribe.cpp rejects empty feeds as invalid.
+        if !self.active || pcm.is_empty() {
             return Ok(None);
         }
         self.recording.extend_from_slice(pcm);
@@ -629,6 +630,8 @@ mod tests {
             .unwrap();
         for _ in 0..2 {
             model.begin().unwrap();
+            // Capture can hand over empty chunks; they must not break the stream.
+            assert_eq!(model.feed(&[]).unwrap(), None);
             let mut live = Partial::default();
             for chunk in pcm.chunks(1_600) {
                 if let Some(partial) = model.feed(chunk).unwrap() {
