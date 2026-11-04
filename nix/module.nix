@@ -90,7 +90,15 @@ in
     systemd.user.services.earwig = {
       description = "earwig dictation daemon";
       partOf = [ "graphical-session.target" ];
-      after = [ "graphical-session.target" ];
+      # The daemon probes the portal frontend once at startup with a short
+      # timeout. At login it is still being D-Bus activated (GNOME VM: no
+      # answer within 3 s, so no GlobalShortcuts and no RemoteDesktop), so
+      # start it first. Harmless where no portal is installed.
+      after = [
+        "graphical-session.target"
+        "xdg-desktop-portal.service"
+      ];
+      wants = [ "xdg-desktop-portal.service" ];
       wantedBy = [ "graphical-session.target" ];
       # Restarting picks up a new model or settings after a rebuild.
       restartTriggers = [ configFile ];
