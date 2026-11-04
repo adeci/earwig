@@ -24,7 +24,11 @@ pub fn user_config() -> PathBuf {
 /// precedence first (the spec lists the most important directory first).
 pub fn system_configs() -> Vec<PathBuf> {
     let dirs = env::var("XDG_CONFIG_DIRS").unwrap_or_default();
-    let dirs = if dirs.is_empty() { "/etc/xdg".to_owned() } else { dirs };
+    let dirs = if dirs.is_empty() {
+        "/etc/xdg".to_owned()
+    } else {
+        dirs
+    };
     let mut files: Vec<PathBuf> = dirs
         .split(':')
         .filter(|d| d.starts_with('/'))

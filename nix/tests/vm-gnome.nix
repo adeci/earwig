@@ -111,59 +111,62 @@ let
 
   # A GTK 4 text view that records when text arrives: <out> holds the text,
   # <out>.times "<unix-us> <chars>" per change.
-  targetScript = pkgs.writers.writePython3 "earwig-target" {
-    libraries = [ pkgs.python3Packages.pygobject3 ];
-    flakeIgnore = [ "E501" ];
-  } ''
-    import os
-    import sys
-    import time
+  targetScript =
+    pkgs.writers.writePython3 "earwig-target"
+      {
+        libraries = [ pkgs.python3Packages.pygobject3 ];
+        flakeIgnore = [ "E501" ];
+      }
+      ''
+        import os
+        import sys
+        import time
 
-    import gi
+        import gi
 
-    gi.require_version("Gtk", "4.0")
-    from gi.repository import Gio, GLib, Gtk  # noqa: E402
+        gi.require_version("Gtk", "4.0")
+        from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
-    out = sys.argv[1]
-    times = []
-    dirty = [False]
-
-
-    def changed(buf):
-        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-        times.append((time.time_ns() // 1000, len(text)))
-        dirty[0] = text
+        out = sys.argv[1]
+        times = []
+        dirty = [False]
 
 
-    def flush():
-        if dirty[0] is not False:
-            with open(out + ".tmp", "w") as f:
-                f.write(dirty[0])
-            os.replace(out + ".tmp", out)
-            with open(out + ".times", "w") as f:
-                f.writelines(f"{t} {n}\n" for t, n in times)
-            dirty[0] = False
-        return True
+        def changed(buf):
+            text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+            times.append((time.time_ns() // 1000, len(text)))
+            dirty[0] = text
 
 
-    def activate(app):
-        win = Gtk.ApplicationWindow(application=app, title="earwig-target")
-        win.set_default_size(1000, 520)
-        view = Gtk.TextView()
-        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        view.get_buffer().connect("changed", changed)
-        win.set_child(view)
-        win.present()
-        view.grab_focus()
+        def flush():
+            if dirty[0] is not False:
+                with open(out + ".tmp", "w") as f:
+                    f.write(dirty[0])
+                os.replace(out + ".tmp", out)
+                with open(out + ".times", "w") as f:
+                    f.writelines(f"{t} {n}\n" for t, n in times)
+                dirty[0] = False
+            return True
 
 
-    GLib.timeout_add(100, flush)
-    app = Gtk.Application(
-        application_id="org.earwig.Target", flags=Gio.ApplicationFlags.NON_UNIQUE
-    )
-    app.connect("activate", activate)
-    app.run(None)
-  '';
+        def activate(app):
+            win = Gtk.ApplicationWindow(application=app, title="earwig-target")
+            win.set_default_size(1000, 520)
+            view = Gtk.TextView()
+            view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            view.get_buffer().connect("changed", changed)
+            win.set_child(view)
+            win.present()
+            view.grab_focus()
+
+
+        GLib.timeout_add(100, flush)
+        app = Gtk.Application(
+            application_id="org.earwig.Target", flags=Gio.ApplicationFlags.NON_UNIQUE
+        )
+        app.connect("activate", activate)
+        app.run(None)
+      '';
   target = pkgs.stdenvNoCC.mkDerivation {
     name = "earwig-target";
     dontUnpack = true;

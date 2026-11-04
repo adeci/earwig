@@ -29,7 +29,7 @@ enum Cmd {
     Toggle,
     /// Discard the current recording.
     Cancel,
-    /// Open the settings window.
+    /// Open the settings window, starting the daemon if it is not running.
     Settings,
     /// Print the daemon's status as JSON.
     Status,
@@ -62,12 +62,12 @@ fn main() -> anyhow::Result<()> {
     .init();
     let cli = Cli::parse();
     match cli.command.unwrap_or(Cmd::Daemon { headless: false }) {
-        Cmd::Daemon { headless } => daemon::run(headless),
+        Cmd::Daemon { headless } => daemon::run(headless, false),
         Cmd::Press => daemon::send(&earwig_core::events::Command::Press),
         Cmd::Release => daemon::send(&earwig_core::events::Command::Release),
         Cmd::Toggle => daemon::send(&earwig_core::events::Command::Toggle),
         Cmd::Cancel => daemon::send(&earwig_core::events::Command::Cancel),
-        Cmd::Settings => daemon::send(&earwig_core::events::Command::ShowSettings),
+        Cmd::Settings => daemon::settings(),
         Cmd::Quit => daemon::send(&earwig_core::events::Command::Quit),
         Cmd::Status => daemon::status(),
         Cmd::Events => daemon::events(),

@@ -18,9 +18,7 @@ use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
 use gpui_kit::component::Theme;
-use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode, WindowingModes,
-};
+use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode, WindowingModes};
 
 use overlay::{Outcome, OverlayView};
 
@@ -62,7 +60,7 @@ impl OverlaySurface {
 // `Result` is the entry-point contract the daemon calls; GPUI itself has no
 // fallible startup to report today.
 #[allow(clippy::unnecessary_wraps)]
-pub fn run(handle: Handle, caps: DesktopCaps) -> anyhow::Result<()> {
+pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) -> anyhow::Result<()> {
     let events = handle.subscribe();
     let (local_tx, local_rx) = flume::unbounded();
     let tray = tray::spawn(handle.clone(), local_tx);
@@ -112,6 +110,10 @@ pub fn run(handle: Handle, caps: DesktopCaps) -> anyhow::Result<()> {
                 }
             })
             .detach();
+
+            if open_settings {
+                show_settings(cx);
+            }
         });
     Ok(())
 }

@@ -47,7 +47,10 @@ pub enum Event {
     Level { level: f32 },
     /// Live transcript of the current recording. `committed` only grows within
     /// a recording; `tentative` is the tail that may still be rewritten.
-    Transcript { committed: String, tentative: String },
+    Transcript {
+        committed: String,
+        tentative: String,
+    },
     /// The final text reached the focused application.
     Inserted { text: String, method: InsertMethod },
     /// The final text could not be inserted. It was left on the clipboard when
@@ -95,8 +98,12 @@ pub enum InsertMethod {
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum ModelStatus {
     /// No model configured or the configured one is not on disk.
-    Missing { model: ModelSpec },
-    Loading { model: ModelSpec },
+    Missing {
+        model: ModelSpec,
+    },
+    Loading {
+        model: ModelSpec,
+    },
     Ready {
         model: ModelSpec,
         /// Architecture reported by the engine, e.g. `parakeet-unified`.
@@ -107,7 +114,10 @@ pub enum ModelStatus {
         /// Compute backend in use, e.g. `vulkan` or `cpu`.
         backend: String,
     },
-    Failed { model: ModelSpec, message: String },
+    Failed {
+        model: ModelSpec,
+        message: String,
+    },
 }
 
 /// Everything a fresh UI or `earwig status` needs.

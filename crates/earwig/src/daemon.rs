@@ -23,7 +23,16 @@ use earwig_core::models::{ModelManager, ModelSpec};
 use earwig_core::{SAMPLE_RATE, desktop, hotkey, ipc, paths};
 use earwig_transcribe::TranscribeEngine;
 
-pub fn run(headless: bool) -> anyhow::Result<()> {
+/// Open the settings window of the running daemon, or start the daemon with
+/// it open (desktop entry, first launch without the user service).
+pub fn settings() -> anyhow::Result<()> {
+    if ipc::request(&Command::ShowSettings).is_ok() {
+        return Ok(());
+    }
+    run(false, true)
+}
+
+pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     // Bind first so a second instance stops before touching mic or GPU.
     let server = ipc::Server::bind(&paths::socket())?;
     let socket = server.path().to_owned();
@@ -88,7 +97,7 @@ pub fn run(headless: bool) -> anyhow::Result<()> {
     let result = if headless {
         Ok(())
     } else {
-        crate::ui::run(handle.clone(), caps)
+        crate::ui::run(handle.clone(), caps, open_settings)
     };
     // Headless: wait for a Quit command. Either way, return only once the
     // controller has freed the model; GPU backends crash at process exit

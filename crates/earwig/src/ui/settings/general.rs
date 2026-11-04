@@ -127,7 +127,10 @@ fn device_dropdown(cx: &App) -> SettingField<SharedString> {
     if let Some(device) = config(UiState::handle(cx)).audio.device
         && !options.iter().any(|(id, _)| id.as_ref() == device)
     {
-        options.push((device.clone().into(), format!("{device} (not found)").into()));
+        options.push((
+            device.clone().into(),
+            format!("{device} (not found)").into(),
+        ));
     }
     SettingField::dropdown(
         options,

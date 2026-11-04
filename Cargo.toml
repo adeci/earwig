@@ -15,7 +15,13 @@ earwig-transcribe = { path = "crates/earwig-transcribe" }
 
 anyhow = "1"
 # remote_desktop needs screencast to compile (ashpd 0.13.13).
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts", "remote_desktop", "screencast", "clipboard"] }
+ashpd = { version = "0.13", default-features = false, features = [
+  "async-io",
+  "global_shortcuts",
+  "remote_desktop",
+  "screencast",
+  "clipboard",
+] }
 async-io = "2"
 atspi-proxies = "0.13"
 clap = { version = "4", features = ["derive"] }
@@ -39,7 +45,11 @@ thiserror = "2"
 toml = "1"
 ureq = { version = "3", features = ["json"] }
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+wayland-protocols = { version = "0.32", features = [
+  "client",
+  "staging",
+  "unstable",
+] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 xkbcommon = "0.9"
@@ -47,11 +57,16 @@ xkbcommon = "0.9"
 # GPUI comes from the `gpui-pre` snapshot that gpui-component is pinned to;
 # bump them together.
 gpui-kit = "=0.9.0"
-ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+ksni = { version = "0.3", default-features = false, features = [
+  "async-io",
+  "blocking",
+] }
 
 # Vendored C++ build; Vulkan is compiled in statically (no runtime-loaded
 # backend modules to stage next to the binary).
-transcribe-cpp = { version = "0.4.1", default-features = false, features = ["vulkan"] }
+transcribe-cpp = { version = "0.4.1", default-features = false, features = [
+  "vulkan",
+] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

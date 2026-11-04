@@ -112,7 +112,7 @@ impl ksni::Tray for Tray {
 
 /// The app icon drawn at `size` px (ARGB32, network byte order): a filled
 /// circle with three sound bars, red while dictating. Mirrors
-/// `assets/earwig.svg`.
+/// `assets/io.github.adeci.earwig.svg`.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,

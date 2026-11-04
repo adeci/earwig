@@ -31,8 +31,34 @@ sha256 = "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c"
 size = 751094240
 license = "openmdw-1.1"
 languages = [
-  "en", "es", "fr", "it", "pt", "nl", "de", "tr", "ru", "ar", "hi", "ja", "ko", "vi",
-  "uk", "pl", "sv", "cs", "nb", "da", "bg", "fi", "hr", "sk", "zh", "hu", "ro", "et",
+  "en",
+  "es",
+  "fr",
+  "it",
+  "pt",
+  "nl",
+  "de",
+  "tr",
+  "ru",
+  "ar",
+  "hi",
+  "ja",
+  "ko",
+  "vi",
+  "uk",
+  "pl",
+  "sv",
+  "cs",
+  "nb",
+  "da",
+  "bg",
+  "fi",
+  "hr",
+  "sk",
+  "zh",
+  "hu",
+  "ro",
+  "et",
 ]
 streaming = true
 
@@ -47,8 +73,31 @@ sha256 = "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7"
 size = 739508576
 license = "cc-by-4.0"
 languages = [
-  "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv",
-  "lt", "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk",
+  "bg",
+  "hr",
+  "cs",
+  "da",
+  "nl",
+  "en",
+  "et",
+  "fi",
+  "fr",
+  "de",
+  "el",
+  "hu",
+  "it",
+  "lv",
+  "lt",
+  "mt",
+  "pl",
+  "pt",
+  "ro",
+  "ru",
+  "sk",
+  "sl",
+  "es",
+  "sv",
+  "uk",
 ]
 streaming = false
 
