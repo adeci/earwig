@@ -14,7 +14,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use earwig_core::audio::{self, Source};
 use earwig_core::config::{BackendSetting, ConfigStore};
-use earwig_core::controller::{self, Handle, Parts};
+use earwig_core::controller::{self, Parts};
 use earwig_core::engine::{Backend, EngineFactory, EngineOptions};
 use earwig_core::events::{Command, Event, InsertMethod};
 use earwig_core::history::History;
@@ -86,20 +86,20 @@ pub fn run(headless: bool) -> anyhow::Result<()> {
     log::info!("listening on {}", socket.display());
 
     let result = if headless {
-        wait_for_quit(&handle);
         Ok(())
     } else {
         crate::ui::run(handle.clone(), caps)
     };
-    handle.send(Command::Quit);
+    // Headless: wait for a Quit command. Either way, return only once the
+    // controller has freed the model; GPU backends crash at process exit
+    // while a model is alive.
+    let events = handle.subscribe();
+    if !headless {
+        handle.send(Command::Quit);
+    }
+    while events.recv().is_ok() {}
     let _ = fs::remove_file(&socket);
     result
-}
-
-/// Block until the controller exits (it closes every subscription).
-fn wait_for_quit(handle: &Handle) {
-    let events = handle.subscribe();
-    while events.recv().is_ok() {}
 }
 
 /// Stand-in when no insertion backend works here: every dictation fails to

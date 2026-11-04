@@ -189,13 +189,13 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     let capture = Capture::spawn(source, settings.audio.clone(), audio_tx)?;
     let (engine_tx, engine_jobs) = flume::unbounded();
     let (engine_events_tx, engine_events) = flume::unbounded();
-    thread::Builder::new()
+    let engine_worker = thread::Builder::new()
         .name("earwig-engine".into())
         .spawn(move || engine_thread(engine.as_ref(), &engine_jobs, &engine_events_tx))?;
     let (output_tx, output_jobs) = flume::unbounded();
     let (output_events_tx, output_events) = flume::unbounded();
     let output_shared = shared.clone();
-    thread::Builder::new()
+    let output_worker = thread::Builder::new()
         .name("earwig-output".into())
         .spawn(move || output_thread(inserter, &output_shared, &output_jobs, &output_events_tx))?;
 
@@ -206,6 +206,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         capture: Some(capture),
         engine: engine_tx,
         output: output_tx,
+        workers: vec![engine_worker, output_worker],
         recording: 0,
         started: Instant::now(),
         started_at_ms: 0,
@@ -293,6 +294,39 @@ enum EngineEvent {
     },
 }
 
+/// Load a model for the engine thread, logging how it went.
+fn load_model(
+    factory: &dyn EngineFactory,
+    load_id: u64,
+    path: &std::path::Path,
+    options: &EngineOptions,
+) -> (Option<Box<dyn Model>>, EngineEvent) {
+    let started = Instant::now();
+    match factory.load(path, options) {
+        Ok(model) => {
+            let info = model.info().clone();
+            log::info!(
+                "loaded {} in {} ms ({}, {}, {})",
+                path.display(),
+                started.elapsed().as_millis(),
+                info.architecture,
+                info.backend,
+                if info.streaming {
+                    "streaming"
+                } else {
+                    "re-decoding"
+                },
+            );
+            (Some(model), EngineEvent::Loaded { load_id, info })
+        }
+        Err(e) => {
+            log::error!("loading {}: {e:#}", path.display());
+            let message = format!("{e:#}");
+            (None, EngineEvent::LoadFailed { load_id, message })
+        }
+    }
+}
+
 fn engine_thread(
     factory: &dyn EngineFactory,
     jobs: &flume::Receiver<EngineJob>,
@@ -310,35 +344,10 @@ fn engine_thread(
                 options,
             } => {
                 // Free the old model first; two may not fit in VRAM.
-                model = None;
+                drop(model.take());
                 active = Err("no speech model loaded".into());
-                let started = Instant::now();
-                let event = match factory.load(&path, &options) {
-                    Ok(loaded) => {
-                        let info = loaded.info().clone();
-                        log::info!(
-                            "loaded {} in {} ms ({}, {}, {})",
-                            path.display(),
-                            started.elapsed().as_millis(),
-                            info.architecture,
-                            info.backend,
-                            if info.streaming {
-                                "streaming"
-                            } else {
-                                "re-decoding"
-                            },
-                        );
-                        model = Some(loaded);
-                        EngineEvent::Loaded { load_id, info }
-                    }
-                    Err(e) => {
-                        log::error!("loading {}: {e:#}", path.display());
-                        EngineEvent::LoadFailed {
-                            load_id,
-                            message: format!("{e:#}"),
-                        }
-                    }
-                };
+                let (loaded, event) = load_model(factory, load_id, &path, &options);
+                model = loaded;
                 let _ = events.send(event);
             }
             EngineJob::Begin { id } => {
@@ -488,6 +497,8 @@ struct Controller {
     capture: Option<Capture>,
     engine: flume::Sender<EngineJob>,
     output: flume::Sender<OutputJob>,
+    /// Engine and output threads, joined on quit.
+    workers: Vec<thread::JoinHandle<()>>,
     /// Id of the newest recording.
     recording: u64,
     started: Instant,
@@ -539,8 +550,22 @@ impl Controller {
             }
         }
         log::info!("quitting");
-        self.capture.take();
-        self.shared.bus.close();
+        let Self {
+            shared,
+            capture,
+            engine,
+            output,
+            workers,
+            ..
+        } = self;
+        drop(capture);
+        drop((engine, output));
+        // The model must be freed before the process exits: GPU backends
+        // crash in their static destructors while a model is still alive.
+        for worker in workers {
+            let _ = worker.join();
+        }
+        shared.bus.close();
     }
 
     fn publish(&self, event: &Event) {
