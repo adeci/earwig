@@ -32,8 +32,18 @@
         default = pkgs.callPackage ./nix/devshell.nix { };
       });
 
-      checks = forAllSystems (pkgs: {
-        treefmt = treefmt.${pkgs.stdenv.hostPlatform.system}.config.build.check self;
-      });
+      checks = forAllSystems (
+        pkgs:
+        {
+          treefmt = treefmt.${pkgs.stdenv.hostPlatform.system}.config.build.check self;
+        }
+        # Portal path VM test (GNOME) (the Nix slice owns the final wiring).
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+          vm-gnome = import ./nix/tests/vm-gnome.nix {
+            inherit pkgs;
+            craneLib = crane.mkLib pkgs;
+          };
+        }
+      );
     };
 }

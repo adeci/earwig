@@ -10,6 +10,8 @@
 //! - portal: XDG GlobalShortcuts (GNOME 48+, KDE). `Activated`/`Deactivated`
 //!   map to press/release.
 
+pub mod portal;
+
 use crate::events::Command;
 
 pub trait HotkeySource: Send {
@@ -22,11 +24,18 @@ pub trait HotkeySource: Send {
 }
 
 /// Hotkey sources to start for this session (the socket is always on and not
-/// listed here).
-// GNOME slice: add the GlobalShortcuts portal source.
+/// listed here): the GlobalShortcuts portal when enabled and advertised. A
+/// portal that is advertised but does not work ends quietly within seconds
+/// (see [`portal`]).
 pub fn sources(
-    _config: &crate::config::HotkeyConfig,
-    _caps: &crate::desktop::DesktopCaps,
+    config: &crate::config::HotkeyConfig,
+    caps: &crate::desktop::DesktopCaps,
 ) -> Vec<Box<dyn HotkeySource>> {
-    Vec::new()
+    if config.portal && caps.portal_global_shortcuts {
+        vec![Box::new(portal::PortalShortcuts::new(
+            &config.portal_trigger,
+        ))]
+    } else {
+        Vec::new()
+    }
 }
