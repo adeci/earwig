@@ -38,7 +38,14 @@ pub enum InsertError {
     Failed(#[from] anyhow::Error),
 }
 
-// The chain is built by:
-//
-//   pub fn auto(config: &crate::config::InsertConfig, caps: &crate::desktop::DesktopCaps)
-//       -> anyhow::Result<Box<dyn Inserter>>
+pub mod portal;
+
+/// The inserter for this session: the configured method, or for `auto` every
+/// usable backend best first.
+// Insertion slice: replace the body with the real chain.
+pub fn auto(
+    _config: &crate::config::InsertConfig,
+    _caps: &crate::desktop::DesktopCaps,
+) -> anyhow::Result<Box<dyn Inserter>> {
+    anyhow::bail!("no insertion backend implemented yet")
+}

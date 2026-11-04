@@ -26,9 +26,16 @@ pub struct DesktopCaps {
     pub portal_remote_desktop: bool,
 }
 
-// Implemented by the insertion slice:
-//
-//   pub fn probe() -> DesktopCaps
-//
-// Connects to Wayland once (globals only, no surfaces) and asks the portal
-// frontend over D-Bus which interfaces it offers.
+/// Probe the session once at startup: Wayland globals (no surfaces) and the
+/// portal interfaces on D-Bus.
+// Insertion slice: replace with real Wayland global and portal probing.
+pub fn probe() -> DesktopCaps {
+    DesktopCaps {
+        desktop: std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase(),
+        wayland: std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        x11: std::env::var_os("DISPLAY").is_some(),
+        ..DesktopCaps::default()
+    }
+}

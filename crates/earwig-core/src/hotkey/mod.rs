@@ -21,7 +21,12 @@ pub trait HotkeySource: Send {
     fn run(self: Box<Self>, commands: flume::Sender<Command>) -> anyhow::Result<()>;
 }
 
-// Sources for this session are built by:
-//
-//   pub fn sources(config: &crate::config::HotkeyConfig, caps: &crate::desktop::DesktopCaps)
-//       -> Vec<Box<dyn HotkeySource>>
+/// Hotkey sources to start for this session (the socket is always on and not
+/// listed here).
+// GNOME slice: add the GlobalShortcuts portal source.
+pub fn sources(
+    _config: &crate::config::HotkeyConfig,
+    _caps: &crate::desktop::DesktopCaps,
+) -> Vec<Box<dyn HotkeySource>> {
+    Vec::new()
+}

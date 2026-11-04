@@ -204,12 +204,11 @@ pub enum ModelError {
     Io(#[from] std::io::Error),
 }
 
-// `ModelManager` (catalog, store, search, download) is implemented in the
-// submodules; its public surface is:
+mod manager;
+pub use manager::{ModelManager, parse_catalog};
+
+// Remaining `ModelManager` surface (models slice); all `&self`:
 //
-//   ModelManager::new(store_dir: PathBuf) -> Self      // builtin catalog
-//   fn catalog(&self) -> &[CatalogEntry]
-//   fn default_model(&self) -> &CatalogEntry
 //   fn installed(&self) -> Vec<InstalledModel>
 //   fn resolve(&self, spec: &ModelSpec) -> Result<PathBuf, ModelError>
 //   fn search(&self, query: &str, supports: &dyn Fn(&str) -> bool)
@@ -217,5 +216,3 @@ pub enum ModelError {
 //   fn download(&self, spec: &ModelSpec, progress: &mut dyn FnMut(DownloadProgress),
 //       cancel: &CancelToken) -> Result<PathBuf, ModelError>
 //   fn delete(&self, spec: &ModelSpec) -> Result<(), ModelError>
-//
-// All methods take `&self`; the manager is shared as `Arc<ModelManager>`.
