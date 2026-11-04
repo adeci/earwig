@@ -161,7 +161,9 @@ in
         with machine.nested("focused terminal receives keyboard input"):
             machine.send_chars("probe")
             machine.wait_until_succeeds("grep -q probe /tmp/out", timeout=td(seconds=30))
-            machine.succeed("truncate -s 0 /tmp/out")
+            # --no-create: fs.protected_regular denies root O_CREAT on
+            # alice's file in sticky /tmp.
+            machine.succeed("truncate --no-create -s 0 /tmp/out")
 
 
     def dictate() -> str:
