@@ -104,6 +104,7 @@ in
   # Python helpers; the compositor-specific script comes after this.
   prelude = ''
     import shlex
+    from datetime import timedelta as td
 
     RUNTIME = "/run/user/1000"
 
@@ -124,7 +125,7 @@ in
 
 
     def user_unit_active(unit: str) -> None:
-        machine.wait_until_succeeds(f"systemctl --user -M alice@ is-active {unit}", timeout=120)
+        machine.wait_until_succeeds(f"systemctl --user -M alice@ is-active {unit}", timeout=td(minutes=2))
 
 
     def check_virtual_mic() -> None:
@@ -146,8 +147,13 @@ in
     def start_target_terminal() -> None:
         """A focused foot whose input lands in /tmp/out byte by byte."""
         machine.succeed("rm -f /tmp/out")
-        spawn("foot --app-id earwig-target sh -c 'stty -icanon; exec cat > /tmp/out'")
-        machine.wait_for_file("/tmp/out")
+        # systemd resolves the executable without the session's PATH.
+        spawn("/run/current-system/sw/bin/foot --app-id earwig-target sh -c 'stty -icanon; exec cat > /tmp/out'")
+        try:
+            machine.wait_for_file("/tmp/out", timeout=td(minutes=1))
+        except Exception:
+            print(machine.execute("journalctl _UID=1000 --no-pager | tail -n 40")[1])
+            raise
 
 
     def dictate() -> str:
@@ -157,12 +163,12 @@ in
         machine.succeed(
             f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
         )
-        machine.sleep(2)
+        machine.sleep(td(seconds=2))
         machine.screenshot("overlay_recording")
         overlay_text = machine.get_screen_text()
         print(f"OCR while recording: {overlay_text!r}")
-        machine.wait_until_fails("pgrep -x pw-play", timeout=30)
-        machine.sleep(1)
+        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
+        machine.sleep(td(seconds=1))
         as_alice("earwig release")
         return overlay_text
   '';
@@ -183,7 +189,7 @@ in
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
 
     with machine.nested("EARWIG: transcript inserted into the focused terminal"):
-        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=60)
+        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(minutes=1))
         print(machine.succeed("cat /tmp/out"))
         machine.screenshot("inserted")
   '';

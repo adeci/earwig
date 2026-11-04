@@ -82,6 +82,10 @@ in
       wantedBy = [ "graphical-session.target" ];
       # Restarting picks up a new model or settings after a rebuild.
       restartTriggers = [ configFile ];
+      # A daemon that keeps failing (no model, broken config) gives up
+      # instead of looping for the whole session.
+      startLimitBurst = 5;
+      startLimitIntervalSec = 60;
       serviceConfig = {
         ExecStart = "${lib.getExe cfg.package} daemon";
         Restart = "on-failure";
