@@ -17,6 +17,7 @@ anyhow = "1"
 # remote_desktop needs screencast to compile (ashpd 0.13.13).
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts", "remote_desktop", "screencast", "clipboard"] }
 async-io = "2"
+atspi-proxies = "0.13"
 clap = { version = "4", features = ["derive"] }
 cpal = "0.18"
 dirs = "7"

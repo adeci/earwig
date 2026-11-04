@@ -57,8 +57,16 @@ fn main() {
     };
 
     application().run(move |cx: &mut App| {
-        let display = cx.primary_display().expect("a display");
-        let screen = display.bounds();
+        // GPUI on Wayland may not know the outputs yet; assume the VM's
+        // 1280x800 then (a toplevel cannot pick its position there anyway).
+        let display = cx.primary_display();
+        let screen = display.as_ref().map_or_else(
+            || Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(1280.), px(800.)),
+            },
+            |d| d.bounds(),
+        );
         let overlay = size(px(420.), px(90.));
         let origin = point(
             screen.origin.x + (screen.size.width - overlay.width) / 2.,
@@ -71,7 +79,7 @@ fn main() {
         println!("backend={backend} kind={kind:?} screen={screen:?} requested={bounds:?}");
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            display_id: Some(display.id()),
+            display_id: display.map(|d| d.id()),
             titlebar: None,
             focus: false,
             show: true,

@@ -12,12 +12,14 @@
 //! each answer with a timeout.
 //!
 //! Methods, in default order:
+//! - [`InsertMethod::PortalPaste`]: clipboard set through the portal, then one
+//!   paste chord. Atomic and covers every character; the text stays on the
+//!   clipboard. GNOME exposes no focused app id, so terminals are recognized
+//!   over the accessibility bus ([`focus`]) and get Ctrl+Shift+V.
 //! - [`InsertMethod::PortalType`]: every character as a key press, all in one
-//!   burst. Works in terminals (GNOME exposes no focused app id, so paste
-//!   cannot pick Ctrl+Shift+V) and leaves the clipboard alone. Not applicable
-//!   when a character is missing from the keyboard layout or Caps Lock is on.
-//! - [`InsertMethod::PortalPaste`]: clipboard set through the portal, then
-//!   Ctrl+V. Covers every character; the text stays on the clipboard.
+//!   burst. Used when clipboard access was not granted. Apps redraw per key,
+//!   so long text visibly types out. Not applicable when a character is
+//!   missing from the keyboard layout or Caps Lock is on.
 
 use std::collections::HashMap;
 use std::fs;
@@ -40,8 +42,11 @@ use reis::ei;
 use reis::event::{DeviceCapability, EiEvent};
 use xkbcommon::xkb;
 
+use self::focus::FocusWatch;
 use super::{InsertError, Inserter};
 use crate::events::InsertMethod;
+
+mod focus;
 
 /// The id portals know earwig by. A desktop file with this basename must be
 /// installed: GNOME rejects portal requests from host apps without one.
@@ -49,9 +54,11 @@ pub const APP_ID: &str = "io.github.adeci.earwig";
 
 const TOKEN_FILE: &str = "remote-desktop.token";
 
-/// Typing first: it is as fast as pasting, works in terminals and keeps the
-/// clipboard; paste covers what the layout cannot type.
-const DEFAULT_ORDER: [InsertMethod; 2] = [InsertMethod::PortalType, InsertMethod::PortalPaste];
+/// Paste first. Measured in GNOME 50 (VM, GTK 4 text view, 500 characters):
+/// paste complete in the app after ~45 ms, typing after ~2.5 s, with every
+/// character drawn on its own; a burst into a ~2000 character paragraph made
+/// the GTK client drop its Wayland connection.
+const DEFAULT_ORDER: [InsertMethod; 2] = [InsertMethod::PortalPaste, InsertMethod::PortalType];
 
 /// How long [`PortalInserter`] waits for the portal thread to finish one job.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -225,6 +232,8 @@ struct Worker {
     sequence: u32,
     /// Why the session cannot be used any more.
     dead: Option<String>,
+    /// A terminal has focus (paste with Ctrl+Shift+V).
+    terminal_focused: bool,
 }
 
 enum Input {
@@ -233,6 +242,7 @@ enum Input {
     Ei(Option<Result<EiEvent, reis::Error>>),
     Transfer(Option<u32>),
     Closed(Option<()>),
+    Focus(Option<focus::Focused>),
 }
 
 /// Ask for clipboard access in the RemoteDesktop session. `None` when the
@@ -326,6 +336,7 @@ impl Worker {
             selection: None,
             sequence: 0,
             dead: None,
+            terminal_focused: false,
         };
         let mut events = events;
         future::or(
@@ -390,6 +401,12 @@ impl Worker {
                     None
                 }
             };
+        let mut focus = FocusWatch::connect()
+            .await
+            .inspect_err(|e| {
+                log::info!("no accessibility bus, terminals get Ctrl+V: {e:#}");
+            })
+            .ok();
         loop {
             let input = future::or(
                 async {
@@ -402,7 +419,15 @@ impl Worker {
                     async { Input::Ei(next_or_pending(&mut events).await) },
                     future::or(
                         async { Input::Transfer(next_or_pending(&mut transfers).await) },
-                        async { Input::Closed(next_or_pending(&mut closed).await) },
+                        future::or(
+                            async { Input::Closed(next_or_pending(&mut closed).await) },
+                            async {
+                                match &mut focus {
+                                    Some(focus) => Input::Focus(focus.next().await),
+                                    None => future::pending().await,
+                                }
+                            },
+                        ),
                     ),
                 ),
             )
@@ -440,6 +465,12 @@ impl Worker {
                     }
                     closed = None;
                 }
+                Input::Focus(Some(focused)) => {
+                    if let Some(focus) = &focus {
+                        self.terminal_focused = focus.is_terminal(&focused).await;
+                    }
+                }
+                Input::Focus(None) => focus = None,
             }
         }
     }
@@ -467,9 +498,13 @@ impl Worker {
                 Ok(())
             }
             Job::Paste(text) => {
-                let chord = self.keyboard()?.map.paste().ok_or_else(|| {
-                    InsertError::NotApplicable("the keyboard layout has no Control key".into())
-                })?;
+                let chord = self
+                    .keyboard()?
+                    .map
+                    .paste(self.terminal_focused)
+                    .ok_or_else(|| {
+                        InsertError::NotApplicable("the keyboard layout has no Control key".into())
+                    })?;
                 self.set_selection(portal, text).await?;
                 self.send_keys(&[chord]).await?;
                 Ok(())
@@ -785,14 +820,16 @@ impl CharMap {
         self.chars.get(&c).copied()
     }
 
-    /// Ctrl+V, on the key that types `v` when there is one.
-    fn paste(&self) -> Option<Stroke> {
+    /// Ctrl+V (Ctrl+Shift+V for terminals), on the key that types `v` when
+    /// there is one.
+    fn paste(&self, terminal: bool) -> Option<Stroke> {
         self.control?;
         let key = match self.stroke('v') {
             Some(Stroke { key, mods: 0 }) => key,
             _ => KEY_V,
         };
-        Some(Stroke { key, mods: CONTROL })
+        let mods = if terminal { CONTROL | SHIFT } else { CONTROL };
+        Some(Stroke { key, mods })
     }
 
     /// Press the modifiers, tap the key, release the modifiers.
@@ -888,8 +925,9 @@ mod tests {
         assert_eq!(latin.stroke('ф'), None);
         assert_eq!(cyrillic.stroke('ф'), on(KEY_A, 0));
         // Ctrl+V stays on the V key when the group has no Latin v.
-        assert_eq!(cyrillic.paste(), on(KEY_V, CONTROL));
-        assert_eq!(latin.paste(), on(KEY_V, CONTROL));
+        assert_eq!(cyrillic.paste(false), on(KEY_V, CONTROL));
+        assert_eq!(latin.paste(false), on(KEY_V, CONTROL));
+        assert_eq!(latin.paste(true), on(KEY_V, CONTROL | SHIFT));
     }
 
     #[test]
@@ -916,14 +954,16 @@ mod tests {
             ]
         );
         events.clear();
-        map.key_events(map.paste().expect("de has Control"), &mut events);
+        map.key_events(map.paste(true).expect("de has Control"), &mut events);
         assert_eq!(
             events,
             [
+                (KEY_LEFTSHIFT, true),
                 (KEY_LEFTCTRL, true),
                 (KEY_V, true),
                 (KEY_V, false),
                 (KEY_LEFTCTRL, false),
+                (KEY_LEFTSHIFT, false),
             ]
         );
     }

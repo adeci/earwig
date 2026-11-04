@@ -7,8 +7,14 @@ def wait_until(predicate, what, timeout=60):
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() > deadline:
+            dump()
             raise Exception(f"timed out waiting for {what}")
         time.sleep(0.5)
+
+
+def wait_cmd(cmd, timeout=60):
+    wait_until(lambda: machine.execute(cmd)[0] == 0, cmd, timeout)
+
 
 TOKEN = "/home/alice/.local/state/earwig/remote-desktop.token"
 TARGET = "/tmp/target.txt"
@@ -41,10 +47,7 @@ def focused_title():
 
 
 def wait_focus(title, timeout=60):
-    machine.wait_until_succeeds(
-        f"shell-eval {shlex.quote('global.display.focus_window?.title ?? null')} | grep -qF {shlex.quote(title)}",
-        timeout=timeout,
-    )
+    wait_until(lambda: focused_title() == title, f"focus on {title}", timeout)
 
 
 def activate(title):
@@ -56,14 +59,65 @@ def activate(title):
 
 
 def wait_window(title, timeout=60):
-    machine.wait_until_succeeds(
-        f"shell-eval {shlex.quote(WINDOWS_JS)} | grep -qF {shlex.quote(title)}",
-        timeout=timeout,
+    wait_until(
+        lambda: title in [w["title"] for w in windows()], f"a window {title}", timeout
     )
+
+
+def dump():
+    print(f"windows: {json.dumps(windows())}")
+    print(machine.execute("tail -n 40 /tmp/*.log /tmp/*.err")[1])
+    machine.screenshot("failure")
 
 
 def launch(unit, *cmd):
     machine.succeed("launch " + shlex.join([unit, *cmd]))
+
+
+def user_systemctl(*args):
+    return machine.execute(
+        "runuser -u alice -- env XDG_RUNTIME_DIR=/run/user/1000 "
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+        "systemctl --user " + shlex.join(args)
+    )
+
+
+FIFO = "/tmp/earwig.fifo"
+
+
+def serve(unit):
+    """Start the harness like the daemon: one portal session, many requests."""
+    launch(unit, "portal_check", "serve", FIFO)
+
+
+def wait_ready(unit, timeout=60):
+    wait_cmd(f"grep -q '\"event\":\"ready\"' /tmp/{unit}.log", timeout)
+    ready = [e for e in events(unit) if e["event"] == "ready"][0]
+    print(f"{unit}: {ready}")
+    return ready
+
+
+def results(unit):
+    return [e for e in events(unit) if e["event"] in ("inserted", "insert-failed")]
+
+
+def request(unit, method, text, expect_ok=True):
+    done = len(results(unit))
+    line = json.dumps({"method": method, "text": text})
+    machine.succeed(f"printf '%s\\n' {shlex.quote(line)} > {FIFO}")
+    wait_until(lambda: len(results(unit)) > done, f"{unit} to answer {method}")
+    result = results(unit)[done]
+    print(f"{unit} {method} {len(text)} chars: {result}")
+    if expect_ok:
+        assert result["event"] == "inserted", unit_log(unit)
+    return result
+
+
+def start_target(unit, path):
+    global TARGET
+    TARGET = path
+    launch(unit, "earwig-target", path)
+    wait_focus("earwig-target")
 
 
 def unit_log(unit):
@@ -78,23 +132,12 @@ def events(unit):
     ]
 
 
-def wait_inserted(unit, timeout=60):
-    machine.wait_until_succeeds(
-        f"grep -qE '\"event\":\"(inserted|insert-failed)\"' /tmp/{unit}.log",
-        timeout=timeout,
-    )
-    inserted = [e for e in events(unit) if e["event"] in ("inserted", "insert-failed")][0]
-    print(f"{unit}: {inserted}")
-    assert inserted["event"] == "inserted", unit_log(unit)
-    return inserted
-
-
 def target_text():
     return machine.succeed(f"cat {TARGET} || true")
 
 
 def wait_target_contains(text, timeout=30):
-    machine.wait_until_succeeds(f"grep -qF {shlex.quote(text)} {TARGET}", timeout=timeout)
+    wait_cmd(f"grep -qF {shlex.quote(text)} {TARGET}", timeout)
 
 
 def arrival_us(chars_before, chars_added):
@@ -125,7 +168,8 @@ with subtest("Target text view has focus"):
     wait_focus("earwig-target")
 
 with subtest("First RemoteDesktop session asks once; typing lands in the focused app"):
-    launch("type1", "portal_check", "insert", "type", "Hello from earwig, typed!", "8")
+    machine.succeed(f"mkfifo -m 666 {FIFO}")
+    serve("serve1")
     wait_window("Remote Desktop")
     machine.sleep(2)
     machine.screenshot("01-remote-desktop-dialog")
@@ -133,66 +177,81 @@ with subtest("First RemoteDesktop session asks once; typing lands in the focused
     machine.sleep(1)
     machine.screenshot("02-remote-desktop-dialog-allowed")
     machine.send_key("alt-s")
-    wait_inserted("type1")
+    wait_ready("serve1")
+    wait_focus("earwig-target")
+    assert request("serve1", "type", "Hello from earwig, typed!")["method"] == "portal-type"
     wait_target_contains("Hello from earwig, typed!")
     machine.succeed(f"test -s {TOKEN}")
-    print(unit_log("type1"))
+    user_systemctl("stop", "serve1")
 
 with subtest("The restore token skips the dialog; paste carries any character"):
-    wait_focus("earwig-target")
-    launch("paste1", "portal_check", "insert", "paste", " Pasted: ünïcödé ✓ ", "8")
-    inserted = wait_inserted("paste1", timeout=30)
-    assert inserted["method"] == "portal-paste"
+    serve("serve2")
+    ready = wait_ready("serve2", timeout=20)
     assert "Remote Desktop" not in [w["title"] for w in windows()]
-    wait_target_contains("Pasted: ünïcödé ✓")
+    assert ready["methods"] == ["portal-paste", "portal-type"], ready
+    result = request("serve2", "auto", " Auto: ünïcödé ✓ ")
+    assert result["method"] == "portal-paste"
+    wait_target_contains("Auto: ünïcödé ✓")
+    request("serve2", "copy", "only on the clipboard")
     machine.screenshot("03-typed-and-pasted")
 
-with subtest("auto types what the layout has and pastes the rest"):
-    launch("auto1", "portal_check", "insert", "auto", "plain ascii; ", "2")
-    assert wait_inserted("auto1")["method"] == "portal-type"
-    launch("auto2", "portal_check", "insert", "auto", "café crème ", "8")
-    assert wait_inserted("auto2")["method"] == "portal-paste"
-    wait_target_contains("plain ascii; café crème ")
-
 with subtest("Speed: a long transcript typed vs pasted"):
+    user_systemctl("stop", "target")
+    start_target("target-speed", "/tmp/speed.txt")
     sentence = "The quick brown fox jumps over the lazy dog, then types 42 words! "
     long = (sentence * 8)[:500]
-    machine.succeed(f"printf %s {shlex.quote(long)} > /tmp/long.txt")
     for method in ["type", "paste", "type", "paste"]:
-        unit = f"speed-{method}-{len(target_text())}"
+        # A new paragraph each time: GTK sends the paragraph as surrounding
+        # text with every key.
+        request("serve2", "type", "\n\n")
+        machine.sleep(1)
         before = len(target_text())
-        launch(unit, "portal_check", "insert", method, "@/tmp/long.txt", "8")
-        inserted = wait_inserted(unit)
+        result = request("serve2", method, long)
         wait_until(lambda: len(target_text()) >= before + len(long), "the long text")
         machine.sleep(1)
-        latency = arrival_us(before, len(long)) - inserted["start_unix_us"]
+        latency = arrival_us(before, len(long)) - result["start_unix_us"]
         print(
             f"SPEED {method}: {len(long)} chars, insert() returned after "
-            f"{inserted['insert_us'] / 1000:.1f} ms, text complete in the app after "
+            f"{result['insert_us'] / 1000:.1f} ms, text complete in the app after "
             f"{latency / 1000:.1f} ms"
         )
     assert long in target_text()
 
-with subtest("GNOME Console: typing works, Ctrl+V does not paste"):
+with subtest("Stress: typing into a long paragraph"):
+    # Grow one paragraph by typing and see whether the GTK client keeps up
+    # with the key bursts.
+    for i in range(4):
+        before = len(target_text())
+        request("serve2", "type", long)
+        machine.sleep(5)
+        alive = user_systemctl("is-active", "target-speed")[0] == 0
+        print(f"STRESS burst {i}: paragraph {before} -> {len(target_text())} chars, client alive: {alive}")
+        if not alive:
+            print(machine.execute("tail -n 3 /tmp/target-speed.err")[1])
+            break
+    user_systemctl("stop", "target-speed")
+
+with subtest("GNOME Console: the terminal is recognized and pasted with Ctrl+Shift+V"):
     launch("console", "kgx", "--", "sh", "-c", "cat > /tmp/console.txt")
-    machine.wait_until_succeeds(
-        "shell-eval 'global.display.focus_window?.get_wm_class() ?? null' | grep -q org.gnome.Console",
-        timeout=60,
+    wait_cmd(
+        "shell-eval 'global.display.focus_window?.get_wm_class() ?? null' | grep -q org.gnome.Console"
     )
     machine.sleep(2)
-    launch("console-type", "portal_check", "insert", "type", "typed into console\n", "2")
-    wait_inserted("console-type")
-    machine.wait_until_succeeds("grep -qF 'typed into console' /tmp/console.txt", timeout=30)
-    launch("console-paste", "portal_check", "insert", "paste", "PASTED-INTO-CONSOLE", "4")
-    wait_inserted("console-paste")
-    machine.sleep(2)
-    launch("console-end", "portal_check", "insert", "type", "end\n\n", "2")
-    wait_inserted("console-end")
-    machine.wait_until_succeeds("grep -qF 'end' /tmp/console.txt", timeout=30)
+    request("serve2", "auto", "pasted into the console")
+    request("serve2", "type", "\ntyped into the console\n")
+    wait_cmd("grep -qF 'typed into the console' /tmp/console.txt", 30)
     machine.screenshot("04-console")
     console = machine.succeed("cat -v /tmp/console.txt")
     print(f"console received: {console!r}")
-    assert "PASTED-INTO-CONSOLE" not in console
+    assert "pasted into the console\n" in console
+    machine.succeed("grep -q 'role Ok(Terminal)' /tmp/serve2.err")
+    user_systemctl("stop", "console")
+
+with subtest("Back in a GTK app, paste is Ctrl+V again"):
+    start_target("target", "/tmp/target.txt")
+    machine.sleep(1)
+    request("serve2", "auto", "after the console")
+    wait_target_contains("after the console")
 
 with subtest("GlobalShortcuts: the dictate shortcut reports press and release"):
     activate("earwig-target")
@@ -201,10 +260,10 @@ with subtest("GlobalShortcuts: the dictate shortcut reports press and release"):
     machine.sleep(2)
     machine.screenshot("05-global-shortcuts-dialog")
     machine.send_key("alt-a")
-    machine.wait_until_succeeds("grep -q 'portal shortcut dictate' /tmp/shortcuts.err", timeout=30)
+    wait_cmd("grep -q 'portal shortcut dictate' /tmp/shortcuts.err", 30)
     print(unit_log("shortcuts"))
     machine.send_key("ctrl-alt-e")
-    machine.wait_until_succeeds("grep -q '\"cmd\":\"release\"' /tmp/shortcuts.log", timeout=30)
+    wait_cmd("grep -q '\"cmd\":\"release\"' /tmp/shortcuts.log", 30)
     commands = [e["cmd"] for e in events("shortcuts") if "cmd" in e]
     print(f"shortcut commands: {commands}")
     assert commands == ["press", "release"]
@@ -217,7 +276,7 @@ with subtest("Overlay experiment: X11 popup via XWayland, Wayland toplevel"):
         activate("earwig-target")
         before = target_text()
         launch(name, *env, "gnome_overlay", kind, "30")
-        machine.wait_until_succeeds(f"grep -q opened /tmp/{name}.log", timeout=60)
+        wait_cmd(f"grep -q opened /tmp/{name}.log")
         machine.sleep(3)
         machine.screenshot(f"06-{name}")
         print(f"{name}: {unit_log(name)}")

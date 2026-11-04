@@ -111,7 +111,7 @@ let
 
   # A GTK 4 text view that records when text arrives: <out> holds the text,
   # <out>.times "<unix-us> <chars>" per change.
-  target = pkgs.writers.writePython3Bin "earwig-target" {
+  targetScript = pkgs.writers.writePython3 "earwig-target" {
     libraries = [ pkgs.python3Packages.pygobject3 ];
     flakeIgnore = [ "E501" ];
   } ''
@@ -122,7 +122,7 @@ let
     import gi
 
     gi.require_version("Gtk", "4.0")
-    from gi.repository import GLib, Gtk  # noqa: E402
+    from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
     out = sys.argv[1]
     times = []
@@ -158,10 +158,22 @@ let
 
 
     GLib.timeout_add(100, flush)
-    app = Gtk.Application(application_id="org.earwig.Target")
+    app = Gtk.Application(
+        application_id="org.earwig.Target", flags=Gio.ApplicationFlags.NON_UNIQUE
+    )
     app.connect("activate", activate)
     app.run(None)
   '';
+  target = pkgs.stdenvNoCC.mkDerivation {
+    name = "earwig-target";
+    dontUnpack = true;
+    nativeBuildInputs = [
+      pkgs.wrapGAppsHook4
+      pkgs.gobject-introspection
+    ];
+    buildInputs = [ pkgs.gtk4 ];
+    installPhase = "install -Dm755 ${targetScript} $out/bin/earwig-target";
+  };
 
   # Run a command as alice in her graphical session (systemd user manager).
   launch = pkgs.writeShellScriptBin "launch" ''
