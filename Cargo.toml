@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+members = ["crates/earwig", "crates/earwig-core", "crates/earwig-transcribe"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/adeci/earwig"
+rust-version = "1.92"
+
+[workspace.dependencies]
+earwig-core = { path = "crates/earwig-core" }
+earwig-transcribe = { path = "crates/earwig-transcribe" }
+
+anyhow = "1"
+# remote_desktop needs screencast to compile (ashpd 0.13.13).
+ashpd = { version = "0.13", default-features = false, features = [
+  "async-io",
+  "global_shortcuts",
+  "remote_desktop",
+  "screencast",
+  "clipboard",
+] }
+async-io = "2"
+atspi-proxies = "0.13"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.18"
+ctrlc = "3"
+dirs = "7"
+env_logger = "0.11"
+flume = "0.12"
+futures-lite = "2"
+hex = "0.4"
+hound = "3"
+log = "0.4"
+reis = { version = "0.7", features = ["async-io"] }
+rubato = "5"
+rustix = { version = "1", features = ["event", "fs", "net", "process", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+toml = "1"
+ureq = { version = "3", features = ["json"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = [
+  "client",
+  "staging",
+  "unstable",
+] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+xkbcommon = "0.9"
+
+# GPUI comes from the `gpui-pre` snapshot that gpui-component is pinned to;
+# bump them together.
+gpui-kit = "=0.9.0"
+ksni = { version = "0.3", default-features = false, features = [
+  "async-io",
+  "blocking",
+] }
+
+# Vendored C++ build; Vulkan is compiled in statically (no runtime-loaded
+# backend modules to stage next to the binary).
+transcribe-cpp = { version = "0.4.1", default-features = false, features = [
+  "vulkan",
+] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
