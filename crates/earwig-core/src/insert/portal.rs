@@ -364,6 +364,36 @@ async fn request_clipboard(session: &Session<RemoteDesktop>) -> Option<Clipboard
     Some(clipboard)
 }
 
+/// A RemoteDesktop session with the keyboard selected (restored from `token`
+/// when there is one) and clipboard access requested; not started yet.
+async fn create_session(
+    token: Option<&str>,
+) -> anyhow::Result<(RemoteDesktop, Session<RemoteDesktop>, Option<Clipboard>)> {
+    let remote = RemoteDesktop::new().await?;
+    if remote.version() < 2 {
+        bail!(
+            "RemoteDesktop portal version {} has no ConnectToEIS",
+            remote.version()
+        );
+    }
+    let session = remote
+        .create_session(ashpd::desktop::CreateSessionOptions::default())
+        .await?;
+    remote
+        .select_devices(
+            &session,
+            SelectDevicesOptions::default()
+                .set_devices(ashpd::enumflags2::BitFlags::from(DeviceType::Keyboard))
+                .set_persist_mode(PersistMode::ExplicitlyRevoked)
+                .set_restore_token(token),
+        )
+        .await?
+        .response()?;
+    // Clipboard access has to be requested before `Start`.
+    let clipboard = request_clipboard(&session).await;
+    Ok((remote, session, clipboard))
+}
+
 impl Worker {
     async fn open(
         token_file: &Path,
