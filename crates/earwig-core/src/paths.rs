@@ -49,6 +49,22 @@ pub fn models_dir() -> PathBuf {
     data_dir().join("models")
 }
 
+/// Read-only model stores: `earwig/models` in each `$XDG_DATA_DIRS` entry,
+/// most important first (`/usr/local/share:/usr/share` when unset). Distro
+/// packages and the NixOS module put pinned models here.
+pub fn system_model_dirs() -> Vec<PathBuf> {
+    let dirs = env::var("XDG_DATA_DIRS").unwrap_or_default();
+    let dirs = if dirs.is_empty() {
+        "/usr/local/share:/usr/share".to_owned()
+    } else {
+        dirs
+    };
+    dirs.split(':')
+        .filter(|d| d.starts_with('/'))
+        .map(|d| PathBuf::from(d).join(APP).join("models"))
+        .collect()
+}
+
 pub fn history_file() -> PathBuf {
     data_dir().join("history.jsonl")
 }

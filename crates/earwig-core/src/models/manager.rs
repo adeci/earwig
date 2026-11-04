@@ -33,31 +33,46 @@ pub fn parse_catalog(text: &str) -> anyhow::Result<Vec<CatalogEntry>> {
 }
 
 /// Catalog, local store, search and downloads. Shared as `Arc<ModelManager>`.
+///
+/// Models are looked up in the user's store first, then in read-only system
+/// stores (`earwig/models` under each `$XDG_DATA_DIRS` entry) with the same
+/// `<owner>/<repo>/<commit>/<file>` layout. NixOS installs pinned models
+/// there, so they work offline without locking the model choice.
 #[derive(Debug)]
 pub struct ModelManager {
     store: PathBuf,
+    system: Vec<PathBuf>,
     catalog: Vec<CatalogEntry>,
     hub: Hub,
 }
 
 impl ModelManager {
-    /// Manager over `store` with the catalog built into this release, talking
-    /// to `$EARWIG_HF_ENDPOINT` or `https://huggingface.co`.
+    /// Manager over `store` (plus the system stores) with the catalog built
+    /// into this release, talking to `$EARWIG_HF_ENDPOINT` or
+    /// `https://huggingface.co`.
     pub fn new(store: PathBuf) -> Self {
         let endpoint = std::env::var(ENDPOINT_ENV)
             .ok()
             .filter(|e| !e.is_empty())
             .unwrap_or_else(|| hub::DEFAULT_ENDPOINT.to_owned());
-        Self::with_endpoint(store, &endpoint)
+        Self::with_endpoint(store, &endpoint).with_system_stores(crate::paths::system_model_dirs())
     }
 
     fn with_endpoint(store: PathBuf, endpoint: &str) -> Self {
         let catalog = parse_catalog(BUILTIN_CATALOG).expect("built-in models.toml is valid");
         Self {
             store,
+            system: Vec::new(),
             catalog,
             hub: Hub::new(endpoint),
         }
+    }
+
+    /// Read-only stores searched after the user's, in order.
+    #[must_use]
+    pub fn with_system_stores(mut self, stores: Vec<PathBuf>) -> Self {
+        self.system = stores;
+        self
     }
 
     pub fn store(&self) -> &Path {
@@ -99,33 +114,52 @@ impl ModelManager {
         }
     }
 
-    /// The file for `spec` if it is on disk.
+    /// The file for `spec` if it is on disk: the user's store first, then the
+    /// system stores.
     pub fn resolve(&self, spec: &ModelSpec) -> Result<PathBuf, ModelError> {
         let path = self.path_for(spec)?;
         if path.is_file() {
-            Ok(path)
-        } else {
-            Err(ModelError::NotInstalled(spec.clone()))
+            return Ok(path);
         }
+        if let Ok(rel) = path.strip_prefix(&self.store) {
+            for root in &self.system {
+                let candidate = root.join(rel);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        Err(ModelError::NotInstalled(spec.clone()))
     }
 
-    /// Verified model files in the store, curated ones under their catalog
-    /// id. Local `Path` models are not listed; they live wherever the config
-    /// points.
+    /// Verified model files in the user's store and the system stores,
+    /// curated ones under their catalog id; a model in both is listed once,
+    /// from the user's store. Local `Path` models are not listed; they live
+    /// wherever the config points.
     pub fn installed(&self) -> Vec<InstalledModel> {
-        let mut found = Vec::new();
-        if let Err(e) = walk(&self.store, &mut found) {
-            log::warn!("listing {}: {e}", self.store.display());
+        let mut models: Vec<InstalledModel> = Vec::new();
+        let roots =
+            std::iter::once((&self.store, false)).chain(self.system.iter().map(|r| (r, true)));
+        for (root, system) in roots {
+            let mut found = Vec::new();
+            if let Err(e) = walk(root, &mut found) {
+                log::warn!("listing {}: {e}", root.display());
+            }
+            found.sort();
+            for model in found
+                .into_iter()
+                .filter_map(|path| self.installed_model(root, path, system))
+            {
+                if !models.iter().any(|m| m.spec == model.spec) {
+                    models.push(model);
+                }
+            }
         }
-        found.sort();
-        found
-            .into_iter()
-            .filter_map(|path| self.installed_model(path))
-            .collect()
+        models
     }
 
-    fn installed_model(&self, path: PathBuf) -> Option<InstalledModel> {
-        let rel = path.strip_prefix(&self.store).ok()?.to_str()?;
+    fn installed_model(&self, root: &Path, path: PathBuf, system: bool) -> Option<InstalledModel> {
+        let rel = path.strip_prefix(root).ok()?.to_str()?;
         if !hub::is_gguf(rel) {
             return None;
         }
@@ -153,6 +187,7 @@ impl ModelManager {
             path,
             size,
             catalog_id: curated.map(|m| m.id.clone()),
+            system,
         })
     }
 
@@ -181,17 +216,16 @@ impl ModelManager {
         if let ModelSpec::Path { .. } = spec {
             return Err(ModelError::LocalFile(spec.clone()));
         }
-        let dest = self.path_for(spec)?;
-        if let Ok(meta) = fs::metadata(&dest)
-            && meta.is_file()
-        {
+        if let Ok(found) = self.resolve(spec) {
+            let size = fs::metadata(&found).map_or(0, |m| m.len());
             progress(DownloadProgress {
                 spec: spec.clone(),
-                downloaded: meta.len(),
-                total: meta.len(),
+                downloaded: size,
+                total: size,
             });
-            return Ok(dest);
+            return Ok(found);
         }
+        let dest = self.path_for(spec)?;
         let (repo, revision, file, sha256, size) = match spec {
             ModelSpec::Path { .. } => unreachable!("handled above"),
             ModelSpec::Curated { id } => {
@@ -270,7 +304,11 @@ impl ModelManager {
             }
         }
         if !removed {
-            return Err(ModelError::NotInstalled(spec.clone()));
+            return Err(if self.resolve(spec).is_ok() {
+                ModelError::ReadOnly(spec.clone())
+            } else {
+                ModelError::NotInstalled(spec.clone())
+            });
         }
         // Drop directories left empty, up to the store itself.
         let mut dir = path.parent();
@@ -431,6 +469,53 @@ mod tests {
             manager.delete(&spec),
             Err(ModelError::NotInstalled(_))
         ));
+    }
+
+    #[test]
+    fn system_stores_serve_models_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user");
+        let system = dir.path().join("system");
+        // Nothing listens here: a system model must not need the network.
+        let manager = ModelManager::with_endpoint(user.clone(), "http://127.0.0.1:9")
+            .with_system_stores(vec![dir.path().join("missing"), system.clone()]);
+        let default = manager.default_model().clone();
+        let spec = ModelSpec::Curated {
+            id: default.id.clone(),
+        };
+        let pinned = system
+            .join(&default.repo)
+            .join(&default.revision)
+            .join(&default.file);
+        fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+        fs::write(&pinned, b"pinned").unwrap();
+
+        assert_eq!(manager.resolve(&spec).unwrap(), pinned);
+        let installed = manager.installed();
+        assert_eq!(installed.len(), 1);
+        assert!(installed[0].system);
+        assert_eq!(
+            installed[0].catalog_id.as_deref(),
+            Some(default.id.as_str())
+        );
+        let got = manager
+            .download(&spec, &mut |_| {}, &CancelToken::default())
+            .unwrap();
+        assert_eq!(got, pinned);
+        assert!(matches!(
+            manager.delete(&spec),
+            Err(ModelError::ReadOnly(_))
+        ));
+        assert!(pinned.exists());
+
+        // A user copy shadows the system one and is the one listed.
+        let own = manager.path_for(&spec).unwrap();
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, b"mine").unwrap();
+        assert_eq!(manager.resolve(&spec).unwrap(), own);
+        let installed = manager.installed();
+        assert_eq!(installed.len(), 1);
+        assert!(!installed[0].system);
     }
 
     #[test]

@@ -10,7 +10,14 @@ let
       name = m.file;
       url = "https://huggingface.co/${m.repo}/resolve/${m.revision}/${m.file}";
       inherit (m) sha256;
-      passthru = { inherit (m) id repo revision; };
+      passthru = {
+        inherit (m)
+          id
+          repo
+          revision
+          file
+          ;
+      };
       meta = {
         description = m.name;
         homepage = "https://huggingface.co/${m.repo}";

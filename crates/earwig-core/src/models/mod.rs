@@ -175,6 +175,10 @@ pub struct InstalledModel {
     pub size: u64,
     /// Catalog entry, when the file is a curated model.
     pub catalog_id: Option<String>,
+    /// In a read-only system store (e.g. pinned by the NixOS module): usable,
+    /// not deletable here.
+    #[serde(default)]
+    pub system: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +210,8 @@ pub enum ModelError {
     NotInstalled(ModelSpec),
     #[error("{0} is a local file; earwig only downloads and deletes files in its model store")]
     LocalFile(ModelSpec),
+    #[error("{0} is provided by the system configuration and cannot be deleted here")]
+    ReadOnly(ModelSpec),
     #[error("download cancelled")]
     Cancelled,
     #[error("checksum mismatch for {file}: expected {expected}, got {actual}")]
