@@ -50,12 +50,10 @@ pub fn run(cmd: ModelsCmd) -> anyhow::Result<()> {
     }
 }
 
-/// Stand-in until the engine slice lands; replace with
-/// `earwig_transcribe::TranscribeEngine::new().supports_architecture(arch)`.
+/// Whether the bundled engine loads a GGUF architecture.
 fn engine_supports(arch: &str) -> bool {
-    ["parakeet", "nemotron", "whisper"]
-        .iter()
-        .any(|family| arch.starts_with(family))
+    use earwig_core::engine::EngineFactory as _;
+    earwig_transcribe::TranscribeEngine::new().supports_architecture(arch)
 }
 
 fn configured(manager: &ModelManager) -> anyhow::Result<ModelSpec> {
@@ -214,7 +212,7 @@ fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
     println!("model.model = {spec} in {}", store.paths().user.display());
     if manager.resolve(spec).is_ok() {
         // A running daemon switches now; without one there is nothing to do.
-        if let Err(e) = crate::daemon::send(Command::ReloadConfig) {
+        if let Err(e) = crate::daemon::send(&Command::ReloadConfig) {
             log::debug!("daemon not told to reload: {e}");
         }
     } else if matches!(spec, ModelSpec::Path { .. }) {

@@ -115,14 +115,19 @@ fn audio(cx: &App) -> SettingGroup {
     ])
 }
 
-/// System default plus the configured device. The device list comes from
-/// the audio backend once it is wired in.
+/// System default, every microphone the audio backend lists, and the
+/// configured device even when it is currently unplugged.
 fn device_dropdown(cx: &App) -> SettingField<SharedString> {
     const DEFAULT: &str = "\u{0}default";
     let mut options: Vec<(SharedString, SharedString)> =
         vec![(DEFAULT.into(), "System default".into())];
-    if let Some(device) = config(UiState::handle(cx)).audio.device {
-        options.push((device.clone().into(), device.into()));
+    for device in UiState::input_devices(cx) {
+        options.push((device.clone().into(), device.clone().into()));
+    }
+    if let Some(device) = config(UiState::handle(cx)).audio.device
+        && !options.iter().any(|(id, _)| id.as_ref() == device)
+    {
+        options.push((device.clone().into(), format!("{device} (not found)").into()));
     }
     SettingField::dropdown(
         options,

@@ -54,6 +54,7 @@ pub fn run(handle: Handle, caps: DesktopCaps) -> anyhow::Result<()> {
                 overlay: None,
                 settings: None,
                 close_generation: 0,
+                input_devices: Vec::new(),
             });
 
             cx.spawn(async move |cx| {
@@ -85,6 +86,7 @@ pub(crate) struct UiState {
     settings: Option<AnyWindowHandle>,
     /// Bumped whenever a scheduled overlay close becomes stale.
     close_generation: u64,
+    input_devices: Vec<String>,
 }
 
 impl Global for UiState {}
@@ -100,6 +102,11 @@ impl UiState {
 
     pub(crate) fn status(cx: &App) -> &Status {
         &cx.global::<Self>().status
+    }
+
+    /// Microphones as of the last time settings opened.
+    pub(crate) fn input_devices(cx: &App) -> &[String] {
+        &cx.global::<Self>().input_devices
     }
 }
 
@@ -263,6 +270,7 @@ fn schedule_overlay_close(after: Duration, cx: &mut App) {
 }
 
 fn show_settings(cx: &mut App) {
+    refresh_input_devices(cx);
     if let Some(window) = cx.global::<UiState>().settings
         && window
             .update(cx, |_, window, _| window.activate_window())
@@ -274,4 +282,23 @@ fn show_settings(cx: &mut App) {
         Ok(window) => cx.global_mut::<UiState>().settings = Some(window),
         Err(e) => log::error!("opening settings: {e:#}"),
     }
+}
+
+/// Re-list microphones off the main thread (ALSA enumeration can take a
+/// moment); the settings window re-renders when the list arrives.
+fn refresh_input_devices(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let devices = cx
+            .background_executor()
+            .spawn(async { earwig_core::audio::input_devices() })
+            .await;
+        match devices {
+            Ok(devices) => cx.update(|cx| {
+                cx.global_mut::<UiState>().input_devices = devices;
+                cx.refresh_windows();
+            }),
+            Err(e) => log::warn!("listing microphones: {e:#}"),
+        }
+    })
+    .detach();
 }
