@@ -92,7 +92,7 @@ in
       fonts.packages = [ pkgs.inconsolata ];
       environment.etc."xdg/foot/foot.ini".text = lib.generators.toINI { } {
         main.font = "inconsolata:size=14";
-        colors = {
+        colors-dark = {
           foreground = "000000";
           background = "ffffff";
         };
@@ -148,12 +148,20 @@ in
         """A focused foot whose input lands in /tmp/out byte by byte."""
         machine.succeed("rm -f /tmp/out")
         # systemd resolves the executable without the session's PATH.
-        spawn("/run/current-system/sw/bin/foot --app-id earwig-target sh -c 'stty -icanon; exec cat > /tmp/out'")
+        spawn("/run/current-system/sw/bin/foot --app-id earwig-target sh -c 'stty -icanon; exec cat >> /tmp/out'")
         try:
             machine.wait_for_file("/tmp/out", timeout=td(minutes=1))
         except Exception:
             print(machine.execute("journalctl _UID=1000 --no-pager | tail -n 40")[1])
             raise
+
+
+    def check_typing_reaches_target() -> None:
+        """Keys typed into the focused window land in /tmp/out; then empty it."""
+        with machine.nested("focused terminal receives keyboard input"):
+            machine.send_chars("probe")
+            machine.wait_until_succeeds("grep -q probe /tmp/out", timeout=td(seconds=30))
+            machine.succeed("truncate -s 0 /tmp/out")
 
 
     def dictate() -> str:

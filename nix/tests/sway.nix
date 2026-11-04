@@ -18,11 +18,11 @@ in
         SWAYSOCK = "/tmp/sway-ipc.sock";
         WLR_RENDERER = "pixman";
       };
-      # The stock config plus the binds a user would add; the test drives the
-      # same commands through the CLI.
+      # The binds a user would add (the stock config already uses
+      # Mod4+space); the test drives the same commands through the CLI.
       environment.etc."sway/config.d/earwig.conf".text = ''
-        bindsym --no-repeat Mod4+space exec earwig press
-        bindsym --release Mod4+space exec earwig release
+        bindsym --no-repeat Mod4+backslash exec earwig press
+        bindsym --release Mod4+backslash exec earwig release
         bindsym Mod4+Escape exec earwig cancel
       '';
       programs.bash.loginShellInit = ''
@@ -48,6 +48,7 @@ in
     machine.wait_until_succeeds(
         "su - alice -c 'swaymsg -t get_tree' | jq -e '.. | objects | select(.app_id? == \"earwig-target\" and .focused)'"
     )
+    check_typing_reaches_target()
     machine.screenshot("target_terminal")
 
     ${common.dictation}

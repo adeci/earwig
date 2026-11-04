@@ -76,6 +76,7 @@ in
     machine.wait_until_succeeds(
         f"su - alice -c 'env NIRI_SOCKET={niri_socket} niri msg --json focused-window' | jq -e '.app_id == \"earwig-target\"'"
     )
+    check_typing_reaches_target()
     machine.screenshot("target_terminal")
 
     ${common.dictation}
