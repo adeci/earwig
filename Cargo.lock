@@ -1688,7 +1688,9 @@ dependencies = [
 name = "earwig-transcribe"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "earwig-core",
+ "flume",
  "log",
  "transcribe-cpp",
 ]
