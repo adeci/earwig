@@ -1,0 +1,41 @@
+[package]
+name = "earwig-core"
+description = "earwig's UI-free core: dictation state, audio, models, insertion, IPC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ashpd.workspace = true
+async-io.workspace = true
+atspi-proxies.workspace = true
+cpal.workspace = true
+dirs.workspace = true
+flume.workspace = true
+futures-lite.workspace = true
+hex.workspace = true
+hound.workspace = true
+log.workspace = true
+reis.workspace = true
+rubato.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+ureq.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-misc.workspace = true
+wayland-protocols-wlr.workspace = true
+xkbcommon.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
