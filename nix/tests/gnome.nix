@@ -117,7 +117,7 @@ in
         machine.send_key(TRIGGER.lower().replace("+", "-"))
 
 
-    def dictate(name: str) -> str:
+    def dictate_by_shortcut(name: str) -> str:
         """Tap, play the clip into the virtual mic, wait until the overlay
         shows live text (CPU decoding trails the audio), tap again."""
         tap_shortcut()
@@ -205,7 +205,7 @@ in
         spawn("/run/current-system/sw/bin/gnome-text-editor --standalone /tmp/editor.txt")
         wait_for(lambda: focused_class() == "org.gnome.TextEditor", "the text editor")
         machine.sleep(2)
-        overlay_text = dictate("editor")
+        overlay_text = dictate_by_shortcut("editor")
         overlay = [w for w in windows() if w["override_redirect"] and w["x11"]]
         assert overlay, "no override-redirect overlay window"
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
@@ -226,7 +226,7 @@ in
         )
         wait_for(lambda: focused_class() == "org.gnome.Console", "the console")
         machine.sleep(2)
-        dictate("console")
+        dictate_by_shortcut("console")
         machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/console.txt", timeout=td(minutes=1))
         print(f"console received: {machine.succeed('cat -v /tmp/console.txt')!r}")
         machine.screenshot("console-inserted")
