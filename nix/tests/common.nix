@@ -36,7 +36,7 @@ in
 
       virtualisation = {
         memorySize = 4096;
-        cores = 4;
+        cores = 8;
         # virtio-gpu (no virgl) gives KMS for the compositor; Mesa renders
         # in software (pixman, llvmpipe, lavapipe for GPUI's Vulkan).
         qemu.options = [ "-vga none -device virtio-gpu-pci" ];
@@ -173,12 +173,21 @@ in
         machine.succeed(
             f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
         )
-        machine.sleep(td(seconds=2))
-        machine.screenshot("overlay_recording")
-        overlay_text = machine.get_screen_text()
-        print(f"OCR while recording: {overlay_text!r}")
         machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
-        machine.sleep(td(seconds=1))
+        # The VM decodes on llvmpipe/CPU, so live text trails the audio by a
+        # few seconds; keep the key held until the overlay shows it.
+        overlay_text = ""
+
+        def live_text_shown(_last_try: bool) -> bool:
+            nonlocal overlay_text
+            overlay_text = machine.get_screen_text()
+            return any(w in overlay_text.lower() for w in ("quick", "brown", "fox"))
+
+        try:
+            retry(live_text_shown, timeout=td(seconds=90))
+        finally:
+            print(f"OCR while recording: {overlay_text!r}")
+            machine.screenshot("overlay_recording")
         as_alice("earwig release")
         return overlay_text
   '';
