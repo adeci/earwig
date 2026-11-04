@@ -16,6 +16,7 @@ dirs.workspace = true
 flume.workspace = true
 futures-lite.workspace = true
 hex.workspace = true
+hound.workspace = true
 log.workspace = true
 reis.workspace = true
 rubato.workspace = true
