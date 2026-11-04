@@ -439,45 +439,13 @@ fn model_row(
 ) -> AnyElement {
     let id = |kind: &str| SharedString::from(format!("{kind}-{spec}"));
     let active = same_model(spec, &active_spec(cx), cx);
-    let installed = UiState::handle(cx).models().resolve(spec).is_ok();
+    let models = UiState::handle(cx).models();
+    let resolved = models.resolve(spec).ok();
+    let installed = resolved.is_some();
+    let removable = resolved.is_some_and(|path| path.starts_with(models.store()));
     let locked = model_locked(cx);
     let actions = if let Some(download) = page.downloads.get(spec) {
-        #[allow(clippy::cast_precision_loss)]
-        let percent = if download.total == 0 {
-            0.
-        } else {
-            download.downloaded as f32 * 100. / download.total as f32
-        };
-        h_flex()
-            .gap_2()
-            .w(gpui_kit::px(220.))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .gap_1()
-                    .child(Progress::new(id("progress")).value(percent))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} of {}",
-                                format_size(download.downloaded),
-                                format_size(download.total)
-                            )),
-                    ),
-            )
-            .child(
-                Button::new(id("cancel"))
-                    .label("Cancel")
-                    .small()
-                    .ghost()
-                    .on_click({
-                        let view = view.clone();
-                        let spec = spec.clone();
-                        move |_, _, cx| view.update(cx, |page, _| page.cancel(&spec))
-                    }),
-            )
+        download_progress(spec, download.downloaded, download.total, view, cx)
     } else if installed {
         h_flex()
             .gap_2()
@@ -500,19 +468,23 @@ fn model_row(
                         }),
                 )
             })
-            .child(
-                Button::new(id("delete"))
-                    .icon(IconName::Delete)
-                    .small()
-                    .ghost()
-                    .tooltip("Delete")
-                    .disabled(active || matches!(spec, ModelSpec::Path { .. }))
-                    .on_click({
-                        let view = view.clone();
-                        let spec = spec.clone();
-                        move |_, _, cx| view.update(cx, |page, cx| page.delete(&spec, cx))
-                    }),
-            )
+            // Only files in the user's store can go; pinned system models
+            // and local paths stay.
+            .when(removable, |this| {
+                this.child(
+                    Button::new(id("delete"))
+                        .icon(IconName::Delete)
+                        .small()
+                        .ghost()
+                        .tooltip("Delete")
+                        .disabled(active)
+                        .on_click({
+                            let view = view.clone();
+                            let spec = spec.clone();
+                            move |_, _, cx| view.update(cx, |page, cx| page.delete(&spec, cx))
+                        }),
+                )
+            })
     } else {
         h_flex().gap_2().child(
             Button::new(id("download"))
@@ -534,6 +506,53 @@ fn model_row(
         .child(div().flex_1().child(description))
         .child(actions)
         .into_any_element()
+}
+
+/// Progress bar and Cancel for a running download.
+fn download_progress(
+    spec: &ModelSpec,
+    downloaded: u64,
+    total: u64,
+    view: &Entity<ModelsPage>,
+    cx: &App,
+) -> gpui_kit::Div {
+    let id = |kind: &str| SharedString::from(format!("{kind}-{spec}"));
+    #[allow(clippy::cast_precision_loss)]
+    let percent = if total == 0 {
+        0.
+    } else {
+        downloaded as f32 * 100. / total as f32
+    };
+    h_flex()
+        .gap_2()
+        .w(gpui_kit::px(220.))
+        .child(
+            v_flex()
+                .flex_1()
+                .gap_1()
+                .child(Progress::new(id("progress")).value(percent))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "{} of {}",
+                            format_size(downloaded),
+                            format_size(total)
+                        )),
+                ),
+        )
+        .child(
+            Button::new(id("cancel"))
+                .label("Cancel")
+                .small()
+                .ghost()
+                .on_click({
+                    let view = view.clone();
+                    let spec = spec.clone();
+                    move |_, _, cx| view.update(cx, |page, _| page.cancel(&spec))
+                }),
+        )
 }
 
 fn render_search(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> AnyElement {

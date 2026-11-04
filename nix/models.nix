@@ -1,5 +1,5 @@
 # Every curated model from models.toml as a pinned fixed-output download, so
-# NixOS users can point `services.earwig.model` at the store and run offline.
+# NixOS users can pre-install them (`services.earwig.models`) and run offline.
 # `default` is the catalog default.
 { lib, fetchurl }:
 let
@@ -10,7 +10,14 @@ let
       name = m.file;
       url = "https://huggingface.co/${m.repo}/resolve/${m.revision}/${m.file}";
       inherit (m) sha256;
-      passthru = { inherit (m) id repo revision; };
+      passthru = {
+        inherit (m)
+          id
+          repo
+          revision
+          file
+          ;
+      };
       meta = {
         description = m.name;
         homepage = "https://huggingface.co/${m.repo}";

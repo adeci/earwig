@@ -35,18 +35,23 @@ in
       description = "The earwig package.";
     };
 
-    model = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = self.legacyPackages.${system}.models.default;
-      defaultText = lib.literalExpression "earwig.legacyPackages.\${system}.models.default";
-      example = lib.literalExpression "earwig.legacyPackages.\${system}.models.\"parakeet-unified-en-0.6b\"";
+    models = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ self.legacyPackages.${system}.models.default ];
+      defaultText = lib.literalExpression "[ earwig.legacyPackages.\${system}.models.default ]";
+      example = lib.literalExpression ''
+        let models = earwig.legacyPackages.''${system}.models; in [
+          models.default
+          models."nemotron-3.5-asr-streaming-0.6b"
+        ]
+      '';
       description = ''
-        GGUF model file to use, typically a pinned download from
-        `earwig.legacyPackages.''${system}.models`. The default is the
-        catalog's default model fetched at build time, so dictation works
-        offline right after install. This sets `settings.model.model`, which
-        locks the model in the settings window; set it to `null` to let
-        users pick and download models themselves.
+        Models fetched at build time and installed system-wide (under
+        `share/earwig/models`), from `earwig.legacyPackages.''${system}.models`.
+        earwig finds them like downloaded models, so dictation works offline
+        right after install, and users can still switch models or download
+        others in the settings window. To force one model, set
+        `settings.model.model` (which locks the choice).
       '';
     };
 
@@ -67,9 +72,16 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    services.earwig.settings.model.model = lib.mkIf (cfg.model != null) "${cfg.model}";
-
-    environment.systemPackages = [ cfg.package ];
+    environment.systemPackages = [
+      cfg.package
+      # Same layout as the user's store: <owner>/<repo>/<commit>/<file>.
+      (pkgs.linkFarm "earwig-models" (
+        map (m: {
+          name = "share/earwig/models/${m.repo}/${m.revision}/${m.file}";
+          path = m;
+        }) cfg.models
+      ))
+    ];
 
     environment.etc."xdg/earwig/config.toml" = lib.mkIf (cfg.settings != { }) {
       source = configFile;

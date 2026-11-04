@@ -77,9 +77,10 @@ This installs `earwig` and a systemd user service for the graphical session.
 The default model is fetched at build time, so dictation works offline from
 the first login. Options:
 
-- `services.earwig.model`: GGUF file to use. Defaults to the pinned catalog
-  default; pick another from `earwig.legacyPackages.${system}.models`, or set
-  `null` to manage models in the settings window.
+- `services.earwig.models`: models fetched at build time and installed
+  system-wide (default: the catalog default; more from
+  `earwig.legacyPackages.${system}.models`). They show up as downloaded, and
+  users can still switch or download others in the settings window.
 - `services.earwig.settings`: any [configuration](#configuration) key. Keys
   set here are locked in the settings window.
 
@@ -144,6 +145,11 @@ earwig models use /path/to/model.gguf
 Downloads resume after interruption, are pinned to a commit, and are checked
 against the Hub's SHA-256. Any GGUF that transcribe.cpp supports works:
 name it by catalog id, `hf:owner/repo/file@commit`, or path.
+
+Downloaded models live in `~/.local/share/earwig/models/<owner>/<repo>/<commit>/<file>`.
+earwig also looks in `earwig/models` under every `$XDG_DATA_DIRS` entry
+(read-only), which is where the NixOS module and distro packages put
+pre-installed models.
 
 ## Configuration
 

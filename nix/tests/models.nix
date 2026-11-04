@@ -49,7 +49,7 @@ in
       services.earwig = {
         enable = true;
         # Nothing preinstalled: the test downloads.
-        model = null;
+        models = [ ];
       };
       environment.etc."earwig-test/tiny-asr.sha256".source = "${hub}/meta/tiny-asr.sha256";
       environment.systemPackages = [ pkgs.curl ];
