@@ -1661,7 +1661,6 @@ dependencies = [
  "atspi-proxies",
  "cpal",
  "dirs 7.0.0",
- "env_logger",
  "flume",
  "futures-lite",
  "hex",
