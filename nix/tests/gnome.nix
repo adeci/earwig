@@ -208,14 +208,14 @@ in
         overlay = [w for w in windows() if w["override_redirect"] and w["x11"]]
         assert overlay, "no override-redirect overlay window"
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
+        # CPU decoding in the VM finishes well after the stop tap. Save only
+        # once the daemon reports the insertion: a Ctrl+S from QEMU racing the
+        # Ctrl+V from libei would mix modifier state.
+        wait_for(lambda: "inserted" in daemon_log(), "the insertion", timeout=120)
         assert focused_class() == "org.gnome.TextEditor", focused_class()
-
-        def saved_transcript() -> bool:
-            machine.send_key("ctrl-s")
-            machine.sleep(1)
-            return machine.execute("grep -qi 'brown fox' /tmp/editor.txt")[0] == 0
-
-        wait_for(saved_transcript, "the transcript in the editor")
+        machine.sleep(1)
+        machine.send_key("ctrl-s")
+        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/editor.txt", timeout=td(seconds=30))
         print(f"editor file: {machine.succeed('cat /tmp/editor.txt')!r}")
         machine.screenshot("editor-inserted")
 
