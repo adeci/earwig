@@ -100,7 +100,7 @@ in
         for _ in range(timeout * 2):
             if predicate():
                 return
-            machine.sleep(0.5)
+            machine.sleep(td(milliseconds=500))
         print(json.dumps(windows()))
         print(daemon_log())
         machine.screenshot(f"failed-{what.replace(' ', '_')}")
@@ -118,19 +118,27 @@ in
 
 
     def dictate(name: str) -> str:
-        """Tap, play the clip into the virtual mic, OCR while recording, tap."""
+        """Tap, play the clip into the virtual mic, wait until the overlay
+        shows live text (CPU decoding trails the audio), tap again."""
         tap_shortcut()
         wait_for(lambda: '"recording"' in as_alice("earwig status"), "recording")
         machine.succeed(
             f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
         )
-        machine.sleep(3)
-        machine.screenshot(f"{name}-recording")
-        text = machine.get_screen_text()
-        print(f"OCR while recording ({name}): {text!r}")
-        print(f"windows while recording ({name}): {json.dumps(windows())}")
         machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
-        machine.sleep(1)
+        text = ""
+
+        def live_text_shown(_last_try: bool) -> bool:
+            nonlocal text
+            text = machine.get_screen_text()
+            return any(w in text.lower() for w in ("quick", "brown", "fox"))
+
+        try:
+            retry(live_text_shown, timeout=td(seconds=90))
+        finally:
+            print(f"OCR while recording ({name}): {text!r}")
+            print(f"windows while recording ({name}): {json.dumps(windows())}")
+            machine.screenshot(f"{name}-recording")
         tap_shortcut()
         return text
 
