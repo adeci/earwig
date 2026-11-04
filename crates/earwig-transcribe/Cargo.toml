@@ -1,0 +1,16 @@
+[package]
+name = "earwig-transcribe"
+description = "earwig speech engine backed by transcribe.cpp (GGUF, Vulkan/CPU)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+earwig-core.workspace = true
+log.workspace = true
+transcribe-cpp.workspace = true
+
+[lints]
+workspace = true

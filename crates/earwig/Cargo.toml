@@ -1,0 +1,23 @@
+[package]
+name = "earwig"
+description = "Local, instant dictation for Linux desktops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+earwig-core.workspace = true
+earwig-transcribe.workspace = true
+env_logger.workspace = true
+flume.workspace = true
+gpui-kit.workspace = true
+ksni.workspace = true
+log.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
