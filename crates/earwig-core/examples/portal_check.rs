@@ -38,6 +38,9 @@ fn main() -> anyhow::Result<()> {
             };
             let text = load(text)?;
             let mut inserter = connect()?;
+            let start_unix_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_micros();
             let start = Instant::now();
             let used = match method {
                 Some(method) => inserter.insert_with(method, &text).map(|()| method),
@@ -46,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             let elapsed = start.elapsed();
             match used {
                 Ok(method) => println!(
-                    "{{\"event\":\"inserted\",\"method\":{},\"chars\":{},\"insert_us\":{}}}",
+                    "{{\"event\":\"inserted\",\"method\":{},\"chars\":{},\"start_unix_us\":{start_unix_us},\"insert_us\":{}}}",
                     serde_json::to_string(&method)?,
                     text.chars().count(),
                     elapsed.as_micros()
