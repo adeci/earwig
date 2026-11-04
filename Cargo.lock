@@ -1647,6 +1647,7 @@ dependencies = [
  "gpui-kit",
  "ksni",
  "log",
+ "serde",
  "serde_json",
 ]
 

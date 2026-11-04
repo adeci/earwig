@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=earwig
+GenericName=Dictation
+Comment=Local, instant dictation
+Exec=earwig daemon
+Icon=earwig
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;speech;voice;transcribe;
+StartupNotify=false
