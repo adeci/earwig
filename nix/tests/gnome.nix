@@ -54,8 +54,6 @@ in
 
       services.earwig.settings = {
         hotkey.portal_trigger = trigger;
-        # Show the overlay long enough for a screenshot.
-        hotkey.mode = "toggle";
       };
       systemd.user.services.earwig.environment.RUST_LOG = "info,earwig_core=debug";
     };
@@ -113,7 +111,8 @@ in
 
     def tap_shortcut() -> None:
         # QEMU presses and releases the chord: Activated then Deactivated,
-        # a tap (toggle mode: start, then stop on the next tap).
+        # a tap under 300 ms, which latches recording in the default
+        # hold-or-toggle mode; the next tap stops it.
         machine.send_key(TRIGGER.lower().replace("+", "-"))
 
 
