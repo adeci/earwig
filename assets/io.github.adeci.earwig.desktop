@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=earwig
+GenericName=Dictation
+Comment=Local, instant dictation: hold a key, speak, and the text lands where you type
+Exec=earwig settings
+Icon=io.github.adeci.earwig
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;speech;voice;transcribe;whisper;parakeet;
+StartupNotify=false
