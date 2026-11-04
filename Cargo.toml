@@ -19,6 +19,7 @@ ashpd = { version = "0.13", default-features = false, features = ["async-io", "g
 async-io = "2"
 clap = { version = "4", features = ["derive"] }
 cpal = "0.18"
+ctrlc = "3"
 dirs = "7"
 env_logger = "0.11"
 flume = "0.12"
