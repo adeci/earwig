@@ -9,9 +9,9 @@
 { self }:
 let
   common = import ./common.nix { inherit self; };
-  # Free in GNOME's default keybindings (LOGO+space, earwig's default, is
-  # GNOME's switch-input-source).
-  trigger = "CTRL+ALT+e";
+  # earwig's default GlobalShortcuts trigger, LOGO+ALT+space; QEMU's names
+  # for the same chord.
+  key = "meta_l-alt-spc";
 in
 {
   name = "earwig-gnome";
@@ -52,9 +52,8 @@ in
         }
       ];
 
-      services.earwig.settings = {
-        hotkey.portal_trigger = trigger;
-      };
+      # No portal_trigger here: the test binds earwig's default, which must
+      # not collide with GNOME's own shortcuts.
       systemd.user.services.earwig.environment.RUST_LOG = "info,earwig_core=debug";
     };
 
@@ -62,7 +61,7 @@ in
     ${common.prelude}
     import json
 
-    TRIGGER = "${trigger}"
+    KEY = "${key}"
 
 
     def shell_js(js: str):
@@ -113,7 +112,7 @@ in
         # QEMU presses and releases the chord: Activated then Deactivated,
         # a tap under 300 ms, which latches recording in the default
         # hold-or-toggle mode; the next tap stops it.
-        machine.send_key(TRIGGER.lower().replace("+", "-"))
+        machine.send_key(KEY)
 
 
     def dictate_by_shortcut(name: str) -> str:

@@ -63,7 +63,9 @@ impl Default for HotkeyConfig {
             mode: ActivationMode::HoldOrToggle,
             hold_threshold_ms: 300,
             portal: true,
-            portal_trigger: "LOGO+space".into(),
+            // Super+Space is GNOME's input-source switch; Super+Alt+Space is
+            // free on GNOME and KDE (both checked in the VM tests).
+            portal_trigger: "LOGO+ALT+space".into(),
         }
     }
 }

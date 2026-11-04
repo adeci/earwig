@@ -96,9 +96,9 @@ def accept_dialog(title: str, shot: str) -> None:
 
 
 def tap() -> None:
-    """Tap the dictation shortcut (bound through the portal) on the VM's
-    keyboard: KWin sees a real Meta+Space press and release."""
-    machine.send_key("meta_l-spc")
+    """Tap the dictation shortcut (earwig's default LOGO+ALT+space, bound
+    through the portal): KWin sees a real Meta+Alt+Space press and release."""
+    machine.send_key("meta_l-alt-spc")
 
 
 latencies = []
@@ -165,9 +165,9 @@ with subtest("EARWIG: RemoteDesktop asks once; accepted, a restore token is save
     accept_dialog("Remote Control Requested", "01-remote-desktop-dialog")
     machine.wait_for_file(TOKEN, timeout=td(seconds=30))
 
-with subtest("EARWIG: GlobalShortcuts asks to bind Meta+Space; accepted"):
+with subtest("EARWIG: GlobalShortcuts asks to bind the default shortcut; accepted"):
     accept_dialog("Global Shortcuts Requested", "02-global-shortcuts-dialog")
-    print(wait_log(r"portal shortcut dictate: Meta\+Space", timeout=30))
+    print(wait_log(r"portal shortcut dictate: .*Space", timeout=30))
 
 with subtest("EARWIG: status shows the portal paths"):
     st = status()
@@ -207,7 +207,7 @@ with subtest("EARWIG: after a restart the restore token skips the dialog"):
     user("systemctl --user restart earwig.service")
     user_unit_active("earwig.service")
     print(wait_log(r"insertion methods: \[PortalPaste, PortalType\]", timeout=60, since=since))
-    print(wait_log(r"portal shortcut dictate: Meta\+Space", timeout=60, since=since))
+    print(wait_log(r"portal shortcut dictate: .*Space", timeout=60, since=since))
     machine.sleep(10)
     assert not dialogs("Requested"), f"a consent dialog after restart: {windows()}"
     machine.screenshot("07-after-restart")

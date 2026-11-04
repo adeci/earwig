@@ -57,7 +57,7 @@ the text is put on the clipboard and kept in history.
 With the RemoteDesktop portal, earwig recognizes a focused terminal by its
 accessibility role. Qt apps such as Konsole report it only with
 `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` in the session environment; the NixOS
-module sets it, elsewhere set it yourself or Konsole gets Ctrl+V.
+module sets it on Plasma, elsewhere set it yourself or Konsole gets Ctrl+V.
 
 ## Install
 
@@ -181,7 +181,7 @@ are optional:
 mode = "hold-or-toggle"     # or "hold", "toggle"
 hold_threshold_ms = 300
 portal = true               # use the GlobalShortcuts portal when offered
-portal_trigger = "LOGO+space"
+portal_trigger = "LOGO+ALT+space"
 
 [audio]
 device = "default"          # see `earwig devices`
