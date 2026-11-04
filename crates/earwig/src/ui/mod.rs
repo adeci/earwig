@@ -18,7 +18,9 @@ use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
 use gpui_kit::component::Theme;
-use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode};
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode, WindowingModes,
+};
 
 use overlay::{Outcome, OverlayView};
 
@@ -32,6 +34,30 @@ enum Local {
     ShowSettings,
 }
 
+/// How the overlay can float above other windows without taking focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverlaySurface {
+    /// `zwlr_layer_shell_v1` (niri, sway, Hyprland, KDE, COSMIC).
+    LayerShell,
+    /// Override-redirect X11 window, through XWayland on GNOME.
+    X11Popup,
+    /// Nothing suitable; showing a normal window would steal focus from the
+    /// app the text is meant for, so no overlay.
+    None,
+}
+
+impl OverlaySurface {
+    fn for_desktop(caps: &DesktopCaps) -> Self {
+        if caps.layer_shell {
+            Self::LayerShell
+        } else if caps.x11 {
+            Self::X11Popup
+        } else {
+            Self::None
+        }
+    }
+}
+
 /// Run the GPUI application on the main thread until the daemon quits.
 // `Result` is the entry-point contract the daemon calls; GPUI itself has no
 // fallible startup to report today.
@@ -40,16 +66,30 @@ pub fn run(handle: Handle, caps: DesktopCaps) -> anyhow::Result<()> {
     let events = handle.subscribe();
     let (local_tx, local_rx) = flume::unbounded();
     let tray = tray::spawn(handle.clone(), local_tx);
+    let surface = OverlaySurface::for_desktop(&caps);
+    let app = if surface == OverlaySurface::X11Popup && caps.wayland {
+        // No layer-shell (GNOME): run on XWayland, where an override-redirect
+        // popup floats above other windows without taking focus. A Wayland
+        // toplevel would be centred by the compositor and steal focus.
+        gpui_kit::platform::linux(WindowingModes::X11)
+    } else {
+        gpui_kit::application()
+    };
 
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+    app.with_assets(gpui_kit::assets::Assets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            if surface == OverlaySurface::None {
+                log::warn!(
+                    "this desktop offers neither layer-shell nor X11; the overlay stays hidden"
+                );
+            }
             cx.set_global(UiState {
                 status: handle.status(),
                 handle,
                 caps,
+                surface,
                 tray,
                 overlay: None,
                 settings: None,
@@ -80,6 +120,7 @@ pub fn run(handle: Handle, caps: DesktopCaps) -> anyhow::Result<()> {
 pub(crate) struct UiState {
     handle: Handle,
     caps: DesktopCaps,
+    surface: OverlaySurface,
     status: Status,
     tray: Option<tray::TrayHandle>,
     overlay: Option<(AnyWindowHandle, Entity<OverlayView>)>,
@@ -218,7 +259,7 @@ fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
 fn open_overlay(cx: &mut App) {
     let state = cx.global::<UiState>();
     let overlay_config = config(&state.handle).overlay;
-    if !overlay_config.enabled {
+    if !overlay_config.enabled || state.surface == OverlaySurface::None {
         return;
     }
     let options = overlay::overlay_window_options(
