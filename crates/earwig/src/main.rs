@@ -42,9 +42,15 @@ enum Cmd {
         #[command(subcommand)]
         command: cli_models::ModelsCmd,
     },
-    /// Transcribe a 16 kHz-or-any-rate WAV file with the configured model and
-    /// print the text.
-    Transcribe { wav: std::path::PathBuf },
+    /// Transcribe WAV files (any rate) with the configured model and print
+    /// the text; timings go to stderr.
+    Transcribe {
+        #[arg(required = true)]
+        wav: Vec<std::path::PathBuf>,
+        /// Override the configured compute backend.
+        #[arg(long, value_parser = ["auto", "cpu", "gpu"])]
+        backend: Option<String>,
+    },
     /// List audio input devices.
     Devices,
 }
@@ -54,16 +60,16 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Cmd::Daemon { headless: false }) {
         Cmd::Daemon { headless } => daemon::run(headless),
-        Cmd::Press => daemon::send(earwig_core::events::Command::Press),
-        Cmd::Release => daemon::send(earwig_core::events::Command::Release),
-        Cmd::Toggle => daemon::send(earwig_core::events::Command::Toggle),
-        Cmd::Cancel => daemon::send(earwig_core::events::Command::Cancel),
-        Cmd::Settings => daemon::send(earwig_core::events::Command::ShowSettings),
-        Cmd::Quit => daemon::send(earwig_core::events::Command::Quit),
+        Cmd::Press => daemon::send(&earwig_core::events::Command::Press),
+        Cmd::Release => daemon::send(&earwig_core::events::Command::Release),
+        Cmd::Toggle => daemon::send(&earwig_core::events::Command::Toggle),
+        Cmd::Cancel => daemon::send(&earwig_core::events::Command::Cancel),
+        Cmd::Settings => daemon::send(&earwig_core::events::Command::ShowSettings),
+        Cmd::Quit => daemon::send(&earwig_core::events::Command::Quit),
         Cmd::Status => daemon::status(),
         Cmd::Events => daemon::events(),
         Cmd::Models { command } => cli_models::run(command),
-        Cmd::Transcribe { wav } => daemon::transcribe_file(&wav),
+        Cmd::Transcribe { wav, backend } => daemon::transcribe_files(&wav, backend.as_deref()),
         Cmd::Devices => daemon::devices(),
     }
 }
