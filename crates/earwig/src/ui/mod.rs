@@ -33,6 +33,9 @@ enum Local {
 }
 
 /// Run the GPUI application on the main thread until the daemon quits.
+// `Result` is the entry-point contract the daemon calls; GPUI itself has no
+// fallible startup to report today.
+#[allow(clippy::unnecessary_wraps)]
 pub fn run(handle: Handle, caps: DesktopCaps) -> anyhow::Result<()> {
     let events = handle.subscribe();
     let (local_tx, local_rx) = flume::unbounded();

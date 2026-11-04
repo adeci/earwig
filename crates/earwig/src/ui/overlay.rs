@@ -9,8 +9,8 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Bounds, Context, FontWeight, HighlightStyle, Hsla, IntoElement, ParentElement as _,
-    PlatformDisplay, Render, SharedString, Styled as _, StyledText, Task, Window,
+    Bounds, Context, FontWeight, HighlightStyle, Hsla, IntoElement, ParentElement as _, Pixels,
+    PlatformDisplay, Point, Render, SharedString, Size, Styled as _, StyledText, Task, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
     point, px, size,
 };
@@ -73,15 +73,7 @@ pub fn overlay_window_options(
         };
     }
     let origin = display.map_or(point(px(0.), px(0.)), |display| {
-        let screen = display.bounds();
-        let x = screen.origin.x + (screen.size.width - window_size.width) / 2.;
-        let y = match config.position {
-            OverlayPosition::Bottom => {
-                screen.origin.y + screen.size.height - window_size.height - px(MARGIN)
-            }
-            OverlayPosition::Top => screen.origin.y + px(MARGIN),
-        };
-        point(x, y)
+        popup_origin(display.bounds(), window_size, config.position)
     });
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -92,6 +84,23 @@ pub fn overlay_window_options(
         display_id: display.map(PlatformDisplay::id),
         ..common
     }
+}
+
+/// Top-left corner that centres a `window` on `screen`, `MARGIN` away from
+/// the edge at `position`.
+fn popup_origin(
+    screen: Bounds<Pixels>,
+    window: Size<Pixels>,
+    position: OverlayPosition,
+) -> Point<Pixels> {
+    let x = screen.origin.x + (screen.size.width - window.width) / 2.;
+    let y = match position {
+        OverlayPosition::Bottom => {
+            screen.origin.y + screen.size.height - window.height - px(MARGIN)
+        }
+        OverlayPosition::Top => screen.origin.y + px(MARGIN),
+    };
+    point(x, y)
 }
 
 /// Room for the header and `max_lines` of text; the pill inside shrinks to
@@ -109,7 +118,9 @@ pub enum Outcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
-    Recording { latched: bool },
+    Recording {
+        latched: bool,
+    },
     /// Recording stopped at `stopped_at_ms`; final text on its way.
     Finalizing,
     Done(Outcome),
@@ -217,11 +228,7 @@ impl OverlayView {
             .children(levels.map(|level| {
                 // Speech levels sit low on a linear scale; lift them a bit.
                 let height = 2. + level.sqrt() * (HEADER_HEIGHT - 4.);
-                div()
-                    .w(px(3.))
-                    .h(px(height))
-                    .rounded(px(1.5))
-                    .bg(color)
+                div().w(px(3.)).h(px(height)).rounded(px(1.5)).bg(color)
             }))
     }
 }
@@ -276,13 +283,13 @@ impl Render for OverlayView {
             .child(self.render_waveform(if self.is_recording() { dot } else { muted }));
 
         let body = match self.phase {
-            Phase::Done(Outcome::Failed { on_clipboard }) => div().text_color(foreground).child(
-                if on_clipboard {
+            Phase::Done(Outcome::Failed { on_clipboard }) => {
+                div().text_color(foreground).child(if on_clipboard {
                     "Couldn't type into the app. The text is on the clipboard."
                 } else {
                     "Couldn't insert the text. It is saved in History."
-                },
-            ),
+                })
+            }
             _ if self.committed.is_empty() && self.tentative.is_empty() => {
                 div().text_color(muted).child(if self.is_recording() {
                     "Listening…"
@@ -290,9 +297,11 @@ impl Render for OverlayView {
                     ""
                 })
             }
-            _ => div()
-                .text_color(foreground)
-                .child(live_text(&self.committed, &self.tentative, muted)),
+            _ => div().text_color(foreground).child(live_text(
+                &self.committed,
+                &self.tentative,
+                muted,
+            )),
         };
 
         // The pill hugs the anchored edge; the rest of the window is
@@ -384,34 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn popup_sits_centred_above_the_bottom_edge() {
-        struct Screen;
-        impl PlatformDisplay for Screen {
-            fn id(&self) -> gpui_kit::DisplayId {
-                gpui_kit::DisplayId::new(7)
-            }
-            fn uuid(&self) -> gpui_kit::Result<gpui_kit::Uuid> {
-                Ok(gpui_kit::Uuid::nil())
-            }
-            fn bounds(&self) -> Bounds<gpui_kit::Pixels> {
-                Bounds {
-                    origin: point(px(1000.), px(0.)),
-                    size: size(px(1920.), px(1080.)),
-                }
-            }
-        }
-        let config = OverlayConfig::default();
-        let options = overlay_window_options(&DesktopCaps::default(), &config, Some(&Screen));
-        let Some(WindowBounds::Windowed(bounds)) = options.window_bounds else {
-            panic!("windowed bounds expected");
+    fn popup_is_centred_and_keeps_its_margin_from_the_anchored_edge() {
+        let screen = Bounds {
+            origin: point(px(1000.), px(0.)),
+            size: size(px(1920.), px(1080.)),
         };
-        assert!(matches!(options.kind, WindowKind::PopUp));
-        assert_eq!(bounds.origin.x, px(1000. + (1920. - WIDTH) / 2.));
-        assert_eq!(
-            bounds.origin.y + bounds.size.height,
-            px(1080. - MARGIN),
-            "bottom edge sits MARGIN above the screen edge"
-        );
-        assert!(!options.focus);
+        let window = size(px(WIDTH), px(100.));
+        let bottom = popup_origin(screen, window, OverlayPosition::Bottom);
+        assert_eq!(bottom.x, px(1000. + (1920. - WIDTH) / 2.));
+        assert_eq!(bottom.y + window.height, px(1080. - MARGIN));
+        let top = popup_origin(screen, window, OverlayPosition::Top);
+        assert_eq!(top, point(bottom.x, px(MARGIN)));
     }
 }

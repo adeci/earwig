@@ -18,7 +18,7 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -96,10 +96,6 @@ impl ModelsPage {
         self.installed = UiState::handle(cx).models().installed();
     }
 
-    fn is_installed(&self, spec: &ModelSpec, cx: &App) -> bool {
-        UiState::handle(cx).models().resolve(spec).is_ok()
-    }
-
     fn download(&mut self, spec: ModelSpec, cx: &mut Context<Self>) {
         if self.downloads.contains_key(&spec) {
             return;
@@ -135,7 +131,10 @@ impl ModelsPage {
             .expect("spawning a thread");
         cx.spawn(async move |this, cx| {
             while let Ok(msg) = rx.recv_async().await {
-                if this.update(cx, |this, cx| this.on_download(msg, cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| this.on_download(msg, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -262,9 +261,12 @@ pub fn page(view: &Entity<ModelsPage>) -> SettingPage {
 
 fn active_spec(cx: &App) -> ModelSpec {
     let handle = UiState::handle(cx);
-    config(handle).model.model.unwrap_or_else(|| ModelSpec::Curated {
-        id: handle.models().default_model().id.clone(),
-    })
+    config(handle)
+        .model
+        .model
+        .unwrap_or_else(|| ModelSpec::Curated {
+            id: handle.models().default_model().id.clone(),
+        })
 }
 
 /// Whether two specs name the same file (a catalog id and its `hf:` form).
@@ -300,7 +302,9 @@ fn render_active(page: &ModelsPage, _: &Entity<ModelsPage>, cx: &App) -> AnyElem
             "Not downloaded yet. Download it below.".to_owned(),
             theme.warning,
         ),
-        ModelStatus::Loading { model } => (model.clone(), "Loading…".to_owned(), theme.muted_foreground),
+        ModelStatus::Loading { model } => {
+            (model.clone(), "Loading…".to_owned(), theme.muted_foreground)
+        }
         ModelStatus::Ready {
             model,
             architecture,
@@ -318,9 +322,11 @@ fn render_active(page: &ModelsPage, _: &Entity<ModelsPage>, cx: &App) -> AnyElem
             ),
             theme.success,
         ),
-        ModelStatus::Failed { model, message } => {
-            (model.clone(), format!("Failed to load: {message}"), theme.danger)
-        }
+        ModelStatus::Failed { model, message } => (
+            model.clone(),
+            format!("Failed to load: {message}"),
+            theme.danger,
+        ),
     };
     v_flex()
         .w_full()
@@ -431,9 +437,9 @@ fn model_row(
     description: impl IntoElement,
     cx: &App,
 ) -> AnyElement {
-    let id = SharedString::from(spec.to_string());
+    let id = |kind: &str| SharedString::from(format!("{kind}-{spec}"));
     let active = same_model(spec, &active_spec(cx), cx);
-    let installed = page.is_installed(spec, cx);
+    let installed = UiState::handle(cx).models().resolve(spec).is_ok();
     let locked = model_locked(cx);
     let actions = if let Some(download) = page.downloads.get(spec) {
         #[allow(clippy::cast_precision_loss)]
@@ -449,17 +455,20 @@ fn model_row(
                 v_flex()
                     .flex_1()
                     .gap_1()
-                    .child(Progress::new(("progress", id.clone())).value(percent))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(
-                        format!(
-                            "{} of {}",
-                            format_size(download.downloaded),
-                            format_size(download.total)
-                        ),
-                    )),
+                    .child(Progress::new(id("progress")).value(percent))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} of {}",
+                                format_size(download.downloaded),
+                                format_size(download.total)
+                            )),
+                    ),
             )
             .child(
-                Button::new(("cancel", id.clone()))
+                Button::new(id("cancel"))
                     .label("Cancel")
                     .small()
                     .ghost()
@@ -472,10 +481,12 @@ fn model_row(
     } else if installed {
         h_flex()
             .gap_2()
-            .when(active, |this| this.child(Tag::success().small().child("in use")))
+            .when(active, |this| {
+                this.child(Tag::success().small().child("in use"))
+            })
             .when(!active, |this| {
                 this.child(
-                    Button::new(("use", id.clone()))
+                    Button::new(id("use"))
                         .label("Use")
                         .small()
                         .primary()
@@ -490,7 +501,7 @@ fn model_row(
                 )
             })
             .child(
-                Button::new(("delete", id.clone()))
+                Button::new(id("delete"))
                     .icon(IconName::Delete)
                     .small()
                     .ghost()
@@ -504,7 +515,7 @@ fn model_row(
             )
     } else {
         h_flex().gap_2().child(
-            Button::new(("download", id.clone()))
+            Button::new(id("download"))
                 .label("Download")
                 .small()
                 .outline()
@@ -564,7 +575,10 @@ fn render_search(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> AnyE
                             file: file.file.clone(),
                             revision: file.revision.clone(),
                         };
-                        let arch = file.architecture.as_deref().unwrap_or("unknown architecture");
+                        let arch = file
+                            .architecture
+                            .as_deref()
+                            .unwrap_or("unknown architecture");
                         model_row(
                             page,
                             view,
@@ -627,7 +641,9 @@ fn render_local(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> AnyEl
             div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("Any GGUF file transcribe.cpp can load. It is used where it is, not copied."),
+                .child(
+                    "Any GGUF file transcribe.cpp can load. It is used where it is, not copied.",
+                ),
         )
         .child(
             h_flex()

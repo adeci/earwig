@@ -137,7 +137,7 @@ fn icon(size: u32, recording: bool) -> ksni::Icon {
         for x in 0..size {
             let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
             let dist = ((px - center).powi(2) + (py - center).powi(2)).sqrt();
-            let disc = (radius - dist + 0.5).clamp(0., 1.);
+            let coverage = (radius - dist + 0.5).clamp(0., 1.);
             let bar = bars
                 .iter()
                 .map(|&(bx, half)| {
@@ -153,7 +153,7 @@ fn icon(size: u32, recording: bool) -> ksni::Icon {
                 })
                 .fold(0., f32::max);
             let mix = |c: u8| (f32::from(c) * (1. - bar) + 255. * bar).round() as u8;
-            data.extend_from_slice(&[(disc * 255.).round() as u8, mix(r), mix(g), mix(b)]);
+            data.extend_from_slice(&[(coverage * 255.).round() as u8, mix(r), mix(g), mix(b)]);
         }
     }
     ksni::Icon {

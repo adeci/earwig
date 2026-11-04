@@ -47,9 +47,12 @@ fn entries(cx: &App) -> impl IntoElement + use<> {
         .w_full()
         .gap_3()
         .children(empty.map(|text| div().text_sm().text_color(muted).child(text)))
-        .children(entries.into_iter().enumerate().map(|(ix, entry)| {
-            row(ix, &entry, now, cx)
-        }))
+        .children(
+            entries
+                .into_iter()
+                .enumerate()
+                .map(|(ix, entry)| row(ix, &entry, now, cx)),
+        )
 }
 
 fn row(ix: usize, entry: &HistoryEntry, now: u64, cx: &App) -> impl IntoElement + use<> {

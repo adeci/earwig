@@ -21,17 +21,16 @@ const LOCKED_HINT: &str = "Set by system configuration.";
 pub fn page(cx: &App) -> SettingPage {
     let mut groups = Vec::new();
     if let Some(error) = user_error(cx) {
-        groups.push(SettingGroup::new().title("Settings file").item(SettingItem::render(
-            move |_, _, cx| {
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().danger)
-                    .child(format!(
+        groups.push(
+            SettingGroup::new()
+                .title("Settings file")
+                .item(SettingItem::render(move |_, _, cx| {
+                    div().text_sm().text_color(cx.theme().danger).child(format!(
                         "Your settings file was ignored because it has an error; \
                          changing a setting here rewrites it.\n{error}"
                     ))
-            },
-        )));
+                })),
+        );
     }
     groups.extend([
         activation(cx),
@@ -342,7 +341,10 @@ fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
             "Bind a key in your desktop to these commands. Without release \
              events, bind only the toggle command."
                 .into(),
-            Some("on press:   earwig press\non release: earwig release\nor:         earwig toggle".into()),
+            Some(
+                "on press:   earwig press\non release: earwig release\nor:         earwig toggle"
+                    .into(),
+            ),
         )
     }
 }
@@ -389,11 +391,11 @@ where
     SettingField::dropdown(
         options,
         move |cx: &App| serde_key(&get(&config(UiState::handle(cx)))),
-        move |key: SharedString, cx: &mut App| {
-            match serde_json::from_value::<T>(serde_json::Value::String(key.to_string())) {
-                Ok(value) => edit_config(cx, |c| set(c, value)),
-                Err(e) => log::error!("unknown option {key}: {e}"),
-            }
+        move |key: SharedString, cx: &mut App| match serde_json::from_value::<T>(
+            serde_json::Value::String(key.to_string()),
+        ) {
+            Ok(value) => edit_config(cx, |c| set(c, value)),
+            Err(e) => log::error!("unknown option {key}: {e}"),
         },
     )
 }
@@ -452,8 +454,17 @@ mod tests {
 
     #[test]
     fn desktop_lists_pick_the_matching_binding_help() {
-        assert!(hotkey_help("niri", "LOGO+space").1.unwrap().contains("release"));
-        assert!(hotkey_help("ubuntu:GNOME", "LOGO+space").0.contains("LOGO+space"));
+        assert!(
+            hotkey_help("niri", "LOGO+space")
+                .1
+                .unwrap()
+                .contains("release")
+        );
+        assert!(
+            hotkey_help("ubuntu:GNOME", "LOGO+space")
+                .0
+                .contains("LOGO+space")
+        );
         assert!(hotkey_help("Hyprland", "").1.unwrap().starts_with("bind ="));
     }
 }
