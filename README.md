@@ -54,6 +54,11 @@ What that means in practice:
 After a paste, the transcript stays on the clipboard. If insertion fails,
 the text is put on the clipboard and kept in history.
 
+With the RemoteDesktop portal, earwig recognizes a focused terminal by its
+accessibility role. Qt apps such as Konsole report it only with
+`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` in the session environment; the NixOS
+module sets it, elsewhere set it yourself or Konsole gets Ctrl+V.
+
 ## Install
 
 ### NixOS
@@ -124,6 +129,20 @@ bind = SUPER SHIFT, space, exec, earwig cancel
 **GNOME, KDE**: earwig registers "Dictate" and "Cancel dictation" with the
 GlobalShortcuts portal on first start. Confirm them in the dialog and change
 them later in the system keyboard settings.
+
+**COSMIC**: Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts →
+Add Shortcut, command `earwig toggle`, key e.g. Super+Space. That is stored in
+`~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`:
+
+```
+{
+    (modifiers: [Super], key: "space"): Spawn("earwig toggle"),
+}
+```
+
+COSMIC runs a shortcut on key press only (modifier-only shortcuts on
+release only), never on both, so hold-to-talk needs `earwig press`/`release`
+from elsewhere; tap to start, tap to stop.
 
 **Anything else**: bind a key to `earwig toggle` (tap to start, tap to stop).
 
@@ -223,7 +242,7 @@ cargo run -p earwig -- transcribe tests/fixtures/quick-brown-fox.wav
 nix flake check -L     # package, clippy, tests, NixOS VM tests (needs KVM)
 ```
 
-The VM tests boot real desktops (niri, sway, GNOME, KDE) with a virtual
+The VM tests boot real desktops (niri, sway, GNOME, KDE, COSMIC) with a virtual
 microphone playing the fixtures, press the hotkey, and check that the text
 arrives in a focused editor or terminal.
 

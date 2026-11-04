@@ -42,7 +42,7 @@ use ashpd::desktop::clipboard::{Clipboard, SetSelectionOptions};
 use ashpd::desktop::remote_desktop::{DeviceType, RemoteDesktop, SelectDevicesOptions};
 use ashpd::desktop::{PersistMode, Session};
 use async_io::{Async, Timer};
-use futures_lite::{AsyncWriteExt as _, Stream, StreamExt as _, future};
+use futures_lite::{AsyncWriteExt as _, Stream, StreamExt as _, future, pin};
 use reis::ei;
 use reis::event::{DeviceCapability, EiEvent};
 use xkbcommon::xkb;
@@ -80,6 +80,10 @@ const CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Close the session after this long without requests: GNOME shows a
 /// "remote control" indicator while it is open.
 const IDLE_CLOSE: Duration = Duration::from_secs(60);
+
+/// Longest wait for the portal to confirm a new clipboard selection before
+/// the paste chord goes out anyway.
+const OWNER_TIMEOUT: Duration = Duration::from_millis(500);
 
 const TEXT_MIME_TYPES: &[&str] = &[
     "text/plain;charset=utf-8",
@@ -224,6 +228,9 @@ async fn run(
 async fn watch_focus(terminal: &Cell<bool>) {
     match FocusWatch::connect().await {
         Ok(mut watch) => {
+            if let Some(focused) = watch.current().await {
+                terminal.set(watch.is_terminal(&focused).await);
+            }
             while let Some(focused) = watch.next().await {
                 terminal.set(watch.is_terminal(&focused).await);
             }
@@ -682,6 +689,17 @@ impl Worker {
             ));
         };
         self.selection = Some(text);
+        // The portal may answer before the compositor has made the selection
+        // current (xdg-desktop-portal-kde hands it to KWin over data-control
+        // without a roundtrip), and a paste chord sent then pastes the
+        // previous clipboard. Wait until the portal reports this session as
+        // the owner; subscribe first, as the signal can precede the reply.
+        let owner_changes = clipboard
+            .receive_selection_owner_changed::<RemoteDesktop>()
+            .await
+            .inspect_err(|e| log::debug!("cannot watch the clipboard owner: {e}"))
+            .ok();
+        let started = std::time::Instant::now();
         clipboard
             .set_selection(
                 &portal.session,
@@ -689,6 +707,23 @@ impl Worker {
             )
             .await
             .context("setting the clipboard through the portal")?;
+        if let Some(owner_changes) = owner_changes {
+            let owned = owner_changes.filter(|(_, change)| change.session_is_owner() == Some(true));
+            pin!(owned);
+            let confirmed = future::or(async { owned.next().await.is_some() }, async {
+                Timer::after(OWNER_TIMEOUT).await;
+                false
+            })
+            .await;
+            if confirmed {
+                log::debug!(
+                    "the portal confirmed the clipboard after {} ms",
+                    started.elapsed().as_millis()
+                );
+            } else {
+                log::debug!("the portal did not confirm the clipboard within {OWNER_TIMEOUT:?}");
+            }
+        }
         Ok(())
     }
 

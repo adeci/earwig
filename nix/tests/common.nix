@@ -103,7 +103,9 @@ in
 
   # Python helpers; the compositor-specific script comes after this.
   prelude = ''
+    import re
     import shlex
+    import time
     from datetime import timedelta as td
 
     RUNTIME = "/run/user/1000"
@@ -114,6 +116,56 @@ in
         return machine.succeed(
             f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} {cmd}')}"
         )
+
+
+    def earwig_log() -> str:
+        """The daemon's log (the user service's journal)."""
+        return machine.succeed("journalctl _UID=1000 _SYSTEMD_USER_UNIT=earwig.service -o cat --no-pager")
+
+
+    def log_lines() -> int:
+        return len(earwig_log().splitlines())
+
+
+    def wait_log(pattern: str, timeout: float = 60, since: int = 0) -> str:
+        """Wait for a daemon log line matching `pattern` after the first
+        `since` lines; returns the line."""
+        deadline = time.monotonic() + timeout
+        while True:
+            lines = earwig_log().splitlines()[since:]
+            for line in lines:
+                if re.search(pattern, line):
+                    return line
+            if time.monotonic() > deadline:
+                print("\n".join(lines[-60:]))
+                raise Exception(f"the daemon never logged {pattern!r}")
+            time.sleep(0.5)
+
+
+    def play_clip() -> None:
+        """Speak the clip into the virtual microphone, in the background."""
+        machine.succeed(
+            f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
+        )
+
+
+    def wait_live_text(shot: str) -> str:
+        """After the clip ends, OCR the screen until the overlay shows the
+        live transcript (CPU decoding trails the audio); returns the text."""
+        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
+        text = ""
+
+        def shown(_last_try: bool) -> bool:
+            nonlocal text
+            text = machine.get_screen_text()
+            return any(w in text.lower() for w in ("quick", "brown", "fox"))
+
+        try:
+            retry(shown, timeout=td(seconds=90))
+        finally:
+            print(f"OCR while recording: {text!r}")
+            machine.screenshot(shot)
+        return text
 
 
     def spawn(cmd: str) -> None:

@@ -42,8 +42,12 @@ pub struct DesktopCaps {
     pub portal_remote_desktop: bool,
 }
 
-/// Longest wait for the portal frontend, which D-Bus may have to start.
-const PORTAL_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest wait for the portal frontend, which D-Bus may have to start. At
+/// login the frontend only answers once its backends have started (about 5 s
+/// for xdg-desktop-portal-kde in the VM test), and missing it leaves the
+/// session without portal insertion or shortcuts, so wait as long as D-Bus
+/// waits for an activated service. Without a portal, D-Bus fails at once.
+const PORTAL_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Probe the session once at startup: Wayland globals (no surfaces) and the
 /// portal interfaces on D-Bus. Never fails: whatever cannot be reached counts
