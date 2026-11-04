@@ -1,21 +1,30 @@
-//! XDG GlobalShortcuts portal (GNOME 48+, KDE).
+//! XDG GlobalShortcuts portal (any desktop whose portal backend implements
+//! it, e.g. GNOME 48+, KDE).
 //!
 //! Binds two shortcuts: `dictate` (preferred trigger from
 //! [`HotkeyConfig::portal_trigger`](crate::config::HotkeyConfig)) and
 //! `cancel` (no default; the user picks one in the desktop's settings).
 //! The desktop asks the user to confirm the bindings once and remembers them
-//! per app id, which is why [`register_app_id`] runs first.
+//! per app id, which is why [`register_app_id`] runs first. When the portal
+//! does not work, [`HotkeySource::run`] logs at info and returns `Ok`.
 
-use anyhow::{Context as _, bail};
+use std::time::Duration;
+
+use anyhow::bail;
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use futures_lite::{StreamExt as _, future, pin};
 
 use super::HotkeySource;
 use crate::events::Command;
-use crate::insert::portal::register_app_id;
+use crate::insert::portal::{bounded, register_app_id};
 
 const DICTATE: &str = "dictate";
 const CANCEL: &str = "cancel";
+
+/// Session setup involves no user interaction.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Binding may wait for the user to confirm in a dialog.
+const CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct PortalShortcuts {
     trigger: String,
@@ -30,18 +39,31 @@ impl PortalShortcuts {
     }
 
     async fn serve(self, commands: flume::Sender<Command>) -> anyhow::Result<()> {
-        let portal = GlobalShortcuts::new()
-            .await
-            .context("the GlobalShortcuts portal is not available")?;
-        let session = portal
-            .create_session(ashpd::desktop::CreateSessionOptions::default())
-            .await
-            .context("creating a GlobalShortcuts session")?;
-        // Subscribe before binding so no activation is missed. Signals reach
-        // only the connection that owns the session, and this process has one
-        // GlobalShortcuts session, so they need no filtering.
-        let activated = portal.receive_activated().await?;
-        let deactivated = portal.receive_deactivated().await?;
+        // A portal can be advertised by a backend that cannot work on this
+        // compositor (xdg-desktop-portal-gnome outside GNOME); setup then
+        // fails or never answers. Give up quietly: compositor binds and the
+        // socket still work.
+        let setup = bounded(SETUP_TIMEOUT, "GlobalShortcuts session setup", async {
+            let portal = GlobalShortcuts::new().await?;
+            let session = portal
+                .create_session(ashpd::desktop::CreateSessionOptions::default())
+                .await?;
+            // Subscribe before binding so no activation is missed. Signals
+            // reach only the connection that owns the session, and this
+            // process has one GlobalShortcuts session, so they need no
+            // filtering.
+            let activated = portal.receive_activated().await?;
+            let deactivated = portal.receive_deactivated().await?;
+            Ok((portal, session, activated, deactivated))
+        })
+        .await;
+        let (portal, session, activated, deactivated) = match setup {
+            Ok(setup) => setup,
+            Err(e) => {
+                log::info!("GlobalShortcuts portal unusable, not using it: {e:#}");
+                return Ok(());
+            }
+        };
         pin!(activated, deactivated);
 
         let trigger = Some(self.trigger.as_str()).filter(|t| !t.is_empty());
@@ -50,11 +72,21 @@ impl PortalShortcuts {
                 .preferred_trigger(trigger),
             NewShortcut::new(CANCEL, "Cancel dictation"),
         ];
-        let bound = portal
-            .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
-            .await
-            .and_then(|request| request.response())
-            .context("binding the shortcuts (was the dialog declined?)")?;
+        // The desktop may ask the user to confirm the bindings.
+        let bound = bounded(CONSENT_TIMEOUT, "binding the shortcuts", async {
+            Ok(portal
+                .bind_shortcuts(&session, &shortcuts, None, BindShortcutsOptions::default())
+                .await?
+                .response()?)
+        })
+        .await;
+        let bound = match bound {
+            Ok(bound) => bound,
+            Err(e) => {
+                log::info!("GlobalShortcuts not bound, not using the portal: {e:#}");
+                return Ok(());
+            }
+        };
         for shortcut in bound.shortcuts() {
             log::info!(
                 "portal shortcut {}: {}",

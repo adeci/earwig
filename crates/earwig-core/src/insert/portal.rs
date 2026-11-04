@@ -1,4 +1,8 @@
-//! Insertion through the RemoteDesktop portal and libei (GNOME, KDE).
+//! Insertion through the XDG RemoteDesktop (version 2) and Clipboard portals
+//! and libei: any desktop whose portal backend implements them (GNOME, KDE).
+//! No desktop names are checked; every portal step before a dialog is time
+//! bounded, so a backend that is advertised but cannot work on this
+//! compositor fails fast instead of blocking.
 //!
 //! One RemoteDesktop session with a keyboard and clipboard access is opened
 //! when the daemon starts. The user approves it once; the restore token in
@@ -14,13 +18,14 @@
 //! Methods, in default order:
 //! - [`InsertMethod::PortalPaste`]: clipboard set through the portal, then one
 //!   paste chord. Atomic and covers every character; the text stays on the
-//!   clipboard. GNOME exposes no focused app id, so terminals are recognized
-//!   over the accessibility bus ([`focus`]) and get Ctrl+Shift+V.
+//!   clipboard. The portal exposes no focused app id, so terminals are
+//!   recognized over the accessibility bus ([`focus`]) and get Ctrl+Shift+V.
 //! - [`InsertMethod::PortalType`]: every character as a key press, all in one
 //!   burst. Used when clipboard access was not granted. Apps redraw per key,
 //!   so long text visibly types out. Not applicable when a character is
 //!   missing from the keyboard layout or Caps Lock is on.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -66,6 +71,16 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the EIS server may take to hand out a keyboard after `Start`.
 const EIS_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Portal steps without user interaction.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `Start` while the consent dialog waits for the user.
+const CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Close the session after this long without requests: GNOME shows a
+/// "remote control" indicator while it is open.
+const IDLE_CLOSE: Duration = Duration::from_secs(60);
+
 const TEXT_MIME_TYPES: &[&str] = &[
     "text/plain;charset=utf-8",
     "text/plain",
@@ -73,6 +88,20 @@ const TEXT_MIME_TYPES: &[&str] = &[
     "STRING",
     "TEXT",
 ];
+
+/// Run a portal step, failing after `limit`.
+pub(crate) async fn bounded<T>(
+    limit: Duration,
+    what: &str,
+    step: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    future::or(step, async {
+        Timer::after(limit).await;
+        Err(anyhow!("no answer within {limit:?}"))
+    })
+    .await
+    .with_context(|| what.to_owned())
+}
 
 /// Tell xdg-desktop-portal which app this process is
 /// (`org.freedesktop.host.portal.Registry.Register`). Since
@@ -100,6 +129,10 @@ pub(crate) fn register_app_id() {
 
 /// A RemoteDesktop session with a keyboard over libei, plus clipboard access.
 /// The user approves it once; the restore token in `state_dir` keeps it.
+///
+/// GNOME shows a "remote control" indicator while the session is open, so it
+/// closes after [`IDLE_CLOSE`] without requests and is restored (no dialog,
+/// ~80 ms) by the next one.
 pub struct PortalInserter {
     requests: flume::Sender<Request>,
     order: Vec<InsertMethod>,
@@ -127,21 +160,7 @@ impl PortalInserter {
         let (requests, requests_rx) = flume::unbounded();
         thread::Builder::new()
             .name("earwig-portal".into())
-            .spawn(move || {
-                async_io::block_on(async move {
-                    match Worker::open(&token_file).await {
-                        Ok((portal, worker, ei)) => {
-                            let clipboard = portal.clipboard.is_some();
-                            if ready_tx.send(Ok(clipboard)).is_ok() {
-                                worker.serve(&portal, ei, &requests_rx).await;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(e));
-                        }
-                    }
-                });
-            })
+            .spawn(move || async_io::block_on(run(&token_file, &ready_tx, &requests_rx)))
             .context("spawning the portal thread")?;
         let clipboard = ready_rx
             .recv()
@@ -182,6 +201,83 @@ impl PortalInserter {
             ))),
             Err(flume::RecvTimeoutError::Disconnected) => {
                 Err(InsertError::Failed(anyhow!("the portal thread is gone")))
+            }
+        }
+    }
+}
+
+/// The portal thread: serve sessions while watching which widget has focus.
+async fn run(
+    token_file: &Path,
+    ready: &flume::Sender<anyhow::Result<bool>>,
+    requests: &flume::Receiver<Request>,
+) {
+    let terminal = Cell::new(false);
+    future::or(
+        sessions(token_file, ready, requests, &terminal),
+        watch_focus(&terminal),
+    )
+    .await;
+}
+
+/// Keep `terminal` up to date; runs until the thread ends.
+async fn watch_focus(terminal: &Cell<bool>) {
+    match FocusWatch::connect().await {
+        Ok(mut watch) => {
+            while let Some(focused) = watch.next().await {
+                terminal.set(watch.is_terminal(&focused).await);
+            }
+            log::info!("the accessibility bus went away; terminals now get Ctrl+V");
+        }
+        Err(e) => log::info!("no accessibility bus, terminals get Ctrl+V: {e:#}"),
+    }
+    terminal.set(false);
+    future::pending::<()>().await;
+}
+
+/// Connect, serve requests, close when idle or lost, and reconnect for the
+/// next request.
+async fn sessions(
+    token_file: &Path,
+    ready: &flume::Sender<anyhow::Result<bool>>,
+    requests: &flume::Receiver<Request>,
+    terminal: &Cell<bool>,
+) {
+    let (mut portal, mut worker, mut events) = match Worker::open(token_file).await {
+        Ok(opened) => opened,
+        Err(e) => {
+            let _ = ready.send(Err(e));
+            return;
+        }
+    };
+    if ready.send(Ok(portal.clipboard.is_some())).is_err() {
+        return;
+    }
+    let mut pending = None;
+    loop {
+        let end = worker
+            .serve(&portal, events, requests, pending.take(), terminal)
+            .await;
+        let _ = portal.session.close().await;
+        match end {
+            End::Shutdown => return,
+            End::Idle => log::debug!("RemoteDesktop session closed after {IDLE_CLOSE:?} idle"),
+            End::Lost(reason) => log::warn!("RemoteDesktop session lost: {reason}"),
+        }
+        // Reconnect when the next request comes.
+        loop {
+            let Ok(request) = requests.recv_async().await else {
+                return;
+            };
+            match Worker::open(token_file).await {
+                Ok(opened) => {
+                    (portal, worker, events) = opened;
+                    pending = Some(request);
+                    break;
+                }
+                Err(e) => {
+                    let _ = request.reply.send(Err(InsertError::Failed(e)));
+                }
             }
         }
     }
@@ -230,19 +326,24 @@ struct Worker {
     /// What we offer on the clipboard.
     selection: Option<String>,
     sequence: u32,
-    /// Why the session cannot be used any more.
+    /// Set when libei reports a disconnect.
     dead: Option<String>,
-    /// A terminal has focus (paste with Ctrl+Shift+V).
-    terminal_focused: bool,
 }
 
 enum Input {
     Request(Request),
     Shutdown,
+    Idle,
     Ei(Option<Result<EiEvent, reis::Error>>),
     Transfer(Option<u32>),
     Closed(Option<()>),
-    Focus(Option<focus::Focused>),
+}
+
+/// Why [`Worker::serve`] returned.
+enum End {
+    Shutdown,
+    Idle,
+    Lost(String),
 }
 
 /// Ask for clipboard access in the RemoteDesktop session. `None` when the
@@ -267,41 +368,37 @@ impl Worker {
     async fn open(
         token_file: &Path,
     ) -> anyhow::Result<(Portal, Self, reis::async_io::EiConvertEventStream)> {
-        let remote = RemoteDesktop::new()
-            .await
-            .context("the RemoteDesktop portal is not available")?;
-        let session = remote
-            .create_session(ashpd::desktop::CreateSessionOptions::default())
-            .await
-            .context("creating a RemoteDesktop session")?;
         let token = fs::read_to_string(token_file)
             .ok()
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty());
-        remote
-            .select_devices(
-                &session,
-                SelectDevicesOptions::default()
-                    .set_devices(ashpd::enumflags2::BitFlags::from(DeviceType::Keyboard))
-                    .set_persist_mode(PersistMode::ExplicitlyRevoked)
-                    .set_restore_token(token.as_deref()),
-            )
-            .await
-            .and_then(|request| request.response())
-            .context("selecting the keyboard")?;
+        // No user interaction before `Start`: a backend that cannot work on
+        // this compositor fails or hangs here, before any dialog.
+        let (remote, session, clipboard) = bounded(
+            SETUP_TIMEOUT,
+            "RemoteDesktop setup",
+            create_session(token.as_deref()),
+        )
+        .await?;
 
-        // Clipboard access has to be requested before `Start`.
-        let clipboard = request_clipboard(&session).await;
-
-        let started = remote
-            .start(
-                &session,
-                None,
-                ashpd::desktop::remote_desktop::StartOptions::default(),
-            )
-            .await
-            .and_then(|request| request.response())
-            .context("starting the RemoteDesktop session (was the dialog declined?)")?;
+        // With a restore token there is no dialog.
+        let start_timeout = if token.is_some() {
+            SETUP_TIMEOUT
+        } else {
+            CONSENT_TIMEOUT
+        };
+        let started = bounded(start_timeout, "starting the RemoteDesktop session", async {
+            Ok(remote
+                .start(
+                    &session,
+                    None,
+                    ashpd::desktop::remote_desktop::StartOptions::default(),
+                )
+                .await?
+                .response()?)
+        })
+        .await
+        .context("was the dialog declined?")?;
         if !started.devices().contains(DeviceType::Keyboard) {
             bail!("keyboard access was not granted");
         }
@@ -315,19 +412,21 @@ impl Worker {
         }
         let clipboard = clipboard.filter(|_| started.is_clipboard_enabled());
 
-        let fd = remote
-            .connect_to_eis(
-                &session,
-                ashpd::desktop::remote_desktop::ConnectToEISOptions::default(),
-            )
-            .await
-            .context("ConnectToEIS (needs RemoteDesktop portal version 2)")?;
-        let socket = Async::new(fd.try_clone()?)?;
-        let context = ei::Context::new(UnixStream::from(fd))?;
-        let (ei, events) = context
-            .handshake_async_io("earwig", ei::handshake::ContextType::Sender)
-            .await
-            .context("libei handshake")?;
+        let (socket, ei, events) = bounded(SETUP_TIMEOUT, "connecting to EIS", async {
+            let fd = remote
+                .connect_to_eis(
+                    &session,
+                    ashpd::desktop::remote_desktop::ConnectToEISOptions::default(),
+                )
+                .await?;
+            let socket = Async::new(fd.try_clone()?)?;
+            let context = ei::Context::new(UnixStream::from(fd))?;
+            let (ei, events) = context
+                .handshake_async_io("earwig", ei::handshake::ContextType::Sender)
+                .await?;
+            Ok((socket, ei, events))
+        })
+        .await?;
 
         let mut worker = Worker {
             ei,
@@ -336,7 +435,6 @@ impl Worker {
             selection: None,
             sequence: 0,
             dead: None,
-            terminal_focused: false,
         };
         let mut events = events;
         future::or(
@@ -372,12 +470,19 @@ impl Worker {
         Ok((Portal { session, clipboard }, worker, events))
     }
 
+    /// Serve requests (`pending` first) until shutdown, [`IDLE_CLOSE`] without
+    /// requests, or the session ends.
     async fn serve(
-        mut self,
+        &mut self,
         portal: &Portal,
         events: reis::async_io::EiConvertEventStream,
         requests: &flume::Receiver<Request>,
-    ) {
+        pending: Option<Request>,
+        terminal: &Cell<bool>,
+    ) -> End {
+        if let Some(Request { job, reply }) = pending {
+            let _ = reply.send(self.run(portal, job, terminal.get()).await);
+        }
         // `None` once a source has ended.
         let mut events = Some(events);
         let mut transfers: Option<Pin<Box<dyn Stream<Item = u32> + '_>>> = match &portal.clipboard {
@@ -401,12 +506,7 @@ impl Worker {
                     None
                 }
             };
-        let mut focus = FocusWatch::connect()
-            .await
-            .inspect_err(|e| {
-                log::info!("no accessibility bus, terminals get Ctrl+V: {e:#}");
-            })
-            .ok();
+        let mut idle = Timer::after(IDLE_CLOSE);
         loop {
             let input = future::or(
                 async {
@@ -422,10 +522,8 @@ impl Worker {
                         future::or(
                             async { Input::Closed(next_or_pending(&mut closed).await) },
                             async {
-                                match &mut focus {
-                                    Some(focus) => Input::Focus(focus.next().await),
-                                    None => future::pending().await,
-                                }
+                                (&mut idle).await;
+                                Input::Idle
                             },
                         ),
                     ),
@@ -434,51 +532,35 @@ impl Worker {
             .await;
             match input {
                 Input::Request(Request { job, reply }) => {
-                    let _ = reply.send(self.run(portal, job).await);
+                    let _ = reply.send(self.run(portal, job, terminal.get()).await);
+                    idle.set_after(IDLE_CLOSE);
                 }
-                Input::Shutdown => {
-                    let _ = portal.session.close().await;
-                    return;
-                }
+                Input::Shutdown => return End::Shutdown,
+                Input::Idle => return End::Idle,
                 Input::Ei(Some(Ok(event))) => {
                     if let Err(e) = self.on_ei(event) {
                         log::warn!("libei: {e:#}");
                     }
+                    if let Some(reason) = self.dead.take() {
+                        return End::Lost(reason);
+                    }
                 }
-                Input::Ei(Some(Err(e))) => {
-                    self.dead = Some(format!("libei failed: {e}"));
-                    events = None;
-                }
-                Input::Ei(None) => {
-                    self.dead = Some("the EIS connection closed".into());
-                    events = None;
-                }
+                Input::Ei(Some(Err(e))) => return End::Lost(format!("libei failed: {e}")),
+                Input::Ei(None) => return End::Lost("the EIS connection closed".into()),
                 Input::Transfer(Some(serial)) => {
                     if let Err(e) = self.transfer(portal, serial).await {
                         log::warn!("clipboard transfer failed: {e:#}");
                     }
+                    idle.set_after(IDLE_CLOSE);
                 }
                 Input::Transfer(None) => transfers = None,
-                Input::Closed(ended) => {
-                    if ended.is_some() {
-                        self.dead = Some("the RemoteDesktop session was closed".into());
-                    }
-                    closed = None;
-                }
-                Input::Focus(Some(focused)) => {
-                    if let Some(focus) = &focus {
-                        self.terminal_focused = focus.is_terminal(&focused).await;
-                    }
-                }
-                Input::Focus(None) => focus = None,
+                Input::Closed(Some(())) => return End::Lost("the session was closed".into()),
+                Input::Closed(None) => closed = None,
             }
         }
     }
 
-    async fn run(&mut self, portal: &Portal, job: Job) -> Result<(), InsertError> {
-        if let Some(reason) = &self.dead {
-            return Err(InsertError::Failed(anyhow!("{reason}")));
-        }
+    async fn run(&mut self, portal: &Portal, job: Job, terminal: bool) -> Result<(), InsertError> {
         match job {
             Job::Type(text) => {
                 let keyboard = self.keyboard()?;
@@ -498,13 +580,9 @@ impl Worker {
                 Ok(())
             }
             Job::Paste(text) => {
-                let chord = self
-                    .keyboard()?
-                    .map
-                    .paste(self.terminal_focused)
-                    .ok_or_else(|| {
-                        InsertError::NotApplicable("the keyboard layout has no Control key".into())
-                    })?;
+                let chord = self.keyboard()?.map.paste(terminal).ok_or_else(|| {
+                    InsertError::NotApplicable("the keyboard layout has no Control key".into())
+                })?;
                 self.set_selection(portal, text).await?;
                 self.send_keys(&[chord]).await?;
                 Ok(())

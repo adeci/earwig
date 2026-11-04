@@ -275,20 +275,36 @@ with subtest("Overlay experiment: X11 popup via XWayland, Wayland toplevel"):
     ]:
         activate("earwig-target")
         before = target_text()
-        launch(name, *env, "gnome_overlay", kind, "30")
+        launch(name, *env, "overlay_fallback", kind, "30")
         wait_cmd(f"grep -q opened /tmp/{name}.log")
         machine.sleep(3)
         machine.screenshot(f"06-{name}")
-        print(f"{name}: {unit_log(name)}")
-        print(f"{name} windows: {json.dumps(windows())}")
-        print(f"{name} focus: {focused_title()!r}")
+        overlay = [w for w in windows() if w["wm_class"] == "io.github.adeci.earwig.overlay"][0]
+        print(f"OVERLAY {name}: {machine.succeed(f'cat /tmp/{name}.log')}")
+        print(f"OVERLAY {name}: window {overlay}, focus on {focused_title()!r}")
         machine.send_chars("zq")
         machine.sleep(2)
         kept_focus = target_text() == before + "zq"
-        print(f"{name}: keys reached the editor: {kept_focus}")
+        print(f"OVERLAY {name}: keys reached the editor: {kept_focus}")
         machine.screenshot(f"07-{name}-after-typing")
-        machine.succeed(
-            "runuser -u alice -- env XDG_RUNTIME_DIR=/run/user/1000 "
-            "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
-            f"systemctl --user stop {name}"
-        )
+        user_systemctl("stop", name)
+        if kind == "popup":
+            # Requested: 420x90 at (430, 662).
+            assert abs(overlay["x"] - 430) <= 4 and abs(overlay["y"] - 662) <= 4, overlay
+            assert not overlay["focus"] and kept_focus
+
+with subtest("Idle: the session closes and the next request restores it"):
+    activate("earwig-target")
+    request("serve2", "copy", "kept on the clipboard")
+    machine.sleep(5)
+    machine.screenshot("08-session-open")
+    machine.sleep(65)
+    machine.screenshot("09-session-closed-after-idle")
+    print(machine.succeed("grep -E 'closed after|lost' /tmp/serve2.err"))
+    machine.send_key("ctrl-v")
+    machine.sleep(2)
+    print(f"CLIPBOARD after the session closed: {'kept on the clipboard' in target_text()}")
+    result = request("serve2", "auto", " restored")
+    wait_target_contains(" restored")
+    print(f"RESTORE: insert including reconnect took {result['insert_us'] / 1000:.1f} ms")
+    assert "Remote Desktop" not in [w["title"] for w in windows()]

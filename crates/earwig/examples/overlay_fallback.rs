@@ -3,10 +3,10 @@
 //! layer-shell?
 //!
 //! ```text
-//! gnome_overlay popup [secs]     WindowKind::PopUp: an override-redirect X11
+//! overlay_fallback popup [secs]     WindowKind::PopUp: an override-redirect X11
 //!                                window when run with WAYLAND_DISPLAY unset
 //!                                (XWayland), a toplevel on Wayland
-//! gnome_overlay toplevel [secs]  plain WindowKind::Normal toplevel
+//! overlay_fallback toplevel [secs]  plain WindowKind::Normal toplevel
 //! ```
 //!
 //! Both ask for 420x90 px at the bottom center of the primary display,
@@ -45,7 +45,7 @@ fn main() {
         Some("popup") => (WindowKind::PopUp, "EARWIG POPUP OVERLAY"),
         Some("toplevel") => (WindowKind::Normal, "EARWIG TOPLEVEL OVERLAY"),
         _ => {
-            eprintln!("usage: gnome_overlay popup|toplevel [secs]");
+            eprintln!("usage: overlay_fallback popup|toplevel [secs]");
             std::process::exit(2);
         }
     };

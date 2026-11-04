@@ -1,7 +1,7 @@
 # GNOME on Wayland: RemoteDesktop/libei insertion (typing and paste), the
 # restore token, GlobalShortcuts press/release, and the overlay experiment.
 #
-#   nix build .#checks.x86_64-linux.gnome -L
+#   nix build .#checks.x86_64-linux.vm-gnome -L
 {
   pkgs,
   craneLib,
@@ -58,10 +58,10 @@ let
     libxi
     libxrandr
   ];
-  gnomeOverlay =
+  overlayFallback =
     let
       args = {
-        pname = "earwig-gnome-overlay";
+        pname = "earwig-overlay-fallback";
         version = "0";
         inherit src;
         strictDeps = true;
@@ -88,15 +88,15 @@ let
       args
       // {
         cargoArtifacts = craneLib.buildDepsOnly args;
-        cargoExtraArgs = "--locked -p earwig --example gnome_overlay";
+        cargoExtraArgs = "--locked -p earwig --example overlay_fallback";
         doCheck = false;
         nativeBuildInputs = args.nativeBuildInputs ++ [ pkgs.addDriverRunpath ];
         installPhaseCommand = ''
-          install -Dm755 target/release/examples/gnome_overlay $out/bin/gnome_overlay
+          install -Dm755 target/release/examples/overlay_fallback $out/bin/overlay_fallback
         '';
         postFixup = ''
-          patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/gnome_overlay
-          addDriverRunpath $out/bin/gnome_overlay
+          patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/overlay_fallback
+          addDriverRunpath $out/bin/overlay_fallback
         '';
       }
     );
@@ -199,7 +199,7 @@ let
   '';
 in
 pkgs.testers.runNixOSTest {
-  name = "earwig-gnome";
+  name = "earwig-vm-gnome-portal";
   enableOCR = true;
 
   nodes.machine = {
@@ -242,7 +242,7 @@ pkgs.testers.runNixOSTest {
 
     environment.systemPackages = [
       portalCheck
-      gnomeOverlay
+      overlayFallback
       desktopFile
       target
       launch
@@ -250,5 +250,5 @@ pkgs.testers.runNixOSTest {
     ];
   };
 
-  testScript = builtins.readFile ./gnome.py;
+  testScript = builtins.readFile ./vm-gnome.py;
 }

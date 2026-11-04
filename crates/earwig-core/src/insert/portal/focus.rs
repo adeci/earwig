@@ -1,5 +1,5 @@
 //! Whether a terminal has keyboard focus, from the accessibility bus
-//! (AT-SPI). GNOME tells portal clients nothing about the focused app, yet
+//! (AT-SPI). The portals tell clients nothing about the focused app, yet
 //! terminals paste with Ctrl+Shift+V where everything else uses Ctrl+V.
 //!
 //! VTE terminals (GNOME Console, GNOME Terminal, Ptyxis) report the

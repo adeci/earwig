@@ -24,60 +24,18 @@ pub trait HotkeySource: Send {
 }
 
 /// Hotkey sources to start for this session (the socket is always on and not
-/// listed here). The GlobalShortcuts portal runs where it exists, except on
-/// compositors whose own binds are the norm (they also see key releases).
+/// listed here): the GlobalShortcuts portal when enabled and advertised. A
+/// portal that is advertised but does not work ends quietly within seconds
+/// (see [`portal`]).
 pub fn sources(
     config: &crate::config::HotkeyConfig,
     caps: &crate::desktop::DesktopCaps,
 ) -> Vec<Box<dyn HotkeySource>> {
-    const BIND_COMPOSITORS: &[&str] = &["niri", "sway", "hyprland", "river"];
-    let compositor_binds = caps
-        .desktop
-        .split(':')
-        .any(|desktop| BIND_COMPOSITORS.contains(&desktop));
-    if config.portal && caps.portal_global_shortcuts && !compositor_binds {
+    if config.portal && caps.portal_global_shortcuts {
         vec![Box::new(portal::PortalShortcuts::new(
             &config.portal_trigger,
         ))]
     } else {
         Vec::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::HotkeyConfig;
-    use crate::desktop::DesktopCaps;
-
-    fn names(config: &HotkeyConfig, desktop: &str, portal: bool) -> Vec<&'static str> {
-        let caps = DesktopCaps {
-            desktop: desktop.into(),
-            portal_global_shortcuts: portal,
-            ..DesktopCaps::default()
-        };
-        sources(config, &caps).iter().map(|s| s.name()).collect()
-    }
-
-    #[test]
-    fn portal_source_runs_on_desktops_without_compositor_binds() {
-        let config = HotkeyConfig::default();
-        assert_eq!(names(&config, "gnome", true), ["portal"]);
-        assert_eq!(names(&config, "ubuntu:gnome", true), ["portal"]);
-        assert_eq!(names(&config, "kde", true), ["portal"]);
-    }
-
-    #[test]
-    fn portal_source_stays_off_when_unavailable_disabled_or_bound_by_compositor() {
-        let config = HotkeyConfig::default();
-        let none: [&str; 0] = [];
-        assert_eq!(names(&config, "gnome", false), none);
-        assert_eq!(names(&config, "niri", true), none);
-        assert_eq!(names(&config, "sway:wlroots", true), none);
-        let disabled = HotkeyConfig {
-            portal: false,
-            ..HotkeyConfig::default()
-        };
-        assert_eq!(names(&disabled, "gnome", true), none);
     }
 }
