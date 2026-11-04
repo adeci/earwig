@@ -84,23 +84,24 @@ in
         machine.succeed("head -c 4 /tmp/head.bin | grep -q GGUF")
 
     # The rest needs `earwig models` (Models slice).
-    with machine.nested("FINAL: search marks compatible files"):
+    with machine.nested("EARWIG: search marks compatible files"):
         out = earwig("models search asr")
         print(out)
-        assert good in out, out
-        assert "hf:test/llm-gguf/" not in out, "a llama GGUF must not be offered"
+        rows = {l.split()[1]: l.split() for l in out.splitlines() if l.startswith("test/")}
+        assert rows["tiny-asr-Q8_0.gguf"][-1] == "yes", out
+        assert rows["llm-Q8_0.gguf"][-2:] == ["llama", "no"], out
 
-    with machine.nested("FINAL: download a Hub file, verified against its LFS sha256"):
+    with machine.nested("EARWIG: download a Hub file, verified against its LFS sha256"):
         path = earwig(f"models download {good}").strip().splitlines()[-1]
         assert path == f"{data}/test/tiny-asr-gguf/{rev}/tiny-asr-Q8_0.gguf", path
         expected = machine.succeed("cat /etc/earwig-test/tiny-asr.sha256").split()[0]
         assert machine.succeed(f"sha256sum {path}").split()[0] == expected
 
-    with machine.nested("FINAL: a file whose hash does not match is rejected and removed"):
+    with machine.nested("EARWIG: a file whose hash does not match is rejected and removed"):
         machine.fail(f"EARWIG_HF_ENDPOINT=http://hub earwig models download hf:test/corrupt-gguf/corrupt-Q8_0.gguf@{rev}")
         machine.fail(f"find {data}/test/corrupt-gguf -type f | grep .")
 
-    with machine.nested("FINAL: download a curated model by id"):
+    with machine.nested("EARWIG: download a curated model by id"):
         path = earwig("models download ${curated.id}").strip().splitlines()[-1]
         assert path == f"{data}/${curated.repo}/${curated.revision}/${curated.file}", path
         assert machine.succeed(f"sha256sum {path}").split()[0] == "${curated.sha256}"

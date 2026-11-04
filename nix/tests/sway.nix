@@ -44,18 +44,12 @@ in
 
     check_virtual_mic()
 
-    with machine.nested("earwig user service runs in the session"):
-        user_unit_active("earwig.service")
-        print(as_alice("earwig status"))
-
     start_target_terminal()
     machine.wait_until_succeeds(
         "su - alice -c 'swaymsg -t get_tree' | jq -e '.. | objects | select(.app_id? == \"earwig-target\" and .focused)'"
     )
     machine.screenshot("target_terminal")
 
-    overlay_text = dictate()
-
-    ${common.assertions}
+    ${common.dictation}
   '';
 }

@@ -6,6 +6,6 @@ Comment=Local, instant dictation: hold a key, speak, and the text lands where yo
 Exec=earwig settings
 Icon=io.github.adeci.earwig
 Terminal=false
-Categories=Utility;Accessibility;AudioVideo;Audio;
+Categories=Utility;Accessibility;
 Keywords=dictation;speech;voice;transcribe;whisper;parakeet;
 StartupNotify=false

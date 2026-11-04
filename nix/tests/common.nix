@@ -161,18 +161,28 @@ in
         machine.screenshot("overlay_recording")
         overlay_text = machine.get_screen_text()
         print(f"OCR while recording: {overlay_text!r}")
-        machine.sleep(3)
+        machine.wait_until_fails("pgrep -x pw-play", timeout=30)
+        machine.sleep(1)
         as_alice("earwig release")
         return overlay_text
   '';
 
-  # Final end-to-end assertions; need the daemon, pipeline, overlay and an
-  # inserter (the Rust slices) to pass.
-  assertions = ''
-    with machine.nested("FINAL: overlay showed live text while recording"):
+  # Everything that needs earwig itself (daemon, pipeline, overlay, an
+  # inserter); the steps before it only exercise the harness.
+  dictation = ''
+    with machine.nested("EARWIG: user service runs in the session"):
+        try:
+            user_unit_active("earwig.service")
+        finally:
+            print(machine.execute("journalctl _SYSTEMD_USER_UNIT=earwig.service --no-pager | tail -n 30")[1])
+        print(as_alice("earwig status"))
+
+    overlay_text = dictate()
+
+    with machine.nested("EARWIG: overlay showed live text while recording"):
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
 
-    with machine.nested("FINAL: transcript inserted into the focused terminal"):
+    with machine.nested("EARWIG: transcript inserted into the focused terminal"):
         machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=60)
         print(machine.succeed("cat /tmp/out"))
         machine.screenshot("inserted")
