@@ -11,6 +11,7 @@ mod overlay;
 mod pill;
 mod settings;
 mod tray;
+mod x11_popup;
 
 use std::sync::PoisonError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -272,14 +273,15 @@ fn open_overlay(cx: &mut App) {
         &overlay_config,
         cx.primary_display().as_deref(),
     );
+    let surface = state.surface;
     // No Base root: it paints an opaque background, and the overlay has no
     // inputs or popovers that need one.
     let mut view = None;
     let opened = cx.open_window(options, |window, cx| {
         Theme::sync_system_appearance(Some(window), cx);
-        // Click-through: pointer input goes to whatever is below.
+        // Click-through until the pill is painted and takes its own bounds.
         window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(&overlay_config, window, cx));
+        let root = cx.new(|cx| OverlayView::new(&overlay_config, surface, window, cx));
         view = Some(root.clone());
         root
     });

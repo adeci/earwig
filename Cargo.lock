@@ -1649,8 +1649,10 @@ dependencies = [
  "gpui-kit",
  "ksni",
  "log",
+ "raw-window-handle",
  "serde",
  "serde_json",
+ "x11rb",
 ]
 
 [[package]]

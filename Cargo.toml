@@ -35,6 +35,7 @@ futures-lite = "2"
 hex = "0.4"
 hound = "3"
 log = "0.4"
+raw-window-handle = "0.6"
 reis = { version = "0.7", features = ["async-io"] }
 rubato = "5"
 rustix = { version = "1", features = ["event", "fs", "net", "process", "time"] }
@@ -53,6 +54,8 @@ wayland-protocols = { version = "0.32", features = [
 ] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# Moving the overlay popup on X11, which GPUI cannot do after it opened.
+x11rb = "0.13"
 xkbcommon = "0.9"
 
 # GPUI comes from the `gpui-pre` snapshot that gpui-component is pinned to;

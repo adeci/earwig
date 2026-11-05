@@ -1,5 +1,8 @@
-//! The small on-screen pill shown while dictating.
+//! The small on-screen pill shown while dictating. The user can drag it out
+//! of the way for the rest of the dictation; the next one starts at home.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,26 +12,26 @@ use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Bounds, Context, Div, FontFeatures, FontWeight, HighlightStyle, Hsla, IntoElement,
-    ParentElement as _, Pixels, PlatformDisplay, Point, Render, Size, Styled as _, StyledText,
-    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions, canvas, div, point, px, size,
+    App, Bounds, Context, CursorStyle, DispatchPhase, Div, FontFeatures, FontWeight,
+    HighlightStyle, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, PlatformDisplay, Point, Render,
+    Size, Styled as _, StyledText, Subscription, WeakEntity, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
-use crate::ui::accent;
-use crate::ui::now_ms;
 use crate::ui::pill::{self, Clock, Edge, Look, Motion};
+use crate::ui::x11_popup::X11Popup;
+use crate::ui::{OverlaySurface, accent, now_ms};
 
 /// Width of the pill.
 const WIDTH: f32 = 560.;
-/// Gap between the pill and the screen edge it is anchored to; at least
-/// `INSET`, so the surface never reaches past the screen edge.
+/// Gap between the pill and the screen edge it starts at.
 const MARGIN: f32 = 56.;
 /// Transparent room around the pill for its moving edge and its shadow.
 const INSET: f32 = pill::ROOM;
-/// Gap between the surface and the screen edge it is anchored to.
-const SURFACE_MARGIN: f32 = MARGIN - INSET;
-const _: () = assert!(SURFACE_MARGIN >= 0.);
+/// Closest a dragged pill gets to a screen edge, so even its fullest swell
+/// stays on screen.
+const EDGE_GAP: f32 = pill::MAX_REACH;
 const LINE_HEIGHT: f32 = 22.;
 /// Frame pacing: smooth while the voice moves the edge, slow when it only
 /// breathes, so the overlay never competes with CPU decoding at display rate.
@@ -44,16 +47,16 @@ const GAP: f32 = 8.;
 
 /// Window options for the overlay, the one place the platform choice is made.
 ///
-/// With layer-shell the pill floats on the Overlay layer of the output the
-/// compositor picks (the focused one), never takes keyboard focus, and
-/// reserves no space. Elsewhere it is a borderless popup centred on the
-/// primary display.
+/// With layer-shell the overlay is a transparent surface over the output the
+/// compositor picks (the focused one), on the Overlay layer, that never takes
+/// keyboard focus and reserves no space; only the pill takes pointer input.
+/// Elsewhere it is a borderless popup just big enough for the pill, centred
+/// on the primary display.
 pub fn overlay_window_options(
     caps: &DesktopCaps,
     config: &OverlayConfig,
     display: Option<&dyn PlatformDisplay>,
 ) -> WindowOptions {
-    let window_size = size(px(WIDTH + 2. * INSET), px(window_height(config.max_lines)));
     let common = WindowOptions {
         titlebar: None,
         focus: false,
@@ -67,31 +70,30 @@ pub fn overlay_window_options(
         ..WindowOptions::default()
     };
     if caps.layer_shell {
-        let edge = px(SURFACE_MARGIN);
-        let (anchor, margin) = match config.position {
-            OverlayPosition::Bottom => (Anchor::BOTTOM, (px(0.), px(0.), edge, px(0.))),
-            OverlayPosition::Top => (Anchor::TOP, (edge, px(0.), px(0.), px(0.))),
-        };
         return WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds {
-                origin: point(px(0.), px(0.)),
-                size: window_size,
-            })),
+            // Size zero on all four anchors: the compositor stretches the
+            // surface over the output, less the bars' exclusive zones, so
+            // the pill can be dragged anywhere on it.
+            window_bounds: Some(WindowBounds::Windowed(Bounds::default())),
             kind: WindowKind::LayerShell(LayerShellOptions {
                 namespace: "earwig".into(),
                 layer: Layer::Overlay,
-                // One edge only: layer-shell centres the surface along it.
-                anchor,
+                anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
                 exclusive_zone: None,
                 exclusive_edge: None,
-                margin: Some(margin),
+                margin: None,
                 keyboard_interactivity: KeyboardInteractivity::None,
             }),
             ..common
         };
     }
+    let window_size = popup_size(config.max_lines);
     let origin = display.map_or(point(px(0.), px(0.)), |display| {
-        popup_origin(display.bounds(), window_size, config.position)
+        popup_origin(
+            home_spot(display.bounds(), config.position),
+            window_size,
+            config.position,
+        )
     });
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -104,28 +106,67 @@ pub fn overlay_window_options(
     }
 }
 
-/// Top-left corner that centres a `window` on `screen`, `SURFACE_MARGIN`
-/// away from the edge at `position`.
-fn popup_origin(
-    screen: Bounds<Pixels>,
-    window: Size<Pixels>,
-    position: OverlayPosition,
-) -> Point<Pixels> {
-    let x = screen.origin.x + (screen.size.width - window.width) / 2.;
+/// Where the pill starts on `area`: centred, `MARGIN` from the edge at
+/// `position`.
+///
+/// A spot is the pill's left edge and the y of the edge it hugs (its bottom
+/// when it sits at the bottom), which stays put while the text grows.
+fn home_spot(area: Bounds<Pixels>, position: OverlayPosition) -> Point<Pixels> {
+    let x = area.left() + (area.size.width - px(WIDTH)) / 2.;
     let y = match position {
-        OverlayPosition::Bottom => {
-            screen.origin.y + screen.size.height - window.height - px(SURFACE_MARGIN)
-        }
-        OverlayPosition::Top => screen.origin.y + px(SURFACE_MARGIN),
+        OverlayPosition::Bottom => area.bottom() - px(MARGIN),
+        OverlayPosition::Top => area.top() + px(MARGIN),
     };
     point(x, y)
 }
 
-/// Room for the header, `max_lines` of text and the inset around the pill;
-/// the pill inside shrinks to its content and hugs the anchored edge.
+/// `spot` moved just far enough that a pill of size `pill` keeps `EDGE_GAP`
+/// inside `area`. On an area too small for it, its top-left corner stays on.
+fn clamp_spot(
+    spot: Point<Pixels>,
+    pill: Size<Pixels>,
+    area: Bounds<Pixels>,
+    position: OverlayPosition,
+) -> Point<Pixels> {
+    let gap = px(EDGE_GAP);
+    let fit = |value: Pixels, low: Pixels, high: Pixels| value.min(high).max(low);
+    let x = fit(spot.x, area.left() + gap, area.right() - gap - pill.width);
+    let y = match position {
+        OverlayPosition::Bottom => fit(
+            spot.y,
+            area.top() + gap + pill.height,
+            area.bottom() - gap,
+        ),
+        OverlayPosition::Top => fit(
+            spot.y,
+            area.top() + gap,
+            area.bottom() - gap - pill.height,
+        ),
+    };
+    point(x, y)
+}
+
+/// Top-left corner of the popup that shows the pill at `spot`: the pill
+/// hugs the popup's edge at `position`, `INSET` inside it.
+fn popup_origin(
+    spot: Point<Pixels>,
+    window: Size<Pixels>,
+    position: OverlayPosition,
+) -> Point<Pixels> {
+    let y = match position {
+        OverlayPosition::Bottom => spot.y + px(INSET) - window.height,
+        OverlayPosition::Top => spot.y - px(INSET),
+    };
+    point(spot.x - px(INSET), y)
+}
+
+/// The popup: room for the header, `max_lines` of text and the inset around
+/// the pill, which shrinks to its content inside.
 #[allow(clippy::cast_precision_loss)]
-fn window_height(max_lines: u32) -> f32 {
-    2. * INSET + PADDING_Y * 2. + HEADER_HEIGHT + GAP + LINE_HEIGHT * max_lines.max(1) as f32
+fn popup_size(max_lines: u32) -> Size<Pixels> {
+    let height =
+        2. * INSET + PADDING_Y * 2. + HEADER_HEIGHT + GAP + LINE_HEIGHT * max_lines.max(1) as f32;
+    size(px(WIDTH + 2. * INSET), px(height))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,14 +201,35 @@ pub struct OverlayView {
     /// The pill's colours as they fade toward the current phase's.
     look: Option<Look>,
     tabular_numbers: FontFeatures,
+    surface: OverlaySurface,
+    /// The X11 popup, when it can be moved.
+    x11: Option<X11Popup>,
+    /// Where the user dragged the pill this dictation (see [`home_spot`]),
+    /// in the coordinates of [`Self::area`]; `None` keeps it at home.
+    spot: Option<Point<Pixels>>,
+    /// While dragging: the pointer's offset from the spot it grabbed.
+    grab: Option<Point<Pixels>>,
+    /// The pill's bounds as last painted, in window coordinates.
+    painted: Rc<Cell<Option<Bounds<Pixels>>>>,
     _appearance: Subscription,
 }
 
 impl OverlayView {
-    pub fn new(config: &OverlayConfig, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: &OverlayConfig,
+        surface: OverlaySurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
+        let x11 = match surface {
+            OverlaySurface::X11Popup => X11Popup::new(window)
+                .inspect_err(|e| log::warn!("the overlay stays where it is: {e:#}"))
+                .ok(),
+            _ => None,
+        };
         Self {
             max_lines: config.max_lines.max(1),
             position: config.position,
@@ -183,12 +245,17 @@ impl OverlayView {
             frame_pending: false,
             look: None,
             tabular_numbers: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
+            surface,
+            x11,
+            spot: None,
+            grab: None,
+            painted: Rc::default(),
             _appearance: appearance,
         }
     }
 
-    /// Recording (re)started. A different start time is a new recording and
-    /// clears the previous one's text.
+    /// Recording (re)started. A different start time is a new recording: it
+    /// clears the previous one's text and brings the pill back home.
     pub fn recording(&mut self, started_at_ms: u64) {
         if started_at_ms != self.started_at_ms || !self.is_recording() {
             self.committed.clear();
@@ -196,6 +263,8 @@ impl OverlayView {
             self.level = 0.;
             self.stopped_at_ms = None;
             self.started_at_ms = started_at_ms;
+            self.spot = None;
+            self.grab = None;
         }
         self.phase = Phase::Recording;
     }
@@ -287,6 +356,94 @@ impl OverlayView {
         }
     }
 
+    fn movable(&self) -> bool {
+        self.surface == OverlaySurface::LayerShell || self.x11.is_some()
+    }
+
+    /// The area the pill moves on: the layer surface, which spans the
+    /// output, or the X screen the popup sits on.
+    fn area(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
+        if self.x11.is_some() {
+            window.display(cx).map(|display| display.bounds())
+        } else {
+            Some(Bounds::new(Point::default(), window.viewport_size()))
+        }
+    }
+
+    /// The pointer in the coordinates of [`Self::area`], given an event at
+    /// `local` in the window.
+    fn pointer(&self, local: Point<Pixels>, window: &Window) -> Option<Point<Pixels>> {
+        match &self.x11 {
+            Some(popup) => popup.pointer(window.scale_factor()),
+            None => Some(local),
+        }
+    }
+
+    /// Where the pill is now: its spot kept on `area` at its current size.
+    fn current_spot(&self, area: Bounds<Pixels>) -> Point<Pixels> {
+        let pill = self
+            .painted
+            .get()
+            .map_or(size(px(WIDTH), px(0.)), |painted| painted.size);
+        let spot = self
+            .spot
+            .unwrap_or_else(|| home_spot(area, self.position));
+        clamp_spot(spot, pill, area, self.position)
+    }
+
+    fn start_drag(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(pointer), Some(area)) = (self.pointer(event.position, window), self.area(window, cx))
+        else {
+            return;
+        };
+        self.grab = Some(pointer - self.current_spot(area));
+        cx.notify();
+    }
+
+    fn drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(grab) = self.grab else {
+            return;
+        };
+        // The button came up where we did not see it (the compositor ended
+        // the grab): the drag is over.
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.end_drag(cx);
+            return;
+        }
+        if let Some(pointer) = self.pointer(event.position, window) {
+            self.spot = Some(pointer - grab);
+            cx.notify();
+        }
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.grab.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Move the popup to the pill's spot once it was dragged (or back home
+    /// for a new dictation).
+    fn place_popup(&mut self, window: &Window, cx: &App) {
+        let Some(popup) = &self.x11 else {
+            return;
+        };
+        if self.spot.is_none() && !popup.is_moved() {
+            return;
+        }
+        let Some(area) = self.area(window, cx) else {
+            return;
+        };
+        let origin = popup_origin(
+            self.current_spot(area),
+            popup_size(self.max_lines),
+            self.position,
+        );
+        if let Some(popup) = &mut self.x11 {
+            popup.move_to(origin, window.scale_factor());
+        }
+    }
+
     /// Re-render after `interval`; the window closing drops the entity and
     /// ends the loop.
     fn schedule_frame(&mut self, interval: Duration, cx: &mut Context<Self>) {
@@ -327,8 +484,88 @@ impl Render for OverlayView {
         let header = self.header(theme);
         let body = self.body(theme);
 
-        // The pill hugs the anchored edge; the rest of the window is
-        // transparent (and, like all of it, click-through).
+        let painted = self.painted.clone();
+        let dragging = self.grab.is_some();
+        let view = cx.entity().downgrade();
+        let pill = div()
+            .w(px(WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap(px(GAP))
+            .px(px(PADDING_X))
+            .py(px(PADDING_Y))
+            .when(self.movable(), |this| {
+                this.cursor(CursorStyle::OpenHand)
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::start_drag))
+            })
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        pill::paint(bounds, edge, look, 1., window);
+                        if painted.get() != Some(bounds) {
+                            // Only the pill takes the pointer; everywhere
+                            // else clicks reach whatever is below.
+                            window.set_input_region(Some(&[bounds]));
+                            if painted.get().is_some_and(|last| last.size != bounds.size) {
+                                // Clamp the new size on screen right away.
+                                window.refresh();
+                            }
+                            painted.set(Some(bounds));
+                        }
+                        if dragging {
+                            follow_drag(view, window);
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(header)
+            .child(
+                // Only the last `max_lines` wrapped lines: anchor the text to
+                // the bottom and clip what scrolls off the top.
+                #[allow(clippy::cast_precision_loss)]
+                div()
+                    .max_h(px(LINE_HEIGHT * self.max_lines as f32))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .text_size(px(15.))
+                    .line_height(px(LINE_HEIGHT))
+                    .child(body),
+            );
+
+        if self.surface == OverlaySurface::LayerShell {
+            // The surface spans the output and the pill sits at its spot.
+            // Between the pill and the edge it hugs, a spacer that gives way
+            // when growing text would push the pill past the far edge.
+            let area = Bounds::new(Point::default(), window.viewport_size());
+            let spot = self.current_spot(area);
+            let near = match self.position {
+                OverlayPosition::Bottom => area.bottom() - spot.y,
+                OverlayPosition::Top => spot.y - area.top(),
+            };
+            return div()
+                .size_full()
+                .p(px(EDGE_GAP))
+                .flex()
+                .map(|this| match self.position {
+                    OverlayPosition::Bottom => this.flex_col(),
+                    OverlayPosition::Top => this.flex_col_reverse(),
+                })
+                .items_start()
+                .child(div().flex_grow_1().flex_basis(px(0.)))
+                .child(pill.ml(spot.x - px(EDGE_GAP)))
+                .child(div().h((near - px(EDGE_GAP)).max(px(0.))));
+        }
+
+        // The popup is just big enough; the pill hugs its edge at `position`.
+        self.place_popup(window, cx);
         div()
             .size_full()
             .p(px(INSET))
@@ -338,43 +575,25 @@ impl Render for OverlayView {
                 OverlayPosition::Bottom => this.justify_end(),
                 OverlayPosition::Top => this.justify_start(),
             })
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(GAP))
-                    .px(px(PADDING_X))
-                    .py(px(PADDING_Y))
-                    .child(
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, (), window, _| {
-                                pill::paint(bounds, edge, look, 1., window);
-                            },
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                    )
-                    .child(header)
-                    .child(
-                        // Only the last `max_lines` wrapped lines: anchor the
-                        // text to the bottom and clip what scrolls off the top.
-                        #[allow(clippy::cast_precision_loss)]
-                        div()
-                            .max_h(px(LINE_HEIGHT * self.max_lines as f32))
-                            .overflow_hidden()
-                            .flex()
-                            .flex_col()
-                            .justify_end()
-                            .text_size(px(15.))
-                            .line_height(px(LINE_HEIGHT))
-                            .child(body),
-                    ),
-            )
+            .child(pill)
     }
+}
+
+/// While a drag lasts, follow the pointer anywhere in the window (the pill
+/// trails it by a frame) and end on release. Registered each painted frame.
+fn follow_drag(view: WeakEntity<OverlayView>, window: &mut Window) {
+    window.set_window_cursor_style(CursorStyle::ClosedHand);
+    let moved = view.clone();
+    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+        if phase == DispatchPhase::Capture {
+            let _ = moved.update(cx, |view, cx| view.drag(event, window, cx));
+        }
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+            let _ = view.update(cx, OverlayView::end_drag);
+        }
+    });
 }
 
 /// Committed text in full colour followed by the tentative tail dimmed.
@@ -412,6 +631,22 @@ fn format_elapsed(elapsed: Duration) -> String {
 mod tests {
     use super::*;
 
+    fn screen() -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(1000.), px(0.)),
+            size: size(px(1920.), px(1080.)),
+        }
+    }
+
+    /// The pill's rectangle at `spot`, `height` tall.
+    fn pill_at(spot: Point<Pixels>, height: f32, position: OverlayPosition) -> Bounds<Pixels> {
+        let top = match position {
+            OverlayPosition::Bottom => spot.y - px(height),
+            OverlayPosition::Top => spot.y,
+        };
+        Bounds::new(point(spot.x, top), size(px(WIDTH), px(height)))
+    }
+
     #[test]
     fn elapsed_rolls_over_minutes() {
         assert_eq!(format_elapsed(Duration::from_millis(59_999)), "0:59");
@@ -420,17 +655,75 @@ mod tests {
     }
 
     #[test]
+    fn home_is_centred_margin_from_the_configured_edge() {
+        let bottom = home_spot(screen(), OverlayPosition::Bottom);
+        assert_eq!(bottom, point(px(1000. + (1920. - WIDTH) / 2.), px(1080. - MARGIN)));
+        let top = home_spot(screen(), OverlayPosition::Top);
+        assert_eq!(top, point(bottom.x, px(MARGIN)));
+        // Home needs no clamping on a real screen.
+        for position in [OverlayPosition::Bottom, OverlayPosition::Top] {
+            let home = home_spot(screen(), position);
+            let pill = size(px(WIDTH), popup_size(5).height - px(2. * INSET));
+            assert_eq!(clamp_spot(home, pill, screen(), position), home);
+        }
+    }
+
+    #[test]
     fn popup_is_centred_and_keeps_its_margin_from_the_anchored_edge() {
-        let screen = Bounds {
-            origin: point(px(1000.), px(0.)),
-            size: size(px(1920.), px(1080.)),
-        };
-        let window = size(px(WIDTH + 2. * INSET), px(window_height(3)));
-        let bottom = popup_origin(screen, window, OverlayPosition::Bottom);
+        let window = popup_size(3);
+        let spot = home_spot(screen(), OverlayPosition::Bottom);
+        let bottom = popup_origin(spot, window, OverlayPosition::Bottom);
         assert_eq!(bottom.x + px(INSET), px(1000. + (1920. - WIDTH) / 2.));
         // The pill itself sits `MARGIN` from the edge, its inset inside that.
         assert_eq!(bottom.y + window.height - px(INSET), px(1080. - MARGIN));
-        let top = popup_origin(screen, window, OverlayPosition::Top);
+        let spot = home_spot(screen(), OverlayPosition::Top);
+        let top = popup_origin(spot, window, OverlayPosition::Top);
         assert_eq!(top, point(bottom.x, px(MARGIN - INSET)));
+    }
+
+    #[test]
+    fn a_dragged_pill_never_leaves_the_screen() {
+        let screen = screen();
+        // A hair of slack for float rounding.
+        let gap = px(EDGE_GAP - 1e-3);
+        let on_screen = |pill: Bounds<Pixels>| {
+            pill.left() >= screen.left() + gap
+                && pill.right() <= screen.right() - gap
+                && pill.top() >= screen.top() + gap
+                && pill.bottom() <= screen.bottom() - gap
+        };
+        for position in [OverlayPosition::Bottom, OverlayPosition::Top] {
+            let home = home_spot(screen, position);
+            for height in [80., 124., 300.] {
+                let pill = size(px(WIDTH), px(height));
+                for dx in (-4000..=4000).step_by(250) {
+                    for dy in (-3000..=3000).step_by(125) {
+                        #[allow(clippy::cast_precision_loss)]
+                        let dragged = home + point(px(dx as f32), px(dy as f32));
+                        let spot = clamp_spot(dragged, pill, screen, position);
+                        let at = pill_at(spot, height, position);
+                        assert!(on_screen(at), "{position:?} {dx},{dy} {height}: {at:?}");
+                        // Within reach, the pill goes exactly where it was dragged.
+                        if on_screen(pill_at(dragged, height, position)) {
+                            assert_eq!(spot, dragged);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn corners_are_reachable() {
+        let screen = screen();
+        let pill = size(px(WIDTH), px(80.));
+        let far = point(px(-1e4), px(-1e4));
+        let bottom = clamp_spot(far, pill, screen, OverlayPosition::Bottom);
+        assert_eq!(bottom, point(px(1000. + EDGE_GAP), px(EDGE_GAP + 80.)));
+        let top = clamp_spot(far, pill, screen, OverlayPosition::Top);
+        assert_eq!(top, point(px(1000. + EDGE_GAP), px(EDGE_GAP)));
+        let far = point(px(1e4), px(1e4));
+        let bottom = clamp_spot(far, pill, screen, OverlayPosition::Bottom);
+        assert_eq!(bottom, point(px(2920. - EDGE_GAP - WIDTH), px(1080. - EDGE_GAP)));
     }
 }

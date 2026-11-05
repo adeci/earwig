@@ -18,7 +18,7 @@ pub const ROOM: f32 = SHADOW_DROP + 2.5 * SHADOW_BLUR + MAX_REACH;
 
 /// Furthest the edge moves out from rest: swell plus a full ripple at the
 /// wildest motion setting.
-const MAX_REACH: f32 = OverlayConfig::MAX_MOTION * (SWELL + RIPPLE);
+pub const MAX_REACH: f32 = OverlayConfig::MAX_MOTION * (SWELL + RIPPLE);
 /// The ambient shadow's offset below the pill and its blur (one standard
 /// deviation of the Gaussian GPUI draws).
 const SHADOW_DROP: f32 = 10.;
