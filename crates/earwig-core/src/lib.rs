@@ -16,6 +16,7 @@ pub mod ipc;
 pub mod models;
 pub mod paths;
 pub mod session;
+pub mod spectrum;
 
 /// Sample rate of all audio handed to an engine: 16 kHz mono `f32`.
 pub const SAMPLE_RATE: u32 = 16_000;

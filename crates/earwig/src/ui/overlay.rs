@@ -15,8 +15,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use earwig_core::config::{OverlayConfig, OverlayPosition};
+use earwig_core::config::{OverlayConfig, OverlayPosition, OverlayStyle};
 use earwig_core::desktop::DesktopCaps;
+use earwig_core::spectrum::Feed;
 use gpui_kit::component::{ActiveTheme as _, Theme};
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -30,7 +31,7 @@ use gpui_kit::{
 };
 
 use crate::ui::layer_area;
-use crate::ui::pill::{self, Clock, Edge, Look, Motion};
+use crate::ui::pill::{self, Clock, Look, Motion, Shape};
 use crate::ui::x11_popup::X11Popup;
 use crate::ui::{OverlaySurface, accent, now_ms};
 
@@ -39,7 +40,8 @@ const WIDTH: f32 = 560.;
 /// Gap between the pill and the edge of the screen (less bars) it starts
 /// at; at least `INSET`, so the window never reaches past that edge.
 const MARGIN: f32 = 56.;
-/// Transparent room around the pill for its moving edge and its shadow.
+/// Transparent room around the pill for its bars or moving edge and its
+/// shadow.
 const INSET: f32 = pill::ROOM;
 /// Gap between the window and the edge it starts at.
 const WINDOW_MARGIN: f32 = MARGIN - INSET;
@@ -48,15 +50,15 @@ const _: () = assert!(WINDOW_MARGIN >= 0.);
 /// on screen.
 const EDGE_GAP: f32 = pill::MAX_REACH;
 const LINE_HEIGHT: f32 = 22.;
-/// Frame pacing: smooth while the voice moves the edge, slow when it only
-/// breathes, so the overlay never competes with CPU decoding at display rate.
-const SPEAKING_FRAME: Duration = Duration::from_millis(16);
+/// Frame pacing: every display frame while the voice moves the pill, slow
+/// otherwise, so the overlay never competes with CPU decoding at display
+/// rate. A voice wakes a slow overlay at once (see [`OverlayView::hears`]).
 const QUIET_FRAME: Duration = Duration::from_millis(50);
 const STILL_FRAME: Duration = Duration::from_millis(250);
 /// The drag surface's frame interval on software rendering, where every
 /// frame of a surface that size costs real CPU.
 const SOFTWARE_DRAG_FRAME: Duration = Duration::from_millis(100);
-/// Pixels the edge must be able to travel to be worth `SPEAKING_FRAME`.
+/// Pixels the voice must move the pill by to be worth every frame.
 const SPEAKING_REACH: f32 = 0.35;
 const HEADER_HEIGHT: f32 = 22.;
 const PADDING_X: f32 = 18.;
@@ -68,6 +70,7 @@ pub fn open(
     config: &OverlayConfig,
     caps: &DesktopCaps,
     surface: OverlaySurface,
+    voice: Feed,
     cx: &mut App,
 ) -> anyhow::Result<Entity<OverlayView>> {
     let options = home_window_options(caps, config, cx.primary_display().as_deref());
@@ -78,7 +81,7 @@ pub fn open(
         Theme::sync_system_appearance(Some(window), cx);
         // Click-through until the pill is painted and takes its own bounds.
         window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(config, surface, window, cx));
+        let root = cx.new(|cx| OverlayView::new(config, surface, voice, window, cx));
         view = Some(root.clone());
         root
     })?;
@@ -137,6 +140,10 @@ fn base_options() -> WindowOptions {
         app_id: Some("earwig-overlay".into()),
         window_background: WindowBackgroundAppearance::Transparent,
         window_decorations: Some(WindowDecorations::Client),
+        // The pill never has focus, and GPUI holds unfocused windows to 30
+        // fps, which would also hold back the first frame of a voice by up
+        // to 33 ms. The overlay paces itself.
+        inactive_frame_interval: None,
         ..WindowOptions::default()
     }
 }
@@ -209,11 +216,16 @@ fn moved_window_options(
 fn drag_window_options(position: OverlayPosition, area: Size<Pixels>) -> WindowOptions {
     // Anchored like the home window, so the two share the area's frame:
     // centred along the edge, the surface fills the area's width.
-    layer_options(
+    let options = layer_options(
         edge_anchor(position),
         margins(position, px(0.), px(0.)),
         area,
-    )
+    );
+    // A surface this large follows the pointer at GPUI's calmer default.
+    WindowOptions {
+        inactive_frame_interval: WindowOptions::default().inactive_frame_interval,
+        ..options
+    }
 }
 
 /// Room for the header, `max_lines` of text and the inset around the pill,
@@ -368,14 +380,18 @@ pub struct OverlayView {
     stopped_at_ms: Option<u64>,
     committed: String,
     tentative: String,
-    /// Latest microphone level.
-    level: f32,
+    /// The voice of the current recording.
+    voice: Feed,
     clock: Clock,
+    style: OverlayStyle,
     motion: Motion,
-    /// The outline as of the last tick.
-    edge: Edge,
-    /// Fill opacity setting.
+    /// What the voice did to the pill as of the last tick.
+    shape: Shape,
+    /// The pill holds still (reduced motion, software rendering).
+    still: bool,
+    /// Fill opacity and border width settings.
     opacity: f32,
+    border: f32,
     frame_pending: bool,
     /// The pill's colours as they fade toward the current phase's.
     look: Option<Look>,
@@ -420,6 +436,7 @@ impl OverlayView {
     pub fn new(
         config: &OverlayConfig,
         surface: OverlaySurface,
+        voice: Feed,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -455,11 +472,14 @@ impl OverlayView {
             stopped_at_ms: None,
             committed: String::new(),
             tentative: String::new(),
-            level: 0.,
+            voice,
             clock: Clock::default(),
-            motion: Motion::new(config.motion()),
-            edge: Edge::default(),
+            style: config.style,
+            motion: Motion::new(config.style, config.motion()),
+            shape: Shape::still(config.style),
+            still: false,
             opacity: config.opacity(),
+            border: config.border(),
             frame_pending: false,
             look: None,
             tabular_numbers: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
@@ -485,7 +505,6 @@ impl OverlayView {
         if started_at_ms != self.started_at_ms || !self.is_recording() {
             self.committed.clear();
             self.tentative.clear();
-            self.level = 0.;
             self.stopped_at_ms = None;
             self.started_at_ms = started_at_ms;
         }
@@ -507,12 +526,13 @@ impl OverlayView {
         self.tentative = tentative;
     }
 
-    pub fn push_level(&mut self, level: f32) {
-        self.level = level.clamp(0., 1.);
-    }
-
     pub fn is_recording(&self) -> bool {
         matches!(self.phase, Phase::Recording)
+    }
+
+    /// Whether a new reading of the voice should be drawn right away.
+    pub fn hears(&self) -> bool {
+        self.is_recording() && !self.still
     }
 
     pub fn has_outcome(&self) -> bool {
@@ -803,32 +823,39 @@ impl OverlayView {
         }
     }
 
-    /// Advance the clock, the outline and the colours, and schedule the
-    /// next frame.
+    /// Advance the clock, the pill's motion and the colours, and schedule
+    /// the next frame.
     fn tick(&mut self, window: &Window, cx: &mut Context<Self>) {
         let dt = self.clock.tick(Instant::now());
-        let edge = self
-            .motion
-            .step(dt, self.is_recording().then_some(self.level));
-        let (edge, frame) = if pill::holds_still(window, cx) {
-            (Edge::default(), STILL_FRAME)
-        } else if edge.reach() > SPEAKING_REACH {
-            (edge, SPEAKING_FRAME)
+        let voice = self.is_recording().then(|| self.voice.latest());
+        let shape = self.motion.step(dt, voice.as_ref());
+        self.still = pill::holds_still(window, cx);
+        self.shape = if self.still {
+            self.schedule_frame(STILL_FRAME, cx);
+            Shape::still(self.style)
         } else {
-            (edge, QUIET_FRAME)
+            if shape.reach() > SPEAKING_REACH {
+                window.request_animation_frame();
+            } else {
+                self.schedule_frame(QUIET_FRAME, cx);
+            }
+            shape
         };
-        self.edge = edge;
-        self.schedule_frame(frame, cx);
         let accent = accent::get(cx);
         let theme = cx.theme();
-        let target = Look::themed(theme, accent.unwrap_or(theme.primary), self.opacity);
+        let target = Look::themed(
+            theme,
+            accent.unwrap_or(theme.primary),
+            self.opacity,
+            self.border,
+        );
         self.look = Some(self.look.map_or(target, |look| look.fade_to(target, dt)));
     }
 
     /// The pill: outline, header and text. Only the resting window's pill
     /// takes the pointer.
     fn pill(&self, theme: &Theme, rests: bool) -> Div {
-        let (edge, look) = (self.edge, self.look);
+        let (shape, look) = (self.shape, self.look);
         let painted = self.painted.clone();
         div()
             .w(px(WIDTH))
@@ -843,7 +870,7 @@ impl OverlayView {
                     |_, _, _| {},
                     move |bounds, (), window, _| {
                         if let Some(look) = look {
-                            pill::paint(bounds, edge, look, 1., window);
+                            pill::paint(bounds, &shape, look, 1., window);
                         }
                         if rests && painted.get() != Some(bounds) {
                             // Only the pill takes the pointer; everywhere

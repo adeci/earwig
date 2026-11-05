@@ -1,6 +1,7 @@
 //! Microphone capture as 16 kHz mono `f32`. The cpal callback only downmixes;
-//! a worker thread resamples, keeps the pre-roll, meters the level, and
-//! reopens a failed input until it works again.
+//! a worker thread analyses the raw input for the overlay (see
+//! [`crate::spectrum`]), resamples, keeps the pre-roll, and reopens a failed
+//! input until it works again.
 //!
 //! Linux goes through ALSA: on PipeWire systems the ALSA `default` device is
 //! PipeWire's plugin, so routing and device switching work without cpal's
@@ -19,12 +20,16 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 
 use crate::SAMPLE_RATE;
 use crate::config::AudioConfig;
+use crate::spectrum::{Analyzer, Feed, Spectrum};
 
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
 /// An open input that delivers nothing for this long counts as failed.
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
-const LEVEL_HZ: usize = 20;
-const CLIP_TICK: Duration = Duration::from_millis(20);
+/// How often a clip recording delivers audio, like a capture buffer.
+const CLIP_TICK: Duration = Duration::from_millis(10);
+/// Capture buffer to ask the device for: small, so the overlay reacts to
+/// the voice at once. Devices that cannot do it keep their default.
+const CAPTURE_BUFFER: Duration = Duration::from_millis(10);
 
 /// Names of the input devices, for `[audio] device`. These are cpal device
 /// ids (ALSA PCM names such as `default` or `pipewire`), stable across runs.
@@ -109,7 +114,7 @@ pub enum AudioEvent {
     /// Audio of recording `recording`, in order. The first chunk after
     /// [`Capture::start`] is the pre-roll.
     Samples { recording: u64, pcm: Vec<f32> },
-    /// Input level of the recording, 0.0 to 1.0, about 20 times a second.
+    /// Input level of the recording, 0.0 to 1.0, 20 times a second.
     Level { recording: u64, level: f32 },
     /// Every sample of `recording` has been delivered.
     Stopped { recording: u64 },
@@ -130,15 +135,18 @@ pub struct Capture {
 }
 
 impl Capture {
+    /// Capture from `source`; `events` gets the audio and `feed` the
+    /// overlay's live spectrum of each recording.
     pub fn spawn(
         source: Source,
         config: AudioConfig,
         events: flume::Sender<AudioEvent>,
+        feed: Feed,
     ) -> anyhow::Result<Self> {
         let (control, control_rx) = flume::unbounded();
         let worker = thread::Builder::new()
             .name("earwig-audio".into())
-            .spawn(move || Worker::new(source, config, events).run(&control_rx))?;
+            .spawn(move || Worker::new(source, config, events, feed).run(&control_rx))?;
         Ok(Self {
             control: Some(control),
             worker: Some(worker),
@@ -183,6 +191,7 @@ enum Raw {
 struct Input {
     _stream: cpal::Stream,
     rx: flume::Receiver<Raw>,
+    rate: u32,
     resampler: StreamResampler,
     last_data: Instant,
     name: String,
@@ -190,7 +199,8 @@ struct Input {
 
 struct Recording {
     id: u64,
-    meter: LevelMeter,
+    /// For the rate of the audio being analysed; made on first use.
+    analyzer: Option<Analyzer>,
     started: Instant,
     clip_sent: usize,
 }
@@ -199,6 +209,7 @@ struct Worker {
     source: Source,
     config: AudioConfig,
     events: flume::Sender<AudioEvent>,
+    feed: Feed,
     input: Option<Input>,
     /// When to try opening the input next.
     reopen_at: Instant,
@@ -215,11 +226,17 @@ enum Wake {
 }
 
 impl Worker {
-    fn new(source: Source, config: AudioConfig, events: flume::Sender<AudioEvent>) -> Self {
+    fn new(
+        source: Source,
+        config: AudioConfig,
+        events: flume::Sender<AudioEvent>,
+        feed: Feed,
+    ) -> Self {
         Self {
             source,
             config,
             events,
+            feed,
             input: None,
             reopen_at: Instant::now(),
             failing: false,
@@ -286,7 +303,6 @@ impl Worker {
         }
         match open_input(self.config.device.as_deref()) {
             Ok(input) => {
-                log::info!("audio input: {}", input.name);
                 self.failing = false;
                 self.input = Some(input);
             }
@@ -324,10 +340,11 @@ impl Worker {
         self.preroll.clear();
         self.recording = Some(Recording {
             id,
-            meter: LevelMeter::default(),
+            analyzer: None,
             started: Instant::now(),
             clip_sent: 0,
         });
+        self.feed.publish(Spectrum::default());
         if self.input.is_none() {
             self.reopen_at = Instant::now();
         }
@@ -352,6 +369,7 @@ impl Worker {
             }
             self.play_clip();
             self.recording = None;
+            self.feed.publish(Spectrum::default());
         }
         let _ = self.events.send(AudioEvent::Stopped { recording: id });
     }
@@ -361,6 +379,13 @@ impl Worker {
             return;
         };
         input.last_data = Instant::now();
+        let rate = input.rate;
+        // The overlay hears the voice before the resampler waits for a
+        // full chunk.
+        self.analyze(rate, raw);
+        let Some(input) = &mut self.input else {
+            return;
+        };
         let pcm = input.resampler.process(raw);
         if self.recording.is_some() {
             self.deliver(&pcm);
@@ -368,6 +393,26 @@ impl Worker {
             self.preroll.extend(pcm);
             self.trim_preroll();
         }
+    }
+
+    /// Feed `pcm`, audio at `rate` just heard by the recording, to its
+    /// analyzer: levels go to the controller, the spectrum to the overlay.
+    fn analyze(&mut self, rate: u32, pcm: &[f32]) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        let analyzer = match &mut recording.analyzer {
+            Some(analyzer) if analyzer.rate() == rate => analyzer,
+            slot => slot.insert(Analyzer::new(rate)),
+        };
+        let id = recording.id;
+        analyzer.push(pcm, |level| {
+            let _ = self.events.send(AudioEvent::Level {
+                recording: id,
+                level,
+            });
+        });
+        self.feed.publish(analyzer.spectrum());
     }
 
     fn trim_preroll(&mut self) {
@@ -392,23 +437,17 @@ impl Worker {
             .map(|i| clip.get(i).copied().unwrap_or(0.0))
             .collect();
         recording.clip_sent = due;
+        self.analyze(SAMPLE_RATE, &pcm);
         self.deliver(&pcm);
     }
 
-    fn deliver(&mut self, pcm: &[f32]) {
+    fn deliver(&self, pcm: &[f32]) {
         // The resampler returns nothing until it has a full chunk.
-        let (Some(recording), false) = (&mut self.recording, pcm.is_empty()) else {
+        let (Some(recording), false) = (&self.recording, pcm.is_empty()) else {
             return;
         };
-        let id = recording.id;
-        for level in recording.meter.push(pcm) {
-            let _ = self.events.send(AudioEvent::Level {
-                recording: id,
-                level,
-            });
-        }
         let _ = self.events.send(AudioEvent::Samples {
-            recording: id,
+            recording: recording.id,
             pcm: pcm.to_vec(),
         });
     }
@@ -429,28 +468,72 @@ fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
     let supported = device.default_input_config()?;
     let channels = usize::from(supported.channels());
     let rate = supported.sample_rate();
-    let config = supported.config();
+    let format = supported.sample_format();
     let (tx, rx) = flume::unbounded();
-    let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, tx),
-        cpal::SampleFormat::F64 => build::<f64>(&device, config, channels, tx),
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, tx),
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, channels, tx),
-        cpal::SampleFormat::I8 => build::<i8>(&device, config, channels, tx),
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, tx),
-        cpal::SampleFormat::U8 => build::<u8>(&device, config, channels, tx),
-        other => anyhow::bail!("{name}: unsupported sample format {other}"),
-    }
-    .with_context(|| format!("opening {name}"))?;
+    let small = small_buffer(*supported.buffer_size(), rate).and_then(|frames| {
+        let config = cpal::StreamConfig {
+            buffer_size: cpal::BufferSize::Fixed(frames),
+            ..supported.config()
+        };
+        build_any(&device, format, config, channels, tx.clone())
+            .inspect_err(|e| {
+                log::debug!("{name}: no {frames}-frame buffer, using its default: {e:#}")
+            })
+            .ok()
+    });
+    let stream = match small {
+        Some(stream) => stream,
+        None => build_any(&device, format, supported.config(), channels, tx)
+            .with_context(|| format!("opening {name}"))?,
+    };
     stream.play().with_context(|| format!("starting {name}"))?;
-    log::debug!("{name}: {rate} Hz, {channels} channel(s)");
+    let buffer = stream.buffer_size().map_or_else(
+        |_| "unknown".to_owned(),
+        |frames| {
+            format!(
+                "{frames} frames ({:.1} ms)",
+                1000. * to_f32(frames as usize) / to_f32(rate as usize)
+            )
+        },
+    );
+    log::info!("audio input {name}: {rate} Hz, {channels} channel(s), buffer {buffer}");
     Ok(Input {
         _stream: stream,
         rx,
+        rate,
         resampler: StreamResampler::new(rate)?,
         last_data: Instant::now(),
         name,
     })
+}
+
+/// The capture buffer to ask for at `rate`: `CAPTURE_BUFFER`, or the
+/// nearest the device supports.
+fn small_buffer(supported: cpal::SupportedBufferSize, rate: u32) -> Option<cpal::FrameCount> {
+    let frames = u32::try_from(u128::from(rate) * CAPTURE_BUFFER.as_millis() / 1000).ok()?;
+    Some(match supported {
+        cpal::SupportedBufferSize::Range { min, max } => frames.clamp(min, max.max(min)),
+        cpal::SupportedBufferSize::Unknown => frames,
+    })
+}
+
+fn build_any(
+    device: &cpal::Device,
+    format: cpal::SampleFormat,
+    config: cpal::StreamConfig,
+    channels: usize,
+    tx: flume::Sender<Raw>,
+) -> anyhow::Result<cpal::Stream> {
+    Ok(match format {
+        cpal::SampleFormat::F32 => build::<f32>(device, config, channels, tx),
+        cpal::SampleFormat::F64 => build::<f64>(device, config, channels, tx),
+        cpal::SampleFormat::I16 => build::<i16>(device, config, channels, tx),
+        cpal::SampleFormat::I32 => build::<i32>(device, config, channels, tx),
+        cpal::SampleFormat::I8 => build::<i8>(device, config, channels, tx),
+        cpal::SampleFormat::U16 => build::<u16>(device, config, channels, tx),
+        cpal::SampleFormat::U8 => build::<u8>(device, config, channels, tx),
+        other => anyhow::bail!("unsupported sample format {other}"),
+    }?)
 }
 
 fn build<T>(
@@ -559,33 +642,6 @@ impl StreamResampler {
     }
 }
 
-/// RMS level over short windows, mapped from -60..0 dBFS to 0..1.
-#[derive(Default)]
-struct LevelMeter {
-    sum: f32,
-    count: usize,
-}
-
-impl LevelMeter {
-    const WINDOW: usize = SAMPLE_RATE as usize / LEVEL_HZ;
-
-    fn push(&mut self, pcm: &[f32]) -> Vec<f32> {
-        let mut levels = Vec::new();
-        for &s in pcm {
-            self.sum += s * s;
-            self.count += 1;
-            if self.count == Self::WINDOW {
-                let rms = (self.sum / to_f32(Self::WINDOW)).sqrt();
-                let db = 20.0 * rms.max(1e-6).log10();
-                levels.push(((db + 60.0) / 60.0).clamp(0.0, 1.0));
-                self.sum = 0.0;
-                self.count = 0;
-            }
-        }
-        levels
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,17 +663,6 @@ mod tests {
         }
         // Up to one 20 ms chunk stays buffered.
         assert!((15_600..=16_000).contains(&out.len()), "{}", out.len());
-    }
-
-    #[test]
-    fn level_tracks_loudness() {
-        let mut meter = LevelMeter::default();
-        let silent = meter.push(&vec![0.0; LevelMeter::WINDOW]);
-        let loud = meter.push(&tone(SAMPLE_RATE, 800, 0.9));
-        let quiet = meter.push(&tone(SAMPLE_RATE, 800, 0.01));
-        assert_eq!(silent, [0.0]);
-        assert!(loud[0] > 0.9, "{loud:?}");
-        assert!(quiet[0] > 0.2 && quiet[0] < 0.5, "{quiet:?}");
     }
 
     #[test]
@@ -653,8 +698,15 @@ mod tests {
     fn clip_plays_per_recording_then_stops() {
         let clip: Arc<[f32]> = vec![0.5; 1_600].into();
         let (tx, rx) = flume::unbounded();
-        let capture = Capture::spawn(Source::Clip(clip), AudioConfig::default(), tx).unwrap();
+        let feed = Feed::default();
+        let wakes = feed.wakes();
+        let capture =
+            Capture::spawn(Source::Clip(clip), AudioConfig::default(), tx, feed.clone()).unwrap();
         capture.start(1);
+        assert!(
+            wakes.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the overlay hears it"
+        );
         thread::sleep(Duration::from_millis(250));
         capture.stop(1);
         let mut samples = Vec::new();
@@ -671,7 +723,29 @@ mod tests {
         assert!(samples[..1_600].iter().all(|&s| s == 0.5));
         assert!(samples[1_600..].iter().all(|&s| s == 0.0));
         assert!(levels >= 4, "{levels}");
+        assert_eq!(feed.latest(), Spectrum::default(), "cleared once stopped");
         // Nothing arrives between recordings.
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn capture_asks_for_a_small_buffer_within_the_device_range() {
+        use cpal::SupportedBufferSize::{Range, Unknown};
+        assert_eq!(
+            small_buffer(Range { min: 64, max: 8192 }, 48_000),
+            Some(480)
+        );
+        assert_eq!(
+            small_buffer(
+                Range {
+                    min: 1024,
+                    max: 8192
+                },
+                48_000
+            ),
+            Some(1024)
+        );
+        assert_eq!(small_buffer(Range { min: 16, max: 256 }, 44_100), Some(256));
+        assert_eq!(small_buffer(Unknown, 16_000), Some(160));
     }
 }
