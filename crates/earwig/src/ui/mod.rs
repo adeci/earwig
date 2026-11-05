@@ -6,7 +6,9 @@
 //! the model or the inserter: every action goes back to the controller as a
 //! [`Command`] or a config edit.
 
+mod accent;
 mod overlay;
+mod pill;
 mod settings;
 mod tray;
 
@@ -75,6 +77,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            accent::watch(cx);
             if surface == OverlaySurface::None {
                 log::warn!(
                     "this desktop offers neither layer-shell nor X11; the overlay stays hidden"
@@ -281,7 +284,7 @@ fn open_overlay(cx: &mut App) {
         Theme::sync_system_appearance(Some(window), cx);
         // Click-through: pointer input goes to whatever is below.
         window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(max_lines, anchor, cx));
+        let root = cx.new(|cx| OverlayView::new(max_lines, anchor, window, cx));
         view = Some(root.clone());
         root
     });

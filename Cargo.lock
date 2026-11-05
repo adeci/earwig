@@ -1638,12 +1638,14 @@ name = "earwig"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "clap",
  "ctrlc",
  "earwig-core",
  "earwig-transcribe",
  "env_logger",
  "flume",
+ "futures-lite",
  "gpui-kit",
  "ksni",
  "log",
