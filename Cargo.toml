@@ -21,6 +21,7 @@ ashpd = { version = "0.13", default-features = false, features = [
   "remote_desktop",
   "screencast",
   "clipboard",
+  "settings",
 ] }
 async-io = "2"
 atspi-proxies = "0.13"

@@ -4,7 +4,7 @@ Local dictation for Linux. Hold a key and talk, or tap it to keep listening.
 You see the words as you speak, and when you stop they land wherever you're
 typing, all at once.
 
-![The overlay while dictating](docs/overlay.png)
+[![The overlay while dictating](docs/overlay.png)](docs/overlay.gif)
 
 Speech never leaves your machine. The default model, Parakeet Unified 0.6B,
 transcribes while you talk, so on a GPU the text is ready about 0.2 s after you
