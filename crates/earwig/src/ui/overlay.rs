@@ -1,16 +1,17 @@
 //! The small on-screen pill shown while dictating. The user can drag it out
 //! of the way for the rest of the dictation; the next one starts at home.
+//! Hovering it shows a × that throws the dictation away.
 //!
 //! The pill's window is just big enough for it: GPUI's path rendering costs
 //! in proportion to the window's area, which makes an output-sized overlay
 //! expensive (very much so on software rendering). On layer-shell, where a
 //! surface cannot move once mapped, a drag shows the pill on a transparent
-//! surface over the output's usable area while the button is down, then
-//! reopens the small window where it was dropped. On X11 the popup itself
+//! surface over the output's usable area while the button is down, drawn
+//! with quads only, then reopens the small window where it was dropped (see
+//! [`drag`](crate::ui::drag) for the hand-over). On X11 the popup itself
 //! follows the pointer.
 
 use std::cell::Cell;
-use std::mem;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,18 +19,20 @@ use std::time::{Duration, Instant};
 use earwig_core::config::{OverlayConfig, OverlayPosition, OverlayStyle};
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::spectrum::Feed;
-use gpui_kit::component::{ActiveTheme as _, Theme};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme};
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
     Entity, FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    PlatformDisplay, Point, Render, Size, Styled as _, StyledText, Subscription, WeakEntity,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
-    canvas, div, point, px, size,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, PlatformDisplay, Point, Render, Size, StatefulInteractiveElement as _,
+    Styled as _, StyledText, Subscription, WeakEntity, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px,
+    size,
 };
 
+use crate::ui::drag::{Drag, Grab, Pointer};
 use crate::ui::layer_area;
 use crate::ui::pill::{self, Clock, Look, Motion, Shape};
 use crate::ui::x11_popup::X11Popup;
@@ -58,6 +61,12 @@ const STILL_FRAME: Duration = Duration::from_millis(250);
 /// The drag surface's frame interval on software rendering, where every
 /// frame of a surface that size costs real CPU.
 const SOFTWARE_DRAG_FRAME: Duration = Duration::from_millis(100);
+/// How long the drag surface waits, after a drop, for the pill's window to
+/// show it before closing anyway.
+const LANDING_TIMEOUT: Duration = Duration::from_millis(500);
+/// Group name of the pill, whose hover shows the discard button.
+const PILL: &str = "pill";
+const DISCARD_SIZE: f32 = 24.;
 /// Pixels the voice must move the pill by to be worth every frame.
 const SPEAKING_REACH: f32 = 0.35;
 const HEADER_HEIGHT: f32 = 22.;
@@ -221,9 +230,12 @@ fn drag_window_options(position: OverlayPosition, area: Size<Pixels>) -> WindowO
         margins(position, px(0.), px(0.)),
         area,
     );
-    // A surface this large follows the pointer at GPUI's calmer default.
+    // The pill follows the pointer at display rate: the surface never has
+    // focus or input of its own, which GPUI would otherwise hold to 30 fps
+    // (and to 30 fps in power-saver mode). Drawn with quads only, its
+    // frames are cheap.
     WindowOptions {
-        inactive_frame_interval: WindowOptions::default().inactive_frame_interval,
+        low_power_frame_interval: None,
         ..options
     }
 }
@@ -409,27 +421,31 @@ pub struct OverlayView {
     /// Where the user dragged the pill this dictation (see [`home_spot`]);
     /// `None` keeps it at home.
     spot: Option<Point<Pixels>>,
-    grab: Option<Grab>,
+    drag: Drag,
     /// When the pill last followed the pointer.
     moved_at: Option<Instant>,
-    /// The surface showing the pill while a drag lasts (layer-shell), and
-    /// whether it has drawn it yet.
+    /// The surface showing the pill while a drag lasts and until its window
+    /// shows it again (layer-shell).
     drag_window: Option<AnyWindowHandle>,
-    drag_shown: bool,
-    /// Windows to close once the pill shows in its new one.
-    retired: Vec<AnyWindowHandle>,
-    /// The pill's bounds as last painted in its window.
-    painted: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The window the pill rested in before it was dropped elsewhere, which
+    /// closes with the drag surface.
+    left_behind: Option<AnyWindowHandle>,
+    painted: Painted,
     /// Follows the system appearance through the resting window.
     appearance: Subscription,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Grab {
-    /// The pointer's offset from the spot it grabbed.
-    offset: Point<Pixels>,
-    /// That spot.
-    from: Point<Pixels>,
+/// The pill's bounds as last painted in a resting window, and which one:
+/// each new window needs its input region set.
+type Painted = Rc<Cell<Option<(WindowId, Bounds<Pixels>)>>>;
+
+/// What a window draws the pill for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// The pill at rest: animated, takes the pointer.
+    Rest,
+    /// The pill on the drag surface: static quads, no input.
+    Drag,
 }
 
 impl OverlayView {
@@ -489,11 +505,10 @@ impl OverlayView {
             window: None,
             origin: None,
             spot: None,
-            grab: None,
+            drag: Drag::default(),
             moved_at: None,
             drag_window: None,
-            drag_shown: false,
-            retired: Vec::new(),
+            left_behind: None,
             painted: Rc::default(),
             appearance: observe_appearance(window, cx),
         }
@@ -550,7 +565,7 @@ impl OverlayView {
         self.window
             .iter()
             .chain(&self.drag_window)
-            .chain(&self.retired)
+            .chain(&self.left_behind)
             .copied()
             .collect()
     }
@@ -648,7 +663,7 @@ impl OverlayView {
         let pill = self
             .painted
             .get()
-            .map_or(size(px(WIDTH), px(0.)), |painted| painted.size);
+            .map_or(size(px(WIDTH), px(0.)), |(_, painted)| painted.size);
         let spot = self
             .spot
             .unwrap_or_else(|| hug(origin, window_size(self.max_lines), self.position));
@@ -670,10 +685,6 @@ impl OverlayView {
     }
 
     fn start_drag(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // Still handing over to the window of the last drop.
-        if self.grab.is_some() || !self.retired.is_empty() {
-            return;
-        }
         let Some(area) = self.area(window, cx) else {
             return;
         };
@@ -681,10 +692,13 @@ impl OverlayView {
             return;
         };
         let from = self.current_spot(area, self.origin(area));
-        self.grab = Some(Grab {
+        let grab = Grab {
             offset: pointer - from,
             from,
-        });
+        };
+        if !self.drag.hold(grab) {
+            return;
+        }
         if self.x11.is_none() {
             self.open_drag_window(area.size, cx);
         }
@@ -697,7 +711,7 @@ impl OverlayView {
         // Opening renders the window, which reads this view: not while it
         // is being updated.
         cx.defer(move |cx| {
-            if overlay.read(cx).grab.is_none() {
+            if !overlay.read(cx).drag.is_held() {
                 return;
             }
             let opened = cx.open_window(options, |window, cx| {
@@ -712,13 +726,22 @@ impl OverlayView {
         });
     }
 
-    fn drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(grab) = self.grab else {
+    /// A pointer event in the resting window while the pill is held, at
+    /// `local` in it.
+    fn on_pointer(
+        &mut self,
+        event: Pointer,
+        local: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(grab) = self.drag.grab() else {
             return;
         };
-        // The button came up where we did not see it (the compositor ended
-        // the grab): the drag is over.
-        if event.pressed_button != Some(MouseButton::Left) {
+        if event.ends_drag() {
+            if matches!(event, Pointer::Released(_)) {
+                self.follow(local, grab, window, cx);
+            }
             self.end_drag(cx);
             return;
         }
@@ -733,7 +756,7 @@ impl OverlayView {
             return;
         }
         self.moved_at = Some(Instant::now());
-        self.follow(event.position, grab, window, cx);
+        self.follow(local, grab, window, cx);
     }
 
     fn follow(
@@ -752,27 +775,28 @@ impl OverlayView {
         }
     }
 
-    fn release(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(grab) = self.grab {
-            self.follow(event.position, grab, window, cx);
-        }
-        self.end_drag(cx);
-    }
-
-    /// The button came up. On layer-shell, reopen the resting window where
-    /// the pill was dropped; the drag surface shows it until that window
-    /// does.
+    /// Let go of the pill. On layer-shell, reopen the resting window where
+    /// it was dropped (or let the old one show it again, when it did not
+    /// move); the drag surface shows it until that window does.
     fn end_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(grab) = self.grab.take() else {
+        let Some((grab, landing)) = self.drag.let_go() else {
             return;
         };
         cx.notify();
-        self.drag_shown = false;
-        self.retired.extend(self.drag_window.take());
-        // Only layer-shell knows its area; the X11 popup already followed.
-        let Some(area) = self.usable.map(|area| Bounds::new(Point::default(), area)) else {
+        // The X11 popup already followed the pointer.
+        let Some(area) = self
+            .usable
+            .filter(|_| self.x11.is_none())
+            .map(|area| Bounds::new(Point::default(), area))
+        else {
+            self.land(landing, cx);
             return;
         };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LANDING_TIMEOUT).await;
+            let _ = this.update(cx, |view, cx| view.land(landing, cx));
+        })
+        .detach();
         let spot = self.current_spot(area, self.origin(area));
         if self.spot.is_none() || spot == grab.from {
             return;
@@ -780,8 +804,8 @@ impl OverlayView {
         self.spot = Some(spot);
         let window = window_size(self.max_lines);
         let origin = window_origin(spot, window, area, self.position);
-        let previous = (self.window.take(), self.origin.replace(origin));
-        self.retired.extend(previous.0);
+        let previous_origin = self.origin.replace(origin);
+        self.left_behind = self.window.take();
         let options = moved_window_options(self.position, origin, window, area.size);
         let overlay = cx.entity();
         cx.defer(move |cx| {
@@ -792,18 +816,29 @@ impl OverlayView {
                 });
                 overlay.clone()
             });
-            overlay.update(cx, |view, _| match opened {
+            overlay.update(cx, |view, cx| match opened {
                 Ok(handle) => view.window = Some(handle.into()),
                 Err(e) => {
                     log::warn!("moving the overlay: {e:#}");
                     // Back to the old window, which never moved.
-                    view.window = previous.0;
-                    view.origin = previous.1;
+                    view.window = view.left_behind.take();
+                    view.origin = previous_origin;
                     view.spot = Some(grab.from);
-                    view.retired.retain(|window| Some(*window) != previous.0);
+                    cx.notify();
                 }
             });
         });
+    }
+
+    /// The pill's window shows it again after `landing`: close the drag
+    /// surface and the window it was dropped out of.
+    fn land(&mut self, landing: u32, cx: &mut Context<Self>) {
+        if !self.drag.land(landing) {
+            return;
+        }
+        for handle in self.drag_window.take().into_iter().chain(self.left_behind.take()) {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
     }
 
     /// Move the X11 popup to the pill's spot once it was dragged.
@@ -853,11 +888,20 @@ impl OverlayView {
     }
 
     /// The pill: outline, header and text. Only the resting window's pill
-    /// takes the pointer.
-    fn pill(&self, theme: &Theme, rests: bool) -> Div {
-        let (shape, look) = (self.shape, self.look);
+    /// takes the pointer and offers to discard the dictation.
+    fn pill(&self, theme: &Theme, role: Role) -> Div {
+        let rests = role == Role::Rest;
+        let shape = if rests {
+            self.shape
+        } else {
+            // Shadow and body quads, whatever the style: no paths on an
+            // output-sized surface.
+            Shape::still(OverlayStyle::Bars)
+        };
+        let look = self.look;
         let painted = self.painted.clone();
         div()
+            .group(PILL)
             .w(px(WIDTH))
             .flex_shrink_0()
             .flex()
@@ -872,15 +916,17 @@ impl OverlayView {
                         if let Some(look) = look {
                             pill::paint(bounds, &shape, look, 1., window);
                         }
-                        if rests && painted.get() != Some(bounds) {
+                        let id = window.window_handle().window_id();
+                        let last = painted.get();
+                        if rests && last != Some((id, bounds)) {
                             // Only the pill takes the pointer; everywhere
                             // else clicks reach whatever is below.
                             window.set_input_region(Some(&[bounds]));
-                            if painted.get().is_some_and(|last| last.size != bounds.size) {
+                            if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
                                 window.refresh();
                             }
-                            painted.set(Some(bounds));
+                            painted.set(Some((id, bounds)));
                         }
                     },
                 )
@@ -904,6 +950,9 @@ impl OverlayView {
                     .line_height(px(LINE_HEIGHT))
                     .child(self.body(theme)),
             )
+            .when(rests && !self.has_outcome(), |this| {
+                this.child(discard_button(theme))
+            })
     }
 
     /// A window at `origin` on `area` with the pill at `spot` in it. A
@@ -951,17 +1000,14 @@ impl OverlayView {
 
 impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.retired.contains(&window.window_handle()) {
-            // Replaced by the window the pill was dropped in; closing.
+        if self.left_behind == Some(window.window_handle()) {
+            // The pill was dropped elsewhere; closing once it shows there.
             return div();
         }
-        if !self.retired.is_empty() {
-            // This window shows the pill from now on.
-            let retired = mem::take(&mut self.retired);
-            window.on_next_frame(move |_, cx| {
-                for handle in retired {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
-                }
+        if let Some(landing) = self.drag.landing() {
+            // The pill is back in this window from this frame on.
+            after_present(window, cx.entity().downgrade(), move |view, cx| {
+                view.land(landing, cx);
             });
         }
         self.tick(window, cx);
@@ -975,45 +1021,113 @@ impl Render for OverlayView {
             None => (Bounds::new(Point::default(), viewport), Point::default()),
         };
         let spot = self.current_spot(area, origin);
-        let dragging = self.grab.is_some();
-        let view = cx.entity().downgrade();
-        let follow = canvas(
-            |_, _, _| {},
-            move |_, (), window, _| {
-                if dragging {
-                    follow_drag(view, window);
-                }
-            },
-        )
-        .absolute()
-        .size_full();
-        if dragging && self.drag_shown {
-            // The drag surface shows the pill.
-            return div().size_full().child(follow);
-        }
-        let pill = self.pill(cx.theme(), true).when(self.movable(), |this| {
-            this.cursor(CursorStyle::OpenHand)
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::start_drag))
+        let follow = self.drag.is_held().then(|| {
+            let view = cx.entity().downgrade();
+            let exits = self.x11.is_none();
+            canvas(
+                |_, _, _| {},
+                move |_, (), window, _| follow_drag(view, exits, window),
+            )
+            .absolute()
+            .size_full()
         });
+        if self.drag.is_covered() {
+            return div().size_full().children(follow);
+        }
+        let pill = self
+            .pill(cx.theme(), Role::Rest)
+            .when(self.movable(), |this| {
+                this.cursor(CursorStyle::OpenHand)
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::start_drag))
+            });
         self.layout(pill, spot, origin, viewport, area)
-            .child(follow)
+            .children(follow)
     }
 }
 
+/// The × in the pill's top-right corner, shown while the pointer is on the
+/// pill: throws the dictation away.
+fn discard_button(theme: &Theme) -> impl IntoElement {
+    // As far from the top and right edges as the header row's centre.
+    let inset = px(PADDING_Y + (HEADER_HEIGHT - DISCARD_SIZE) / 2.);
+    let (highlight, bright) = (theme.foreground.opacity(0.12), theme.foreground);
+    div()
+        .id("discard")
+        .absolute()
+        .top(inset)
+        .right(inset)
+        .size(px(DISCARD_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .text_color(theme.muted_foreground)
+        .cursor(CursorStyle::PointingHand)
+        .invisible()
+        .group_hover(PILL, gpui_kit::StyleRefinement::visible)
+        .hover(move |style| style.bg(highlight).text_color(bright))
+        .child(Icon::new(IconName::Close).size(px(14.)))
+        // A press here is no drag.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(|_, _, cx| cx.defer(crate::ui::discard))
+}
+
 /// While a drag lasts, follow the pointer anywhere (the resting window keeps
-/// it while the button is down) and end on release. Registered each frame.
-fn follow_drag(view: WeakEntity<OverlayView>, window: &mut Window) {
+/// it while the button is down) and end on release, on a press of another
+/// button, and, with `exits`, when the window loses the pointer. Registered
+/// each frame.
+fn follow_drag(view: WeakEntity<OverlayView>, exits: bool, window: &mut Window) {
     window.set_window_cursor_style(CursorStyle::ClosedHand);
+    let on = |view: &WeakEntity<OverlayView>,
+              event: Pointer,
+              local: Point<Pixels>,
+              window: &mut Window,
+              cx: &mut App| {
+        let _ = view.update(cx, |view, cx| view.on_pointer(event, local, window, cx));
+    };
     let moved = view.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
-            let _ = moved.update(cx, |view, cx| view.drag(event, window, cx));
+            let pressed = event.pressed_button;
+            on(&moved, Pointer::Moved { pressed }, event.position, window, cx);
         }
     });
+    let released = view.clone();
     window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-        if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
-            let _ = view.update(cx, |view, cx| view.release(event, window, cx));
+        if phase == DispatchPhase::Capture {
+            let pointer = Pointer::Released(event.button);
+            on(&released, pointer, event.position, window, cx);
         }
+    });
+    let pressed = view.clone();
+    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+        if phase == DispatchPhase::Capture {
+            let pointer = Pointer::Pressed(event.button);
+            on(&pressed, pointer, event.position, window, cx);
+        }
+    });
+    if exits {
+        window.on_mouse_event(move |event: &MouseExitEvent, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                on(&view, Pointer::Exited, event.position, window, cx);
+            }
+        });
+    }
+}
+
+/// Run `f` on `view` once the frame `window` draws next has been presented:
+/// its next-frame callbacks run before it draws, and a task spawned there
+/// after that frame was handed to the compositor.
+fn after_present<V: 'static>(
+    window: &mut Window,
+    view: WeakEntity<V>,
+    f: impl FnOnce(&mut V, &mut Context<V>) + 'static,
+) {
+    window.on_next_frame(move |_, cx| {
+        cx.spawn(async move |cx| {
+            let _ = view.update(cx, f);
+        })
+        .detach();
     });
 }
 
@@ -1032,15 +1146,18 @@ struct DragView {
 impl Render for DragView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
+        let overlay = self.overlay.downgrade();
         self.overlay.update(cx, |view, cx| {
-            if !view.drag_shown {
-                // The resting window can stop drawing the pill.
-                view.drag_shown = true;
-                cx.notify();
+            if view.drag.is_held() && !view.drag.is_covered() {
+                // Once this shows the pill, its window can leave it out.
+                after_present(window, overlay, |view, cx| {
+                    view.drag.cover();
+                    cx.notify();
+                });
             }
             let area = Bounds::new(Point::default(), view.usable.unwrap_or(viewport));
             let spot = view.current_spot(area, view.origin(area));
-            let pill = view.pill(cx.theme(), false);
+            let pill = view.pill(cx.theme(), Role::Drag);
             view.layout(pill, spot, Point::default(), area.size, area)
         })
     }

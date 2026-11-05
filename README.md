@@ -7,7 +7,7 @@ typing, all at once.
 ![The overlay while dictating](docs/overlay.gif)
 
 If the overlay is in the way, drag it aside; the next dictation brings it
-back.
+back. The × that shows when you point at it throws the dictation away.
 
 ## Setup
 

@@ -7,6 +7,7 @@
 //! [`Command`] or a config edit.
 
 mod accent;
+mod drag;
 mod layer_area;
 mod overlay;
 mod pill;
@@ -305,6 +306,13 @@ fn close_overlay(cx: &mut App) {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
     }
+}
+
+/// The pill's × was clicked: drop the dictation (nothing is inserted) and
+/// get out of the way at once.
+pub(crate) fn discard(cx: &mut App) {
+    UiState::handle(cx).send(Command::Cancel);
+    close_overlay(cx);
 }
 
 fn schedule_overlay_close(after: Duration, cx: &mut App) {
