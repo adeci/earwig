@@ -4,7 +4,10 @@ Local dictation for Linux. Hold a key and talk, or tap it to keep listening.
 You see the words as you speak, and when you stop they land wherever you're
 typing, all at once.
 
-![The overlay while dictating](docs/overlay.png)
+![The overlay while dictating](docs/overlay.gif)
+
+If the overlay is in the way, drag it aside; the next dictation brings it
+back.
 
 ## Setup
 

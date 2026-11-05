@@ -1,0 +1,334 @@
+//! The overlay pill's motion and opacity settings: their sliders and a small
+//! pill that shows the result, wobbling while the motion slider moves.
+
+use std::f32::consts::TAU;
+use std::time::{Duration, Instant};
+
+use earwig_core::config::{Config, OverlayConfig};
+use gpui_kit::component::slider::{Slider, SliderState};
+use gpui_kit::component::{ActiveTheme as _, h_flex};
+use gpui_kit::{
+    App, AppContext as _, Bounds, ContentMask, Context, Div, Entity, Hsla, IntoElement,
+    ParentElement as _, Pixels, Render, Styled as _, Subscription, Task, Window, canvas, div, fill,
+    point, px, size,
+};
+
+use crate::ui::pill::{self, Clock, Edge, Look, Motion};
+use crate::ui::{UiState, accent, config, edit_config};
+
+/// The preview is the overlay's pill at this size.
+const SCALE: f32 = 0.5;
+const PILL_WIDTH: f32 = 120.;
+const PILL_HEIGHT: f32 = 30.;
+/// Checkered backdrop around the preview pill, so its transparency shows;
+/// wide enough for the edge at the wildest motion.
+const CARD_MARGIN: f32 = 12.;
+const CARD_WIDTH: f32 = PILL_WIDTH + 2. * CARD_MARGIN;
+const CARD_HEIGHT: f32 = PILL_HEIGHT + 2. * CARD_MARGIN;
+const CHECKER: f32 = 6.;
+const SLIDER_WIDTH: f32 = 180.;
+/// Same pacing as the overlay while the voice moves its edge.
+const FRAME: Duration = Duration::from_millis(16);
+/// The preview keeps speaking this long after the motion slider last moved,
+/// which bridges the gaps between pointer events of one drag.
+const HOLD: Duration = Duration::from_millis(150);
+/// Unscaled reach below which the preview counts as still: under a third of
+/// a preview pixel.
+const SETTLED: f32 = 0.3 / SCALE;
+/// Writes wait until a slider has rested this long.
+const SAVE_DELAY: Duration = Duration::from_millis(300);
+/// Syllables per second of the synthetic voice.
+const SYLLABLE_RATE: f32 = 4.5;
+
+/// Which of the pill's settings a slider row controls.
+#[derive(Clone, Copy)]
+pub enum Knob {
+    Motion,
+    Opacity,
+}
+
+pub struct PillPreview {
+    motion: Dial,
+    opacity: Dial,
+    wobble: Wobble,
+    frame_pending: bool,
+    _sliders: [Subscription; 2],
+}
+
+/// A slider, its value as of the last change seen, and the pending write.
+struct Dial {
+    state: Entity<SliderState>,
+    value: f32,
+    save: Option<Task<()>>,
+}
+
+impl PillPreview {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let overlay = config(UiState::handle(cx)).overlay;
+        let motion = Dial::new(0., OverlayConfig::MAX_MOTION, 0.1, overlay.motion(), cx);
+        let opacity = Dial::new(OverlayConfig::MIN_OPACITY, 1., 0.01, overlay.opacity(), cx);
+        // Observed rather than subscribed: assistive-technology steps change
+        // the value without emitting an event.
+        let sliders = [
+            cx.observe(&motion.state, |this, _, cx| {
+                if let Some(value) = this.motion.changed(|c, v| c.overlay.motion = v, cx) {
+                    this.wobble.nudge(value, Instant::now());
+                }
+            }),
+            cx.observe(&opacity.state, |this, _, cx| {
+                this.opacity.changed(|c, v| c.overlay.opacity = v, cx);
+            }),
+        ];
+        Self {
+            wobble: Wobble::new(motion.value),
+            motion,
+            opacity,
+            frame_pending: false,
+            _sliders: sliders,
+        }
+    }
+
+    /// A setting row's control: the knob's slider, with the preview beside
+    /// the motion slider and room for it beside the opacity one, so the
+    /// sliders line up.
+    pub fn field(view: &Entity<Self>, knob: Knob, disabled: bool, cx: &App) -> Div {
+        let this = view.read(cx);
+        let (slider, beside) = match knob {
+            Knob::Motion => (&this.motion.state, view.clone().into_any_element()),
+            Knob::Opacity => (
+                &this.opacity.state,
+                div().w(px(CARD_WIDTH)).into_any_element(),
+            ),
+        };
+        h_flex()
+            .gap_4()
+            .items_center()
+            .child(
+                div()
+                    .w(px(SLIDER_WIDTH))
+                    .child(Slider::new(slider).disabled(disabled)),
+            )
+            .child(beside)
+    }
+
+    /// Re-render after `FRAME`; the window closing drops the entity and ends
+    /// the loop.
+    fn schedule_frame(&mut self, cx: &mut Context<Self>) {
+        if self.frame_pending {
+            return;
+        }
+        self.frame_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FRAME).await;
+            let _ = this.update(cx, |this, cx| {
+                this.frame_pending = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Dial {
+    fn new(min: f32, max: f32, step: f32, value: f32, cx: &mut Context<PillPreview>) -> Self {
+        let state = cx.new(|_| {
+            SliderState::new()
+                .min(min)
+                .max(max)
+                .step(step)
+                .default_value(value)
+        });
+        Self {
+            state,
+            value,
+            save: None,
+        }
+    }
+
+    /// The new value if the slider moved, written with `set` once it rests;
+    /// a newer change replaces (and so cancels) the pending write.
+    fn changed(&mut self, set: fn(&mut Config, f32), cx: &mut Context<PillPreview>) -> Option<f32> {
+        let value = self.state.read(cx).value().end();
+        if (value - self.value).abs() <= f32::EPSILON {
+            return None;
+        }
+        self.value = value;
+        let saved = (value * 100.).round() / 100.;
+        self.save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let _ = this.update(cx, |_, cx| edit_config(cx, |c| set(c, saved)));
+        }));
+        cx.notify();
+        Some(value)
+    }
+}
+
+impl Render for PillPreview {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let edge = if pill::holds_still(window, cx) {
+            self.wobble.settle();
+            Edge::default()
+        } else {
+            match self.wobble.frame(Instant::now()) {
+                Some(edge) => {
+                    self.schedule_frame(cx);
+                    edge
+                }
+                None => Edge::default(),
+            }
+        };
+        let theme = cx.theme();
+        let accent = accent::get(cx).unwrap_or(theme.primary);
+        let look = Look::themed(theme, accent, self.opacity.value);
+        let (base, check) = (theme.background, theme.muted_foreground.opacity(0.3));
+
+        canvas(
+            |_, _, _| {},
+            move |bounds, (), window, _| {
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    paint_checker(bounds, base, check, window);
+                    let pill = bounds.dilate(px(-CARD_MARGIN));
+                    pill::paint(pill, edge, look, SCALE, window);
+                });
+            },
+        )
+        .w(px(CARD_WIDTH))
+        .h(px(CARD_HEIGHT))
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn paint_checker(bounds: Bounds<Pixels>, base: Hsla, check: Hsla, window: &mut Window) {
+    window.paint_quad(fill(bounds, base));
+    let (left, top) = (f32::from(bounds.left()), f32::from(bounds.top()));
+    let (columns, rows) = (
+        (CARD_WIDTH / CHECKER).ceil() as u8,
+        (CARD_HEIGHT / CHECKER).ceil() as u8,
+    );
+    for row in 0..rows {
+        for column in (row % 2..columns).step_by(2) {
+            let origin = point(
+                px(left + f32::from(column) * CHECKER),
+                px(top + f32::from(row) * CHECKER),
+            );
+            window.paint_quad(fill(
+                Bounds::new(origin, size(px(CHECKER), px(CHECKER))),
+                check,
+            ));
+        }
+    }
+}
+
+/// The preview's motion: a synthetic voice speaks while the motion slider
+/// moves, then the edge settles the way the overlay's does when recording
+/// stops.
+struct Wobble {
+    motion: Motion,
+    clock: Clock,
+    /// When the slider last moved; `None` once the edge has settled.
+    moved_at: Option<Instant>,
+    /// Seconds of synthetic voice so far, so each nudge continues the
+    /// sentence instead of restarting it.
+    spoken: f32,
+}
+
+impl Wobble {
+    fn new(intensity: f32) -> Self {
+        Self {
+            motion: Motion::new(intensity),
+            clock: Clock::default(),
+            moved_at: None,
+            spoken: 0.,
+        }
+    }
+
+    fn nudge(&mut self, intensity: f32, now: Instant) {
+        self.motion.set_intensity(intensity);
+        self.moved_at = Some(now);
+    }
+
+    fn settle(&mut self) {
+        self.moved_at = None;
+        self.clock = Clock::default();
+    }
+
+    /// The edge at `now`, or `None` when it is still.
+    fn frame(&mut self, now: Instant) -> Option<Edge> {
+        let moved_at = self.moved_at?;
+        let dt = self.clock.tick(now);
+        let speaking = now.saturating_duration_since(moved_at) < HOLD;
+        let level = speaking.then(|| {
+            self.spoken += dt;
+            synthetic_level(self.spoken)
+        });
+        let edge = self.motion.step(dt, level);
+        if !speaking && edge.reach() < SETTLED {
+            self.settle();
+            return None;
+        }
+        Some(edge)
+    }
+}
+
+/// A mic level (0..1 over -60..0 dBFS) that sounds like steady talking:
+/// syllables rising well into the voice range with room noise between them,
+/// some stressed more than others.
+fn synthetic_level(t: f32) -> f32 {
+    let syllable = (TAU * SYLLABLE_RATE * t).sin().max(0.).sqrt();
+    let stress = 0.8 + 0.2 * (TAU * 0.7 * t).sin();
+    0.3 + 0.5 * syllable * stress
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `frames` frames at 60 Hz from `start`, nudging the slider to
+    /// `intensity` on each of the first `nudging`.
+    fn run(
+        wobble: &mut Wobble,
+        start: Instant,
+        frames: u32,
+        nudging: u32,
+        intensity: f32,
+    ) -> Vec<Option<Edge>> {
+        (0..frames)
+            .map(|i| {
+                let now = start + Duration::from_secs(1) * i / 60;
+                if i < nudging {
+                    wobble.nudge(intensity, now);
+                }
+                wobble.frame(now)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn preview_moves_while_the_slider_moves_then_settles() {
+        let start = Instant::now();
+        let mut wobble = Wobble::new(1.);
+        assert!(wobble.frame(start).is_none(), "idle preview is still");
+
+        let frames = run(&mut wobble, start, 150, 60, 1.5);
+        let reach = frames[..60]
+            .iter()
+            .map(|f| f.map_or(0., |e| e.reach()))
+            .fold(0., f32::max);
+        assert!(reach > 5., "moves while the slider does: {reach}");
+        let settled_at = frames.iter().position(Option::is_none).unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        let after_last_change = (settled_at - 60) as f32 / 60.;
+        assert!(
+            (0.5..=1.2).contains(&after_last_change),
+            "eases out after the slider stops: {after_last_change} s"
+        );
+        assert!(frames[settled_at..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn preview_at_zero_motion_stays_still() {
+        let mut wobble = Wobble::new(0.);
+        let frames = run(&mut wobble, Instant::now(), 60, 60, 0.);
+        assert!(frames.iter().flatten().all(|e| e.reach() < 1e-6));
+    }
+}
