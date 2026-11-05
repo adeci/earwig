@@ -510,16 +510,18 @@ impl Worker {
         let Request { job, reply } = request;
         let result = match job {
             Job::Copy(text) => self.set_selection(portal, text, &reply).await,
-            Job::Paste(text) => async {
-                let chord = self.keyboard()?.chord.events(terminal);
-                self.set_selection(portal, text, &reply).await?;
-                if reply.is_disconnected() {
-                    return Ok(());
+            Job::Paste(text) => {
+                async {
+                    let chord = self.keyboard()?.chord.events(terminal);
+                    self.set_selection(portal, text, &reply).await?;
+                    if reply.is_disconnected() {
+                        return Ok(());
+                    }
+                    self.send_keys(&chord).await?;
+                    Ok(())
                 }
-                self.send_keys(&chord).await?;
-                Ok(())
+                .await
             }
-            .await,
         };
         let _ = reply.send(result);
     }
