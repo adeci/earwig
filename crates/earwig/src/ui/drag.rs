@@ -20,7 +20,9 @@ pub struct Grab {
 /// A pointer event in the window holding the pill.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pointer {
-    Moved { pressed: Option<MouseButton> },
+    Moved {
+        pressed: Option<MouseButton>,
+    },
     Pressed(MouseButton),
     Released(MouseButton),
     /// The pointer left the window. While a button is down the compositor
@@ -135,12 +137,18 @@ mod tests {
         let mut drag = Drag::default();
         assert!(drag.hold(grab()));
         assert_eq!(drag.grab(), Some(grab()));
-        assert!(!drag.is_covered(), "the resting window shows the pill until the surface does");
+        assert!(
+            !drag.is_covered(),
+            "the resting window shows the pill until the surface does"
+        );
         drag.cover();
         assert!(drag.is_covered());
         let (released, landing) = drag.let_go().unwrap();
         assert_eq!(released, grab());
-        assert!(!drag.is_covered(), "the window at the drop spot shows the pill");
+        assert!(
+            !drag.is_covered(),
+            "the window at the drop spot shows the pill"
+        );
         assert!(!drag.is_held());
         assert_eq!(drag.landing(), Some(landing));
         assert!(drag.land(landing));
@@ -180,10 +188,20 @@ mod tests {
     #[test]
     fn what_ends_a_drag() {
         let left = MouseButton::Left;
-        assert!(!Pointer::Moved { pressed: Some(left) }.ends_drag());
+        assert!(
+            !Pointer::Moved {
+                pressed: Some(left)
+            }
+            .ends_drag()
+        );
         // The release went elsewhere: the next move says so.
         assert!(Pointer::Moved { pressed: None }.ends_drag());
-        assert!(Pointer::Moved { pressed: Some(MouseButton::Right) }.ends_drag());
+        assert!(
+            Pointer::Moved {
+                pressed: Some(MouseButton::Right)
+            }
+            .ends_drag()
+        );
         assert!(Pointer::Released(left).ends_drag());
         assert!(!Pointer::Released(MouseButton::Right).ends_drag());
         assert!(Pointer::Pressed(MouseButton::Right).ends_drag());

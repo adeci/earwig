@@ -25,11 +25,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
     Entity, FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, PlatformDisplay, Point, Render, Size, StatefulInteractiveElement as _,
-    Styled as _, StyledText, Subscription, WeakEntity, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px,
-    size,
+    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, PlatformDisplay, Point, Render, Size, StatefulInteractiveElement as _, Styled as _,
+    StyledText, Subscription, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
 use crate::ui::drag::{Drag, Grab, Pointer};
@@ -836,7 +835,12 @@ impl OverlayView {
         if !self.drag.land(landing) {
             return;
         }
-        for handle in self.drag_window.take().into_iter().chain(self.left_behind.take()) {
+        for handle in self
+            .drag_window
+            .take()
+            .into_iter()
+            .chain(self.left_behind.take())
+        {
             let _ = handle.update(cx, |_, window, _| window.remove_window());
         }
     }
@@ -1089,7 +1093,13 @@ fn follow_drag(view: WeakEntity<OverlayView>, exits: bool, window: &mut Window) 
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
         if phase == DispatchPhase::Capture {
             let pressed = event.pressed_button;
-            on(&moved, Pointer::Moved { pressed }, event.position, window, cx);
+            on(
+                &moved,
+                Pointer::Moved { pressed },
+                event.position,
+                window,
+                cx,
+            );
         }
     });
     let released = view.clone();
