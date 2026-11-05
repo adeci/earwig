@@ -42,8 +42,7 @@ impl Tray {
     fn state_text(&self) -> &'static str {
         match self.state {
             DictationState::Idle => "Ready",
-            DictationState::Recording { latched: false, .. } => "Recording",
-            DictationState::Recording { latched: true, .. } => "Recording (latched)",
+            DictationState::Recording { .. } => "Recording",
             DictationState::Finalizing => "Finishing",
         }
     }

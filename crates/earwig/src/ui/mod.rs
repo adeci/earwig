@@ -6,9 +6,13 @@
 //! the model or the inserter: every action goes back to the controller as a
 //! [`Command`] or a config edit.
 
+mod accent;
+mod layer_area;
 mod overlay;
+mod pill;
 mod settings;
 mod tray;
+mod x11_popup;
 
 use std::sync::PoisonError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,13 +21,12 @@ use earwig_core::config::Config;
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
-use gpui_kit::component::Theme;
-use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode, WindowingModes};
+use gpui_kit::{AnyWindowHandle, App, Entity, Global, QuitMode, WindowingModes};
 
 use overlay::{Outcome, OverlayView};
 
-/// How long the success flash stays up after the text was inserted.
-const SUCCESS_FLASH: Duration = Duration::from_millis(600);
+/// How long the final text stays up after it was inserted.
+const SUCCESS_FLASH: Duration = Duration::from_millis(350);
 /// The failure flash carries a sentence to read, so it stays a little longer.
 const FAILURE_FLASH: Duration = Duration::from_millis(1800);
 
@@ -75,6 +78,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            accent::watch(cx);
             if surface == OverlaySurface::None {
                 log::warn!(
                     "this desktop offers neither layer-shell nor X11; the overlay stays hidden"
@@ -128,7 +132,7 @@ pub(crate) struct UiState {
     surface: OverlaySurface,
     status: Status,
     tray: Option<tray::TrayHandle>,
-    overlay: Option<(AnyWindowHandle, Entity<OverlayView>)>,
+    overlay: Option<Entity<OverlayView>>,
     settings: Option<AnyWindowHandle>,
     /// Bumped whenever a scheduled overlay close becomes stale.
     close_generation: u64,
@@ -220,21 +224,24 @@ fn set_state(state: DictationState, cx: &mut App) {
         tray.set_state(state);
     }
     match state {
-        DictationState::Recording {
-            latched,
-            started_at_ms,
-        } => {
+        DictationState::Recording { started_at_ms, .. } => {
             // A new recording supersedes any pending close; the window of a
-            // previous flash is reused.
+            // previous flash is reused unless the pill was dragged: a new
+            // dictation starts at home.
             cx.global_mut::<UiState>().close_generation += 1;
+            if let Some(view) = cx.global::<UiState>().overlay.clone()
+                && view.read(cx).moved_before(started_at_ms)
+            {
+                close_overlay(cx);
+            }
             if cx.global::<UiState>().overlay.is_none() {
                 open_overlay(cx);
             }
-            update_overlay(cx, |o| o.recording(latched, started_at_ms));
+            update_overlay(cx, |o| o.recording(started_at_ms));
         }
         DictationState::Finalizing => update_overlay(cx, OverlayView::finalizing),
         DictationState::Idle => {
-            let Some((_, view)) = cx.global::<UiState>().overlay.clone() else {
+            let Some(view) = cx.global::<UiState>().overlay.clone() else {
                 return;
             };
             let (recording, outcome) = {
@@ -253,7 +260,7 @@ fn set_state(state: DictationState, cx: &mut App) {
 }
 
 fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
-    if let Some((_, view)) = cx.global::<UiState>().overlay.clone() {
+    if let Some(view) = cx.global::<UiState>().overlay.clone() {
         view.update(cx, |view, cx| {
             f(view);
             cx.notify();
@@ -264,39 +271,21 @@ fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
 fn open_overlay(cx: &mut App) {
     let state = cx.global::<UiState>();
     let overlay_config = config(&state.handle).overlay;
-    if !overlay_config.enabled || state.surface == OverlaySurface::None {
+    let (caps, surface) = (state.caps.clone(), state.surface);
+    if !overlay_config.enabled || surface == OverlaySurface::None {
         return;
     }
-    let options = overlay::overlay_window_options(
-        &state.caps,
-        &overlay_config,
-        cx.primary_display().as_deref(),
-    );
-    let max_lines = overlay_config.max_lines;
-    let anchor = overlay_config.position;
-    // No Base root: it paints an opaque background, and the overlay has no
-    // inputs or popovers that need one.
-    let mut view = None;
-    let opened = cx.open_window(options, |window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
-        // Click-through: pointer input goes to whatever is below.
-        window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(max_lines, anchor, cx));
-        view = Some(root.clone());
-        root
-    });
-    match (opened, view) {
-        (Ok(window), Some(view)) => {
-            cx.global_mut::<UiState>().overlay = Some((window.into(), view));
-        }
-        (Err(e), _) => log::error!("opening the overlay: {e:#}"),
-        (Ok(_), None) => {}
+    match overlay::open(&overlay_config, &caps, surface, cx) {
+        Ok(view) => cx.global_mut::<UiState>().overlay = Some(view),
+        Err(e) => log::error!("opening the overlay: {e:#}"),
     }
 }
 
 fn close_overlay(cx: &mut App) {
-    if let Some((window, _)) = cx.global_mut::<UiState>().overlay.take() {
-        let _ = window.update(cx, |_, window, _| window.remove_window());
+    if let Some(view) = cx.global_mut::<UiState>().overlay.take() {
+        for window in view.read(cx).windows() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
     }
 }
 

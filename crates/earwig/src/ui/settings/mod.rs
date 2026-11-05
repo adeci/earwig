@@ -3,6 +3,7 @@
 mod general;
 mod history;
 mod models;
+mod pill_preview;
 
 use gpui_kit::component::setting::Settings;
 use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, v_flex};
@@ -12,6 +13,7 @@ use gpui_kit::{
 };
 
 use models::ModelsPage;
+use pill_preview::PillPreview;
 
 pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
     let bounds = Bounds::centered(None, size(px(900.), px(680.)), cx);
@@ -32,12 +34,14 @@ pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
 
 struct SettingsView {
     models: Entity<ModelsPage>,
+    pill: Entity<PillPreview>,
 }
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             models: cx.new(|cx| ModelsPage::new(window, cx)),
+            pill: cx.new(PillPreview::new),
         }
     }
 }
@@ -54,7 +58,7 @@ impl Render for SettingsView {
                     Settings::new("earwig-settings")
                         .sidebar_width(px(200.))
                         .pages([
-                            general::page(cx),
+                            general::page(&self.pill, cx),
                             models::page(&self.models),
                             history::page(),
                         ]),

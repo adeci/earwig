@@ -129,13 +129,52 @@ pub enum OverlayPosition {
     Bottom,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OverlayConfig {
     pub enabled: bool,
     pub position: OverlayPosition,
     /// Lines of live text shown before older lines scroll away.
     pub max_lines: u32,
+    /// How much the pill's edge swells and ripples with the voice: 0 is
+    /// still, 1 the default, up to [`OverlayConfig::MAX_MOTION`].
+    #[serde(serialize_with = "short_float")]
+    pub motion: f32,
+    /// Opacity of the pill's fill (and the depth of its shadow), from
+    /// [`OverlayConfig::MIN_OPACITY`] to 1; text and border stay opaque.
+    #[serde(serialize_with = "short_float")]
+    pub opacity: f32,
+}
+
+/// TOML floats are `f64`; widening through the shortest decimal writes 0.7
+/// rather than 0.699999988079071.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `serialize_with` signature
+fn short_float<S: serde::Serializer>(value: &f32, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_f64(value.to_string().parse().unwrap_or(f64::from(*value)))
+}
+
+impl OverlayConfig {
+    pub const MAX_MOTION: f32 = 2.;
+    pub const DEFAULT_OPACITY: f32 = 0.97;
+    pub const MIN_OPACITY: f32 = 0.3;
+
+    /// `motion` within its range; an unreadable value means the default.
+    pub fn motion(&self) -> f32 {
+        if self.motion.is_nan() {
+            1.
+        } else {
+            self.motion.clamp(0., Self::MAX_MOTION)
+        }
+    }
+
+    /// `opacity` within its range; an unreadable value means the default.
+    pub fn opacity(&self) -> f32 {
+        if self.opacity.is_nan() {
+            Self::DEFAULT_OPACITY
+        } else {
+            self.opacity.clamp(Self::MIN_OPACITY, 1.)
+        }
+    }
 }
 
 impl Default for OverlayConfig {
@@ -144,6 +183,8 @@ impl Default for OverlayConfig {
             enabled: true,
             position: OverlayPosition::Bottom,
             max_lines: 3,
+            motion: 1.,
+            opacity: Self::DEFAULT_OPACITY,
         }
     }
 }
@@ -430,5 +471,39 @@ mod tests {
         let err = store.update(|c| c.history.limit = 10).unwrap_err();
         assert!(err.to_string().contains("config.toml"), "{err}");
         assert_eq!(fs::read_to_string(&store.paths().user).unwrap(), broken);
+    }
+
+    #[test]
+    fn overlay_motion_and_opacity_default_round_trip_and_clamp() {
+        let (_dir, mut store) = store("", "");
+        let overlay = &store.config().overlay;
+        assert!((overlay.motion() - 1.).abs() < f32::EPSILON);
+        assert!((overlay.opacity() - 0.97).abs() < f32::EPSILON);
+        store
+            .update(|c| {
+                c.overlay.motion = 1.5;
+                c.overlay.opacity = 0.7;
+            })
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[overlay]\nmotion = 1.5\nopacity = 0.7");
+        let (_dir, reloaded) = self::store(&written, "");
+        assert!((reloaded.config().overlay.motion() - 1.5).abs() < f32::EPSILON);
+        assert!((reloaded.config().overlay.opacity() - 0.7).abs() < f32::EPSILON);
+
+        let over = OverlayConfig {
+            motion: 7.,
+            opacity: 3.,
+            ..OverlayConfig::default()
+        };
+        assert!((over.motion() - OverlayConfig::MAX_MOTION).abs() < f32::EPSILON);
+        assert!((over.opacity() - 1.).abs() < f32::EPSILON);
+        let under = OverlayConfig {
+            motion: -1.,
+            opacity: 0.,
+            ..OverlayConfig::default()
+        };
+        assert!(under.motion().abs() < f32::EPSILON);
+        assert!((under.opacity() - OverlayConfig::MIN_OPACITY).abs() < f32::EPSILON);
     }
 }

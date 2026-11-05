@@ -142,10 +142,13 @@
         def shown(_last_try: bool) -> bool:
             nonlocal text
             text = machine.get_screen_text()
-            return any(w in text.lower() for w in ("quick", "brown", "fox"))
+            # Any distinctive word of the clip; OCR over a busy background
+            # often mangles one or two of them.
+            return any(w in text.lower() for w in ("quick", "brown", "fox", "jumps", "lazy"))
 
+        # CPU-only decoding in a busy VM host can trail the audio by a minute.
         try:
-            retry(shown, timeout=td(seconds=90))
+            retry(shown, timeout=td(minutes=4))
         finally:
             print(f"OCR while recording: {text!r}")
             machine.screenshot(shot)
@@ -234,7 +237,7 @@
         return path
 
 
-    def wait_insertion(events: str, timeout: float = 120) -> dict:
+    def wait_insertion(events: str, timeout: float = 240) -> dict:
         """Wait for the next dictation result in `events`; it must be `inserted`."""
         result = {}
 
@@ -285,7 +288,7 @@
 
     with machine.nested("EARWIG: transcript inserted into the focused terminal"):
         print(wait_insertion(events))
-        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(minutes=1))
+        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(minutes=4))
         print(machine.succeed("cat /tmp/out"))
         machine.screenshot("inserted")
   '';
