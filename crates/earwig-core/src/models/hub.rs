@@ -235,7 +235,7 @@ impl Hub {
     }
 
     /// `general.architecture` of a remote GGUF, cached per commit.
-    pub fn architecture(
+    fn architecture(
         &self,
         repo: &str,
         revision: &str,

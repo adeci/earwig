@@ -22,7 +22,7 @@ struct CatalogFile {
 }
 
 /// Parse a catalog file; exactly one entry must be the default.
-pub fn parse_catalog(text: &str) -> anyhow::Result<Vec<CatalogEntry>> {
+fn parse_catalog(text: &str) -> anyhow::Result<Vec<CatalogEntry>> {
     let file: CatalogFile = toml::from_str(text)?;
     let defaults = file.model.iter().filter(|m| m.default).count();
     anyhow::ensure!(
@@ -337,7 +337,8 @@ impl ModelManager {
     }
 }
 
-/// Every regular file under `dir`; a missing directory is empty.
+/// Every regular file under `dir`, following symlinks (system stores are
+/// Nix link farms); a missing directory is empty.
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -345,12 +346,15 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
         Err(e) => return Err(e),
     };
     for entry in entries {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            walk(&entry.path(), out)?;
-        } else if ty.is_file() {
-            out.push(entry.path());
+        let path = entry?.path();
+        // A dangling link is skipped.
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            walk(&path, out)?;
+        } else if meta.is_file() {
+            out.push(path);
         }
     }
     Ok(())
@@ -516,6 +520,35 @@ mod tests {
         let installed = manager.installed();
         assert_eq!(installed.len(), 1);
         assert!(!installed[0].system);
+    }
+
+    #[test]
+    fn symlinked_system_stores_are_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let system = dir.path().join("system");
+        let manager = ModelManager::with_endpoint(dir.path().join("user"), "http://127.0.0.1:9")
+            .with_system_stores(vec![system.clone()]);
+        let default = manager.default_model().clone();
+        // Like a Nix link farm: a symlinked repo directory holding a
+        // symlinked file.
+        let target = dir.path().join("nix-store");
+        fs::create_dir_all(target.join("files")).unwrap();
+        fs::write(target.join("blob"), b"pinned").unwrap();
+        let revision = target.join("files").join(&default.revision);
+        fs::create_dir_all(revision.join(&default.file).parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target.join("blob"), revision.join(&default.file)).unwrap();
+        let repo = system.join(&default.repo);
+        fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target.join("files"), &repo).unwrap();
+
+        let installed = manager.installed();
+        assert_eq!(installed.len(), 1, "{installed:?}");
+        assert!(installed[0].system);
+        assert_eq!(
+            installed[0].catalog_id.as_deref(),
+            Some(default.id.as_str())
+        );
+        assert_eq!(installed[0].size, 6);
     }
 
     #[test]

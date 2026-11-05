@@ -102,7 +102,11 @@ where
             .as_ref()
             .expect("jobs is only taken on drop")
             .send(Box::new(move |state, queue| {
-                let _ = tx.send(f(state, queue));
+                // The caller timed out: acting now would hit whatever has
+                // focus by then.
+                if !tx.is_disconnected() {
+                    let _ = tx.send(f(state, queue));
+                }
             }))
             .map_err(|_| anyhow!("the Wayland connection is closed"))?;
         self.wake();

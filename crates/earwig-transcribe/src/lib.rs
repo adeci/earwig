@@ -1,12 +1,10 @@
 //! earwig's speech engine: [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
 //! with GGUF models, Vulkan and CPU compiled in.
 //!
-//! Models with native streaming (Parakeet Unified, Moonshine streaming,
-//! Voxtral realtime, ...) decode while you speak; `finish` only decodes the
-//! tail. If the stream fails or ends up empty, the whole recording is decoded
-//! in one batch run instead. Other models are re-decoded about once a second
-//! for live text, never more often than the decode itself takes, and decoded
-//! in full at the end.
+//! Streaming models decode while you speak and `finish` only decodes the
+//! tail; if the stream fails or comes up empty, the whole recording is
+//! decoded instead. Other models are re-decoded about once a second for live
+//! text and in full at the end.
 //!
 //! transcribe.cpp allows one in-flight compute per model and a stream
 //! borrows its session, so each loaded model gets a worker thread that owns
@@ -48,16 +46,13 @@ const ASR_ARCHITECTURES: &[&str] = &[
 /// Live text for non-streaming models is refreshed at most this often.
 const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The transcribe.cpp [`EngineFactory`]. Cheap to create: nothing is
-/// initialized until a model loads.
+/// Cheap to create: nothing is initialized until a model loads.
 #[derive(Debug, Default)]
-pub struct TranscribeEngine {
-    _private: (),
-}
+pub struct TranscribeEngine;
 
 impl TranscribeEngine {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -603,14 +598,12 @@ mod tests {
             .join(" ")
     }
 
-    /// Set `EARWIG_TEST_MODEL` to a GGUF (e.g. the default Parakeet model)
-    /// to run; `EARWIG_TEST_BACKEND=cpu` forces the CPU.
+    /// Run with `EARWIG_TEST_MODEL=<gguf> cargo test -p earwig-transcribe -- --ignored`;
+    /// `EARWIG_TEST_BACKEND=cpu|gpu` picks the backend.
     #[test]
+    #[ignore = "needs a model file in EARWIG_TEST_MODEL"]
     fn transcribes_the_fixture() {
-        let Some(path) = std::env::var_os("EARWIG_TEST_MODEL") else {
-            eprintln!("EARWIG_TEST_MODEL not set; skipping");
-            return;
-        };
+        let path = std::env::var_os("EARWIG_TEST_MODEL").expect("EARWIG_TEST_MODEL is not set");
         let backend = match std::env::var("EARWIG_TEST_BACKEND").as_deref() {
             Ok("cpu") => Backend::Cpu,
             Ok("gpu") => Backend::Gpu,

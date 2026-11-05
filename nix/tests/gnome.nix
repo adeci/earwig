@@ -9,9 +9,8 @@
 { self }:
 let
   common = import ./common.nix { inherit self; };
-  # Free in GNOME's default keybindings (LOGO+space, earwig's default, is
-  # GNOME's switch-input-source).
-  trigger = "CTRL+ALT+e";
+  # earwig's default GlobalShortcuts trigger, CTRL+space, in QEMU's key names.
+  key = "ctrl-spc";
 in
 {
   name = "earwig-gnome";
@@ -52,17 +51,16 @@ in
         }
       ];
 
-      services.earwig.settings = {
-        hotkey.portal_trigger = trigger;
-      };
+      # No portal_trigger here: the test binds earwig's default, which must
+      # not collide with GNOME's own shortcuts.
       systemd.user.services.earwig.environment.RUST_LOG = "info,earwig_core=debug";
     };
 
   testScript = ''
     ${common.prelude}
-    import json
 
-    TRIGGER = "${trigger}"
+    KEY = "${key}"
+    TOKEN = "/home/alice/.local/state/earwig/remote-desktop.token"
 
 
     def shell_js(js: str):
@@ -113,31 +111,19 @@ in
         # QEMU presses and releases the chord: Activated then Deactivated,
         # a tap under 300 ms, which latches recording in the default
         # hold-or-toggle mode; the next tap stops it.
-        machine.send_key(TRIGGER.lower().replace("+", "-"))
+        machine.send_key(KEY)
 
 
     def dictate_by_shortcut(name: str) -> str:
         """Tap, play the clip into the virtual mic, wait until the overlay
         shows live text (CPU decoding trails the audio), tap again."""
         tap_shortcut()
-        wait_for(lambda: '"recording"' in as_alice("earwig status"), "recording")
-        machine.succeed(
-            f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
-        )
-        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
-        text = ""
-
-        def live_text_shown(_last_try: bool) -> bool:
-            nonlocal text
-            text = machine.get_screen_text()
-            return any(w in text.lower() for w in ("quick", "brown", "fox"))
-
+        wait_status(lambda s: s["state"]["state"] == "recording", "recording")
+        play_clip()
         try:
-            retry(live_text_shown, timeout=td(seconds=90))
+            text = wait_live_text(f"{name}-recording")
         finally:
-            print(f"OCR while recording ({name}): {text!r}")
             print(f"windows while recording ({name}): {json.dumps(windows())}")
-            machine.screenshot(f"{name}-recording")
         tap_shortcut()
         return text
 
@@ -183,12 +169,21 @@ in
                 machine.screenshot("consent-shortcuts")
                 machine.send_key("alt-a")
                 accepted.add("shortcuts")
-            log = daemon_log()
-            return "RemoteDesktop portal ready" in log and "portal shortcut dictate" in log
+            titles = [w["title"] for w in windows()]
+            return (
+                accepted == {"remote", "shortcuts"}
+                and "Remote Desktop" not in titles
+                and "Add Keyboard Shortcuts" not in titles
+                and machine.execute(f"test -s {TOKEN}")[0] == 0
+                # Only the daemon knows when the portal finished binding.
+                and "portal shortcut dictate" in daemon_log()
+            )
 
         wait_for(accept_dialogs, "both portal consents", timeout=180)
-        print(as_alice("earwig status"))
-        machine.succeed("test -s /home/alice/.local/state/earwig/remote-desktop.token")
+        st = wait_status(lambda s: s["insert_methods"], "insertion methods")
+        print(f"status: {st}")
+        assert st["insert_methods"] == ["portal-paste"], st
+        assert "portal" in st["hotkey_sources"], st
 
     with machine.nested("EARWIG: the user service has the session's X11 display"):
         pid = machine.succeed("systemctl --user -M alice@ show -p MainPID --value earwig.service").strip()
@@ -197,13 +192,14 @@ in
         assert "\nDISPLAY=" in "\n" + env, "earwig.service has no DISPLAY"
 
     with machine.nested("EARWIG: model ready"):
-        wait_for(lambda: '"ready"' in as_alice("earwig status"), "the model", timeout=300)
+        wait_status(lambda s: s["model"]["state"] == "ready", "the model", timeout=300)
 
     with machine.nested("EARWIG: dictation into GNOME Text Editor"):
         as_alice("touch /tmp/editor.txt")
         spawn("/run/current-system/sw/bin/gnome-text-editor --standalone /tmp/editor.txt")
         wait_for(lambda: focused_class() == "org.gnome.TextEditor", "the text editor")
         machine.sleep(2)
+        events = watch_events()
         overlay_text = dictate_by_shortcut("editor")
         overlay = [w for w in windows() if w["override_redirect"] and w["x11"]]
         assert overlay, "no override-redirect overlay window"
@@ -211,7 +207,7 @@ in
         # CPU decoding in the VM finishes well after the stop tap. Save only
         # once the daemon reports the insertion: a Ctrl+S from QEMU racing the
         # Ctrl+V from libei would mix modifier state.
-        wait_for(lambda: "inserted" in daemon_log(), "the insertion", timeout=120)
+        assert wait_insertion(events)["method"] == "portal-paste"
         assert focused_class() == "org.gnome.TextEditor", focused_class()
         machine.sleep(1)
         machine.send_key("ctrl-s")
@@ -225,10 +221,15 @@ in
         )
         wait_for(lambda: focused_class() == "org.gnome.Console", "the console")
         machine.sleep(2)
+        events = watch_events()
         dictate_by_shortcut("console")
+        assert wait_insertion(events)["method"] == "portal-paste"
         machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/console.txt", timeout=td(minutes=1))
-        print(f"console received: {machine.succeed('cat -v /tmp/console.txt')!r}")
+        received = machine.succeed("cat -v /tmp/console.txt")
+        print(f"console received: {received!r}")
+        # Ctrl+Shift+V by AT-SPI role; plain Ctrl+V would arrive as a literal ^V.
+        assert "^V" not in received, received
         machine.screenshot("console-inserted")
-        print(daemon_log())
+        print_latency()
   '';
 }

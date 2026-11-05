@@ -1,26 +1,10 @@
-//! Microphone capture, delivered as 16 kHz mono `f32` ([`crate::SAMPLE_RATE`]).
+//! Microphone capture as 16 kHz mono `f32`. The cpal callback only downmixes;
+//! a worker thread resamples, keeps the pre-roll, meters the level, and
+//! reopens a failed input until it works again.
 //!
-//! A [`Capture`] owns one worker thread. The cpal callback only downmixes to
-//! mono and hands the buffer over; the worker resamples (rubato), keeps the
-//! pre-roll ring, meters the level, and sends [`AudioEvent`]s for the
-//! recording in progress.
-//!
-//! With `keep_open` the input runs all the time and the last `preroll_ms` of
-//! audio start every recording, so the first word is never clipped.
-//! Otherwise the input opens at [`Capture::start`] and closes after
-//! [`Capture::stop`].
-//!
-//! A failing device never takes the daemon down: the error is reported once
-//! as [`AudioEvent::Error`] and the input is reopened every
-//! [`REOPEN_DELAY`] until it works again.
-//!
-//! Linux goes through ALSA. On PipeWire systems (NixOS included) the ALSA
-//! `default` device is PipeWire's ALSA plugin, so the default source,
-//! per-app routing and device switching all work without cpal's `pipewire`
-//! feature (which would add a libpipewire build dependency for nothing).
-//!
-//! For tests, [`Source::Clip`] replaces the microphone with a fixed clip;
-//! the daemon uses it when `EARWIG_AUDIO_FILE` names a WAV file.
+//! Linux goes through ALSA: on PipeWire systems the ALSA `default` device is
+//! PipeWire's plugin, so routing and device switching work without cpal's
+//! `pipewire` feature.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -36,13 +20,10 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use crate::SAMPLE_RATE;
 use crate::config::AudioConfig;
 
-/// How long to wait before reopening a failed input.
-pub const REOPEN_DELAY: Duration = Duration::from_secs(2);
+const REOPEN_DELAY: Duration = Duration::from_secs(2);
 /// An open input that delivers nothing for this long counts as failed.
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
-/// Level updates per second while recording.
 const LEVEL_HZ: usize = 20;
-/// Pacing of [`Source::Clip`] playback.
 const CLIP_TICK: Duration = Duration::from_millis(20);
 
 /// Names of the input devices, for `[audio] device`. These are cpal device
@@ -114,7 +95,6 @@ fn sample_f32(s: i32) -> f32 {
     s as f32
 }
 
-/// Where audio comes from.
 #[derive(Clone, Debug)]
 pub enum Source {
     /// The `[audio] device` input, or the system default.
@@ -143,7 +123,7 @@ enum Control {
     Configure(AudioConfig),
 }
 
-/// The capture worker. Dropping it closes the input.
+/// Dropping it closes the input.
 pub struct Capture {
     control: Option<flume::Sender<Control>>,
     worker: Option<JoinHandle<()>>,
@@ -175,7 +155,6 @@ impl Capture {
         self.send(Control::Stop(recording));
     }
 
-    /// Apply new settings (device, keep-open, pre-roll).
     pub fn configure(&self, config: AudioConfig) {
         self.send(Control::Configure(config));
     }
@@ -201,7 +180,6 @@ enum Raw {
     Error(String),
 }
 
-/// An open cpal input stream.
 struct Input {
     _stream: cpal::Stream,
     rx: flume::Receiver<Raw>,
@@ -399,7 +377,6 @@ impl Worker {
         self.preroll.drain(..excess);
     }
 
-    /// Feed due clip audio to the recording.
     fn play_clip(&mut self) {
         let (Source::Clip(clip), Some(recording)) = (&self.source, &mut self.recording) else {
             return;
@@ -516,7 +493,6 @@ where
     )
 }
 
-/// Streaming resampler from the device rate to [`SAMPLE_RATE`].
 struct StreamResampler {
     fft: Option<rubato::Fft<f32>>,
     pending: Vec<f32>,

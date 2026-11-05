@@ -1,17 +1,15 @@
 //! Recent transcripts, newest first.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use earwig_core::history::HistoryEntry;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
-use gpui_kit::{App, IntoElement, ParentElement as _, Styled as _, Window, div};
+use gpui_kit::{App, IntoElement, ParentElement as _, Styled as _, div};
 
-use crate::ui::{UiState, config};
+use crate::ui::{UiState, config, now_ms};
 
-pub fn page(_window: &mut Window, _cx: &App) -> SettingPage {
+pub fn page() -> SettingPage {
     SettingPage::new("History")
         .icon(IconName::Inbox)
         .resettable(false)
@@ -98,12 +96,6 @@ fn ago(now_ms: u64, at_ms: u64) -> String {
         86_400..172_800 => "yesterday".into(),
         _ => format!("{} days ago", secs / 86_400),
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

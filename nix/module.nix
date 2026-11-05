@@ -90,13 +90,19 @@ in
       source = configFile;
     };
 
+    # Insertion through the RemoteDesktop portal tells terminals apart by the
+    # accessibility role of the focused widget, and Qt apps only export that
+    # over AT-SPI when asked. Without this, Konsole (on any desktop that uses
+    # the portal path) gets Ctrl+V, a literal ^V, instead of Ctrl+Shift+V.
+    environment.sessionVariables.QT_LINUX_ACCESSIBILITY_ALWAYS_ON = lib.mkDefault "1";
+
     systemd.user.services.earwig = {
       description = "earwig dictation daemon";
       partOf = [ "graphical-session.target" ];
-      # The daemon probes the portal frontend once at startup with a short
-      # timeout. At login it is still being D-Bus activated (GNOME VM: no
-      # answer within 3 s, so no GlobalShortcuts and no RemoteDesktop), so
-      # start it first. Harmless where no portal is installed.
+      # The daemon probes the portal frontend once at startup. At login it is
+      # still being D-Bus activated (GNOME and KDE VMs: no answer within
+      # 3 s, so no GlobalShortcuts and no RemoteDesktop), so start it first.
+      # Harmless where no portal is installed.
       after = [
         "graphical-session.target"
         "xdg-desktop-portal.service"

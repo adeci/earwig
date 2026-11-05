@@ -29,8 +29,8 @@ let
       (root + "/Cargo.toml")
       (root + "/Cargo.lock")
       (root + "/crates")
-      (lib.fileset.maybeMissing (root + "/assets"))
-      (lib.fileset.maybeMissing (root + "/tests/fixtures"))
+      (root + "/assets")
+      (root + "/tests/fixtures")
     ];
   };
 
@@ -86,10 +86,8 @@ craneLib.buildPackage (
     postInstall = ''
       install -Dm644 assets/io.github.adeci.earwig.desktop \
         $out/share/applications/io.github.adeci.earwig.desktop
-      if [ -f assets/io.github.adeci.earwig.svg ]; then
-        install -Dm644 assets/io.github.adeci.earwig.svg \
-          $out/share/icons/hicolor/scalable/apps/io.github.adeci.earwig.svg
-      fi
+      install -Dm644 assets/io.github.adeci.earwig.svg \
+        $out/share/icons/hicolor/scalable/apps/io.github.adeci.earwig.svg
     '';
 
     postFixup = ''

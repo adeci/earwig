@@ -45,21 +45,12 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 use xkbcommon::xkb;
 
 use super::wayland::Worker;
-use super::{InsertError, Inserter};
+use super::{InsertError, Inserter, MIME_TYPES};
 use crate::events::InsertMethod;
-
-/// Text targets offered on the clipboard, most specific first.
-const MIME_TYPES: &[&str] = &[
-    "text/plain;charset=utf-8",
-    "text/plain",
-    "UTF8_STRING",
-    "TEXT",
-    "STRING",
-];
 
 /// App ids (compared ASCII case-insensitively) that paste with Ctrl+Shift+V.
 /// `[insert] terminals` adds to this list.
-pub const TERMINALS: &[&str] = &[
+const TERMINALS: &[&str] = &[
     "Alacritty",
     "com.gexperts.Tilix",
     "com.mitchellh.ghostty",
@@ -521,7 +512,7 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
 }
 
 /// Dispatch for one data-control flavour: serve our sources, release other
-/// clients' offers (never read), and forget the device when it finishes.
+/// clients' offers, and forget the device when it finishes.
 macro_rules! data_control_dispatch {
     ($variant:ident, $device_mod:ident, $Device:ty, $source_mod:ident, $Source:ty, $Offer:ty) => {
         impl Dispatch<$Device, ()> for State {

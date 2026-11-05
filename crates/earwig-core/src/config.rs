@@ -1,14 +1,7 @@
-//! Settings.
-//!
-//! Three layers, later wins:
-//! 1. built-in defaults (this file),
-//! 2. the user file `$XDG_CONFIG_HOME/earwig/config.toml`, written by the
-//!    settings window,
-//! 3. the system file `earwig/config.toml` under `$XDG_CONFIG_DIRS`
-//!    (`/etc/xdg` on NixOS, written by the module).
-//!
-//! Keys set in the system file are locked: the settings window shows them
-//! read-only and never writes them to the user file.
+//! Settings in three layers, later wins: built-in defaults, the user file
+//! `$XDG_CONFIG_HOME/earwig/config.toml` (written by the settings window), and
+//! `earwig/config.toml` under `$XDG_CONFIG_DIRS` (written by the NixOS module).
+//! Keys set in a system file are locked: never written to the user file.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -16,7 +9,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-
 use serde::{Deserialize, Serialize};
 
 use crate::models::ModelSpec;
@@ -63,7 +55,7 @@ impl Default for HotkeyConfig {
             mode: ActivationMode::HoldOrToggle,
             hold_threshold_ms: 300,
             portal: true,
-            portal_trigger: "LOGO+space".into(),
+            portal_trigger: "CTRL+space".into(),
         }
     }
 }
@@ -95,7 +87,6 @@ impl Default for AudioConfig {
 pub struct ModelConfig {
     /// `None` = the release's default catalog model.
     pub model: Option<ModelSpec>,
-    /// `auto`, `cpu` or `gpu`.
     pub backend: BackendSetting,
     /// Language hint for multilingual models.
     pub language: Option<String>,
@@ -121,22 +112,13 @@ pub enum InsertSetting {
     Portal,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InsertConfig {
     pub method: InsertSetting,
     /// Extra app ids treated as terminals (Ctrl+Shift+V) on top of the
     /// built-in list.
     pub terminals: Vec<String>,
-}
-
-impl Default for InsertConfig {
-    fn default() -> Self {
-        Self {
-            method: InsertSetting::Auto,
-            terminals: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,7 +180,6 @@ pub struct HooksConfig {
     pub on_insert: Vec<String>,
 }
 
-/// Paths of the layers, for display and for writing the user file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigPaths {
     pub user: PathBuf,
@@ -206,7 +187,6 @@ pub struct ConfigPaths {
     pub system: Vec<PathBuf>,
 }
 
-/// The merged settings plus where each layer lives.
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     paths: ConfigPaths,
@@ -218,7 +198,6 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// Load from the XDG locations.
     pub fn load() -> anyhow::Result<Self> {
         Self::load_from(ConfigPaths {
             user: crate::paths::user_config(),
@@ -308,12 +287,19 @@ impl ConfigStore {
     /// defaults and are not locked, so a later release's new defaults still
     /// reach users who never touched a setting.
     pub fn update(&mut self, edit: impl FnOnce(&mut Config)) -> anyhow::Result<()> {
+        // Writing now would replace the user's broken file with defaults.
+        if let Some(e) = &self.user_error {
+            anyhow::bail!(
+                "not saving: fix or remove {} first ({e})",
+                self.paths.user.display()
+            );
+        }
         let mut next = self.config.clone();
         edit(&mut next);
         let defaults = toml::Table::try_from(Config::default())?;
         let mut user = toml::Table::try_from(&next)?;
         prune(&mut user, &defaults, "", &|key| self.is_locked(key));
-        write_atomic(&self.paths.user, &toml::to_string_pretty(&user)?)?;
+        crate::paths::write_atomic(&self.paths.user, toml::to_string_pretty(&user)?.as_bytes())?;
         *self = Self::load_from(self.paths.clone())?;
         Ok(())
     }
@@ -382,14 +368,6 @@ fn prune(
     });
 }
 
-fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, contents)?;
-    fs::rename(&tmp, path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +421,14 @@ mod tests {
         let (_dir, store) = store("[audio]\nkeep_opne = true\n", "");
         assert!(store.user_error().is_some());
         assert_eq!(store.config(), &Config::default());
+    }
+
+    #[test]
+    fn update_refuses_to_overwrite_a_broken_user_file() {
+        let broken = "[audio]\nkeep_opne = true\n";
+        let (_dir, mut store) = store(broken, "");
+        let err = store.update(|c| c.history.limit = 10).unwrap_err();
+        assert!(err.to_string().contains("config.toml"), "{err}");
+        assert_eq!(fs::read_to_string(&store.paths().user).unwrap(), broken);
     }
 }

@@ -1,6 +1,4 @@
-//! Models: the active one, the curated catalog, Hugging Face search, and
-//! local files. Downloads and searches run on background threads and report
-//! back over channels.
+//! Models page: active model, curated catalog, Hugging Face search, local files.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +24,7 @@ use gpui_kit::{
     SharedString, Styled as _, Subscription, Window, div,
 };
 
+use crate::human_size;
 use crate::ui::{UiState, config, edit_config};
 
 /// How often a running download repaints its progress bar.
@@ -112,12 +111,13 @@ impl ModelsPage {
         self.error = None;
         let models = UiState::handle(cx).models();
         let (tx, rx) = flume::unbounded();
-        std::thread::Builder::new()
+        let thread_spec = spec.clone();
+        let spawned = std::thread::Builder::new()
             .name("earwig-download".into())
             .spawn(move || {
                 let mut last = Instant::now();
                 let result = models.download(
-                    &spec,
+                    &thread_spec,
                     &mut |progress| {
                         if last.elapsed() >= PROGRESS_INTERVAL {
                             last = Instant::now();
@@ -126,18 +126,31 @@ impl ModelsPage {
                     },
                     &cancel,
                 );
-                let _ = tx.send(DownloadMsg::Done(spec, result.map(drop)));
-            })
-            .expect("spawning a thread");
+                let _ = tx.send(DownloadMsg::Done(thread_spec, result.map(drop)));
+            });
+        if let Err(e) = spawned {
+            self.downloads.remove(&spec);
+            self.error = Some(format!("Downloading {spec}: {e}"));
+            cx.notify();
+            return;
+        }
         cx.spawn(async move |this, cx| {
             while let Ok(msg) = rx.recv_async().await {
                 if this
                     .update(cx, |this, cx| this.on_download(msg, cx))
                     .is_err()
                 {
-                    break;
+                    return;
                 }
             }
+            // The channel closed without `Done`: the download thread panicked.
+            let _ = this.update(cx, |this, cx| {
+                if this.downloads.remove(&spec).is_some() {
+                    this.error = Some(format!("Downloading {spec}: download thread crashed"));
+                    this.refresh_installed(cx);
+                    cx.notify();
+                }
+            });
         })
         .detach();
         cx.notify();
@@ -205,13 +218,17 @@ impl ModelsPage {
         let models = handle.models();
         let engine = handle.engine();
         let (tx, rx) = flume::bounded(1);
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("earwig-search".into())
             .spawn(move || {
                 let result = models.search(&query, &|arch| engine.supports_architecture(arch));
                 let _ = tx.send((query, result));
-            })
-            .expect("spawning a thread");
+            });
+        if let Err(e) = spawned {
+            self.search = Search::Failed(format!("Starting the search: {e}"));
+            cx.notify();
+            return;
+        }
         cx.spawn(async move |this, cx| {
             if let Ok((query, result)) = rx.recv_async().await {
                 let _ = this.update(cx, |this, cx| {
@@ -359,7 +376,7 @@ fn render_catalog(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> Any
             let languages = entry.languages.join(", ");
             let meta = format!(
                 "{} · {} · {}{}",
-                format_size(entry.size),
+                human_size(entry.size),
                 languages,
                 entry.license,
                 if entry.streaming { " · streaming" } else { "" }
@@ -420,7 +437,7 @@ fn render_installed(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> A
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format_size(model.size)),
+                            .child(human_size(model.size)),
                     ),
                 cx,
             )
@@ -428,8 +445,7 @@ fn render_installed(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> A
         .into_any_element()
 }
 
-/// Description on the left; download progress or Download/Use/Delete on the
-/// right.
+/// Description on the left; download progress or Download/Use/Delete on the right.
 fn model_row(
     page: &ModelsPage,
     view: &Entity<ModelsPage>,
@@ -537,8 +553,8 @@ fn download_progress(
                         .text_color(cx.theme().muted_foreground)
                         .child(format!(
                             "{} of {}",
-                            format_size(downloaded),
-                            format_size(total)
+                            human_size(downloaded),
+                            human_size(total)
                         )),
                 ),
         )
@@ -610,7 +626,7 @@ fn render_search(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> AnyE
                                         .gap_2()
                                         .text_xs()
                                         .text_color(muted)
-                                        .child(format!("{} · {arch}", format_size(file.size)))
+                                        .child(format!("{} · {arch}", human_size(file.size)))
                                         .child(if file.compatible {
                                             Tag::success().small().child("compatible")
                                         } else {
@@ -685,26 +701,4 @@ fn render_local(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> AnyEl
                 ),
         )
         .into_any_element()
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn format_size(bytes: u64) -> String {
-    const MB: f64 = 1024. * 1024.;
-    let bytes = bytes as f64;
-    if bytes >= 1024. * MB {
-        format!("{:.1} GB", bytes / (1024. * MB))
-    } else {
-        format!("{:.0} MB", bytes / MB)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_size;
-
-    #[test]
-    fn sizes_switch_to_gigabytes_at_one_gib() {
-        assert_eq!(format_size(731_357_568), "697 MB");
-        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
-    }
 }

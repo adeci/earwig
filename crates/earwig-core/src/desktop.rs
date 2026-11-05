@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use ashpd::zbus;
-use serde::{Deserialize, Serialize};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
@@ -11,13 +10,12 @@ use wayland_protocols::ext::data_control::v1::client::ext_data_control_manager_v
 use wayland_protocols_misc::zwp_input_method_v2::client::zwp_input_method_manager_v2::ZwpInputMethodManagerV2;
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
-use wayland_protocols_wlr::foreign_toplevel::v1::client::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "independent capability flags, serialized as-is for status and UI"
+    reason = "independent capability flags"
 )]
 pub struct DesktopCaps {
     /// `XDG_CURRENT_DESKTOP`, lowercased, e.g. `niri`, `gnome`, `kde`.
@@ -33,21 +31,18 @@ pub struct DesktopCaps {
     pub virtual_keyboard: bool,
     /// `ext_data_control_manager_v1` or `zwlr_data_control_manager_v1`.
     pub data_control: bool,
-    /// `zwlr_foreign_toplevel_manager_v1` (focused app id for terminal
-    /// detection).
-    pub foreign_toplevel: bool,
-    /// `org.freedesktop.portal.GlobalShortcuts` is available.
     pub portal_global_shortcuts: bool,
-    /// `org.freedesktop.portal.RemoteDesktop` is available.
     pub portal_remote_desktop: bool,
 }
 
-/// Longest wait for the portal frontend, which D-Bus may have to start.
-const PORTAL_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest wait for the portal frontend, which D-Bus may have to start. At
+/// login it answers only once its backends are up (about 5 s for
+/// xdg-desktop-portal-kde) and missing it costs portal insertion and
+/// shortcuts, so wait as long as D-Bus waits for an activated service.
+/// Without a portal, D-Bus fails at once.
+const PORTAL_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// Probe the session once at startup: Wayland globals (no surfaces) and the
-/// portal interfaces on D-Bus. Never fails: whatever cannot be reached counts
-/// as absent.
+/// Never fails: whatever cannot be reached counts as absent.
 pub fn probe() -> DesktopCaps {
     let mut caps = DesktopCaps {
         desktop: std::env::var("XDG_CURRENT_DESKTOP")
@@ -69,7 +64,6 @@ pub fn probe() -> DesktopCaps {
             caps.virtual_keyboard = has(ZwpVirtualKeyboardManagerV1::interface().name);
             caps.data_control = has(ExtDataControlManagerV1::interface().name)
                 || has(ZwlrDataControlManagerV1::interface().name);
-            caps.foreign_toplevel = has(ZwlrForeignToplevelManagerV1::interface().name);
         }
         Err(err) => log::info!("no Wayland session: {err:#}"),
     }

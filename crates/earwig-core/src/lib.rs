@@ -1,12 +1,6 @@
-//! earwig's core: everything except pixels.
-//!
-//! The daemon is a [`controller`] that owns the dictation state machine
-//! ([`session`]), the microphone ([`audio`]), a loaded speech model
-//! ([`engine`]), and an inserter ([`insert`]). Hotkeys arrive as
-//! [`events::Command`]s from the control socket ([`ipc`]) or the portal
-//! ([`hotkey`]); everything that happens leaves as [`events::Event`]s, which
-//! the GPUI front end, `earwig events`, and status bars consume. The final
-//! text passes through the user's [`hooks`] on its way out.
+//! earwig's core: everything except pixels. The [`controller`] owns the
+//! dictation state; commands come in and [`events::Event`]s go out through
+//! [`ipc`] and [`controller::Handle`].
 
 pub mod audio;
 pub mod config;

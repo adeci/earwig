@@ -230,7 +230,7 @@ mod download;
 mod gguf;
 mod hub;
 mod manager;
-pub use manager::{ModelManager, parse_catalog};
+pub use manager::ModelManager;
 
 #[cfg(test)]
 mod tests {

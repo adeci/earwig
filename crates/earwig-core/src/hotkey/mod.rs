@@ -23,10 +23,9 @@ pub trait HotkeySource: Send {
     fn run(self: Box<Self>, commands: flume::Sender<Command>) -> anyhow::Result<()>;
 }
 
-/// Hotkey sources to start for this session (the socket is always on and not
-/// listed here): the GlobalShortcuts portal when enabled and advertised. A
-/// portal that is advertised but does not work ends quietly within seconds
-/// (see [`portal`]).
+/// Sources to start besides the always-on socket: the GlobalShortcuts portal
+/// when enabled and advertised. An advertised portal that does not work ends
+/// quietly within seconds.
 pub fn sources(
     config: &crate::config::HotkeyConfig,
     caps: &crate::desktop::DesktopCaps,

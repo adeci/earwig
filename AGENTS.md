@@ -1,44 +1,44 @@
 # AGENTS.md
 
 earwig is a local dictation daemon for Linux desktops: hold or tap a hotkey,
-speak, and the text lands in the focused app in one step. Rust, GPUI for the
-overlay and settings window, transcribe.cpp for speech. NixOS first.
+speak, and the text lands in the focused app. Rust, GPUI for the overlay and
+settings window, transcribe.cpp for speech. NixOS first.
 
 ## Layout
 
-- `crates/earwig-core`: everything but pixels. Config, tap-or-hold state
-  machine, audio, model catalog/downloads, insertion backends, hotkey
-  sources, control socket, controller. No GPUI dependency, so its tests are
-  fast.
-- `crates/earwig-transcribe`: the `EngineFactory` for transcribe.cpp (GGUF,
-  Vulkan + CPU compiled in).
-- `crates/earwig`: the binary. CLI, daemon wiring, GPUI overlay and settings
+- `crates/earwig-core`: everything but pixels (config, controller, audio,
+  models, insertion, hotkeys, control socket). No GPUI, so tests are fast.
+- `crates/earwig-transcribe`: the transcribe.cpp `EngineFactory` (GGUF,
+  Vulkan + CPU).
+- `crates/earwig`: the binary: CLI, daemon wiring, GPUI overlay, settings
   window, tray.
-- `crates/earwig-core/models.toml`: curated models shipped with a release.
-- `nix/`: package, NixOS module, dev shell, treefmt, VM tests.
+- `crates/earwig-core/models.toml`: the curated model catalog.
+- `nix/`: package, NixOS module, model fetchers, dev shell, treefmt, VM tests.
+- `tests/fixtures/`: speech clips for engine and VM tests.
 
-Cross-module contracts live in `earwig-core/src/{events,engine,config,
-desktop}.rs`, `models/mod.rs`, `insert/mod.rs`, and `hotkey/mod.rs`. Change
-them deliberately; every front end depends on them.
+Contracts every front end depends on: `earwig-core/src/{events,engine,config,
+desktop}.rs`, `models/mod.rs`, `insert/mod.rs`, `hotkey/mod.rs`. Change them
+deliberately. `events.rs` is also the control-socket wire format that
+`earwig status`/`earwig events` print.
 
-## Develop
+## Commands
 
 ```bash
 nix develop
-cargo test -p earwig-core
+cargo test --workspace
 cargo clippy --workspace --all-targets
-cargo run -p earwig -- --help
 nix fmt
-nix flake check -L        # package, clippy, tests, VM tests (needs KVM)
+nix flake check -L                                # package, clippy, tests, VM tests (KVM)
+nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway gnome kde cosmic models
 ```
 
 ## Rules
 
 - Audio handed to an engine is 16 kHz mono `f32`.
-- Final text is inserted once, atomically. Never type it character by
-  character.
+- Final text is inserted once, atomically, never typed character by character.
 - The daemon never logs transcript text above `debug`.
-- Extension happens through the `EngineFactory`/`Inserter`/`HotkeySource`
-  traits, `[hooks]` commands, and the event socket. Keep those small and
-  documented instead of growing special cases.
+- Extend through the `EngineFactory`/`Inserter`/`HotkeySource` traits,
+  `[hooks]`, and the event socket, not special cases.
+- VM tests assert observable behavior (`earwig status`/`events`, files,
+  windows, OCR), not log wording.
 - Clippy pedantic is on; fix warnings at the cause.

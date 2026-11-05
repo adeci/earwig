@@ -5,6 +5,7 @@ mod daemon;
 mod ui;
 
 use clap::{Parser, Subcommand};
+use earwig_core::events::Command;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -63,16 +64,48 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command.unwrap_or(Cmd::Daemon { headless: false }) {
         Cmd::Daemon { headless } => daemon::run(headless, false),
-        Cmd::Press => daemon::send(&earwig_core::events::Command::Press),
-        Cmd::Release => daemon::send(&earwig_core::events::Command::Release),
-        Cmd::Toggle => daemon::send(&earwig_core::events::Command::Toggle),
-        Cmd::Cancel => daemon::send(&earwig_core::events::Command::Cancel),
+        Cmd::Press => daemon::send(&Command::Press),
+        Cmd::Release => daemon::send(&Command::Release),
+        Cmd::Toggle => daemon::send(&Command::Toggle),
+        Cmd::Cancel => daemon::send(&Command::Cancel),
         Cmd::Settings => daemon::settings(),
-        Cmd::Quit => daemon::send(&earwig_core::events::Command::Quit),
+        Cmd::Quit => daemon::send(&Command::Quit),
         Cmd::Status => daemon::status(),
         Cmd::Events => daemon::events(),
         Cmd::Models { command } => cli_models::run(command),
         Cmd::Transcribe { wav, backend } => daemon::transcribe_files(&wav, backend.as_deref()),
         Cmd::Devices => daemon::devices(),
+    }
+}
+
+/// Byte count in decimal units, as the Hugging Face Hub shows them.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let mut value = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::human_size;
+
+    #[test]
+    fn decimal_sizes() {
+        assert_eq!(human_size(999), "999 B");
+        assert_eq!(human_size(731_357_568), "731 MB");
+        assert_eq!(human_size(1_500_000_000), "1.5 GB");
     }
 }
