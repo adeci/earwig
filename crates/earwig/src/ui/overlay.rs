@@ -21,18 +21,22 @@ use crate::ui::pill::{self, Clock, Edge, Look, Motion};
 
 /// Width of the pill.
 const WIDTH: f32 = 560.;
-/// Gap between the pill and the screen edge it is anchored to.
-const MARGIN: f32 = 48.;
+/// Gap between the pill and the screen edge it is anchored to; at least
+/// `INSET`, so the surface never reaches past the screen edge.
+const MARGIN: f32 = 56.;
 /// Transparent room around the pill for its moving edge and its shadow.
 const INSET: f32 = pill::ROOM;
 /// Gap between the surface and the screen edge it is anchored to.
 const SURFACE_MARGIN: f32 = MARGIN - INSET;
+const _: () = assert!(SURFACE_MARGIN >= 0.);
 const LINE_HEIGHT: f32 = 22.;
 /// Frame pacing: smooth while the voice moves the edge, slow when it only
 /// breathes, so the overlay never competes with CPU decoding at display rate.
 const SPEAKING_FRAME: Duration = Duration::from_millis(16);
 const QUIET_FRAME: Duration = Duration::from_millis(50);
 const STILL_FRAME: Duration = Duration::from_millis(250);
+/// Pixels the edge must be able to travel to be worth `SPEAKING_FRAME`.
+const SPEAKING_REACH: f32 = 0.35;
 const HEADER_HEIGHT: f32 = 22.;
 const PADDING_X: f32 = 18.;
 const PADDING_Y: f32 = 14.;
@@ -150,6 +154,8 @@ pub struct OverlayView {
     level: f32,
     clock: Clock,
     motion: Motion,
+    /// Fill opacity setting.
+    opacity: f32,
     frame_pending: bool,
     /// The pill's colours as they fade toward the current phase's.
     look: Option<Look>,
@@ -158,18 +164,13 @@ pub struct OverlayView {
 }
 
 impl OverlayView {
-    pub fn new(
-        max_lines: u32,
-        position: OverlayPosition,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(config: &OverlayConfig, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             Theme::sync_system_appearance(Some(window), cx);
         });
         Self {
-            max_lines: max_lines.max(1),
-            position,
+            max_lines: config.max_lines.max(1),
+            position: config.position,
             phase: Phase::Recording,
             started_at_ms: now_ms(),
             stopped_at_ms: None,
@@ -177,7 +178,8 @@ impl OverlayView {
             tentative: String::new(),
             level: 0.,
             clock: Clock::default(),
-            motion: Motion::default(),
+            motion: Motion::new(config.motion()),
+            opacity: config.opacity(),
             frame_pending: false,
             look: None,
             tabular_numbers: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
@@ -228,23 +230,6 @@ impl OverlayView {
     fn elapsed(&self) -> Duration {
         let end = self.stopped_at_ms.unwrap_or_else(now_ms);
         Duration::from_millis(end.saturating_sub(self.started_at_ms))
-    }
-
-    /// The accent hairline stays put; the outcome shows in the text, not as a
-    /// colour flash.
-    fn target_look(theme: &Theme, accent: Hsla) -> Look {
-        let dark = theme.is_dark();
-        let fill: Hsla = if dark {
-            // Tokyo Night's background: a blue-black charcoal.
-            gpui_kit::rgb(0x001a_1b26).into()
-        } else {
-            theme.background
-        };
-        Look {
-            fill: fill.opacity(0.97),
-            border: accent.opacity(0.9),
-            dark,
-        }
     }
 
     fn header(&self, theme: &Theme) -> Div {
@@ -326,14 +311,9 @@ impl Render for OverlayView {
         let edge = self
             .motion
             .step(dt, self.is_recording().then_some(self.level));
-        // Without a GPU, animating would take the CPU the decoder needs.
-        let still = cx.reduce_motion()
-            || window
-                .gpu_specs()
-                .is_some_and(|gpu| gpu.is_software_emulated);
-        let (edge, frame) = if still {
+        let (edge, frame) = if pill::holds_still(window, cx) {
             (Edge::default(), STILL_FRAME)
-        } else if edge.energy > 0.05 {
+        } else if edge.reach() > SPEAKING_REACH {
             (edge, SPEAKING_FRAME)
         } else {
             (edge, QUIET_FRAME)
@@ -341,7 +321,7 @@ impl Render for OverlayView {
         self.schedule_frame(frame, cx);
         let accent = accent::get(cx);
         let theme = cx.theme();
-        let target = Self::target_look(theme, accent.unwrap_or(theme.primary));
+        let target = Look::themed(theme, accent.unwrap_or(theme.primary), self.opacity);
         let look = self.look.map_or(target, |look| look.fade_to(target, dt));
         self.look = Some(look);
         let header = self.header(theme);
@@ -369,7 +349,9 @@ impl Render for OverlayView {
                     .child(
                         canvas(
                             |_, _, _| {},
-                            move |bounds, (), window, _| pill::paint(bounds, edge, look, window),
+                            move |bounds, (), window, _| {
+                                pill::paint(bounds, edge, look, 1., window);
+                            },
                         )
                         .absolute()
                         .top_0()

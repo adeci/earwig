@@ -4,8 +4,10 @@
 use std::f32::consts::TAU;
 use std::time::Instant;
 
+use earwig_core::config::OverlayConfig;
+use gpui_kit::component::Theme;
 use gpui_kit::{
-    Bounds, BoxShadow, Corners, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point, px,
+    App, Bounds, BoxShadow, Corners, Hsla, PathBuilder, Pixels, Point, Rgba, Window, point, px,
 };
 
 /// Corner radius of the pill at rest.
@@ -14,17 +16,18 @@ const RADIUS: f32 = 24.;
 /// visible step, 2.5 blur radii) before the surface ends, even at full reach.
 pub const ROOM: f32 = SHADOW_DROP + 2.5 * SHADOW_BLUR + MAX_REACH;
 
-/// Furthest the edge moves out from rest: swell plus a full ripple.
-const MAX_REACH: f32 = SWELL + RIPPLE;
+/// Furthest the edge moves out from rest: swell plus a full ripple at the
+/// wildest motion setting.
+const MAX_REACH: f32 = OverlayConfig::MAX_MOTION * (SWELL + RIPPLE);
 /// The ambient shadow's offset below the pill and its blur (one standard
 /// deviation of the Gaussian GPUI draws).
 const SHADOW_DROP: f32 = 10.;
 const SHADOW_BLUR: f32 = 12.;
 const BORDER: f32 = 1.5;
 
-/// How far the whole pill grows at full voice.
+/// How far the whole pill grows at full voice and motion 1.
 const SWELL: f32 = 3.;
-/// Amplitude of the travelling ripple at full voice.
+/// Amplitude of the travelling ripple at full voice and motion 1.
 const RIPPLE: f32 = 4.2;
 
 /// Seconds the voice energy takes to rise toward a louder level...
@@ -86,13 +89,26 @@ impl Clock {
 }
 
 /// Smoothed voice energy and the phases the edge animates with.
-#[derive(Default)]
 pub struct Motion {
     energy: f32,
     phases: [f32; WAVES.len()],
+    /// The motion setting: how far the edge travels for a given voice.
+    intensity: f32,
 }
 
 impl Motion {
+    pub fn new(intensity: f32) -> Self {
+        Self {
+            energy: 0.,
+            phases: [0.; WAVES.len()],
+            intensity,
+        }
+    }
+
+    pub fn set_intensity(&mut self, intensity: f32) {
+        self.intensity = intensity;
+    }
+
     /// Advance by `dt` seconds. `level` is the latest mic level while
     /// recording, `None` once recording stopped, which lets the edge settle.
     pub fn step(&mut self, dt: f32, level: Option<f32>) -> Edge {
@@ -107,10 +123,10 @@ impl Motion {
             *phase = (*phase + wave.speed * self.energy * dt).rem_euclid(TAU);
         }
 
+        let travel = self.energy * self.intensity;
         Edge {
-            energy: self.energy,
-            swell: SWELL * self.energy,
-            ripple: RIPPLE * self.energy,
+            swell: SWELL * travel,
+            ripple: RIPPLE * travel,
             phases: self.phases,
         }
     }
@@ -130,8 +146,6 @@ fn voice(level: f32) -> f32 {
 /// The pill's outline at one instant.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Edge {
-    /// Smoothed voice, 0 (silent) to 1.
-    pub energy: f32,
     swell: f32,
     ripple: f32,
     phases: [f32; WAVES.len()],
@@ -148,6 +162,11 @@ impl Edge {
             .sum();
         self.swell + self.ripple * ripple
     }
+
+    /// The most the edge can stand out from rest right now, in pixels.
+    pub fn reach(&self) -> f32 {
+        self.swell + self.ripple
+    }
 }
 
 /// Colours of the pill.
@@ -156,9 +175,30 @@ pub struct Look {
     pub fill: Hsla,
     pub border: Hsla,
     pub dark: bool,
+    /// Shadow strength, 1 at the default opacity.
+    pub depth: f32,
 }
 
 impl Look {
+    /// The overlay's colours at fill `opacity`: Tokyo Night charcoal in dark
+    /// mode, the theme's background in light mode, and an accent hairline.
+    /// The shadow fades with the fill; the hairline stays put.
+    pub fn themed(theme: &Theme, accent: Hsla, opacity: f32) -> Look {
+        let dark = theme.is_dark();
+        let fill: Hsla = if dark {
+            // Tokyo Night's background: a blue-black charcoal.
+            gpui_kit::rgb(0x001a_1b26).into()
+        } else {
+            theme.background
+        };
+        Look {
+            fill: fill.opacity(opacity),
+            border: accent.opacity(0.9),
+            dark,
+            depth: opacity / OverlayConfig::DEFAULT_OPACITY,
+        }
+    }
+
     /// `self` moved toward `target` over `dt` seconds.
     pub fn fade_to(self, target: Look, dt: f32) -> Look {
         let t = approach(dt, FADE);
@@ -166,16 +206,28 @@ impl Look {
             fill: mix(self.fill, target.fill, t),
             border: mix(self.border, target.border, t),
             dark: target.dark,
+            depth: self.depth + (target.depth - self.depth) * t,
         }
     }
 }
 
-/// Paint the shadow, body and hairline of a pill resting at `bounds`.
-pub fn paint(bounds: Bounds<Pixels>, edge: Edge, look: Look, window: &mut Window) {
-    paint_shadow(bounds, edge, look.dark, window);
-    let outline = outline(bounds, RADIUS)
+/// Whether the edge should hold still: the desktop asks for reduced motion,
+/// or there is no GPU and animating would take the CPU the decoder needs.
+pub fn holds_still(window: &Window, cx: &App) -> bool {
+    cx.reduce_motion()
+        || window
+            .gpu_specs()
+            .is_some_and(|gpu| gpu.is_software_emulated)
+}
+
+/// Paint the shadow, body and hairline of a pill resting at `bounds`, with
+/// its corners, motion and shadow drawn at `scale` (the hairline stays as
+/// is, so a small preview keeps a crisp border).
+pub fn paint(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, window: &mut Window) {
+    paint_shadow(bounds, edge, look, scale, window);
+    let outline = outline(bounds, RADIUS * scale)
         .map(|(at, normal, u)| {
-            let offset = edge.offset(u);
+            let offset = edge.offset(u) * scale;
             point(px(at.x + normal.x * offset), px(at.y + normal.y * offset))
         })
         .collect::<Vec<_>>();
@@ -192,23 +244,25 @@ pub fn paint(bounds: Bounds<Pixels>, edge: Edge, look: Look, window: &mut Window
 }
 
 /// A wide ambient shadow and a tight contact one. Shadows are drawn only
-/// outside the element they belong to; tucking that element inside the
-/// smallest the edge gets (and spreading by as much) keeps the troughs of a
-/// ripple shaded instead of revealing a hard rectangular rim.
-fn paint_shadow(bounds: Bounds<Pixels>, edge: Edge, dark: bool, window: &mut Window) {
-    let tuck = px(MAX_REACH + 2.);
-    let (ambient, contact) = if dark { (0.5, 0.3) } else { (0.16, 0.1) };
+/// outside the element they belong to; tucking that element just inside the
+/// smallest the edge gets right now (and spreading by as much) keeps the
+/// troughs of a ripple shaded instead of revealing a hard rim, while a
+/// translucent fill shows no shadow band beneath it.
+fn paint_shadow(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, window: &mut Window) {
+    let tuck = px(((edge.ripple - edge.swell).max(0.) + 1.) * scale);
+    let (ambient, contact) = if look.dark { (0.5, 0.3) } else { (0.16, 0.1) };
     let shadow = |alpha: f32, y: f32, blur: f32| BoxShadow {
-        color: Hsla::black().opacity(alpha),
-        offset: point(px(0.), px(y)),
-        blur_radius: px(blur),
+        color: Hsla::black().opacity(alpha * look.depth),
+        offset: point(px(0.), px(y * scale)),
+        blur_radius: px(blur * scale),
         spread_radius: tuck,
         inset: false,
     };
-    let rest = bounds.dilate(px(edge.swell));
+    let swell = edge.swell * scale;
+    let rest = bounds.dilate(px(swell));
     window.paint_drop_shadows(
         rest.dilate(-tuck),
-        Corners::all(px(RADIUS + edge.swell)),
+        Corners::all(px(RADIUS * scale + swell)),
         &[
             shadow(ambient, SHADOW_DROP, SHADOW_BLUR),
             shadow(contact, 1., 3.),
@@ -315,10 +369,16 @@ mod tests {
         assert!(points.windows(2).all(|w| w[0].2 < w[1].2));
     }
 
+    fn furthest(edge: &Edge) -> f32 {
+        (0..100u8)
+            .map(|i| edge.offset(f32::from(i) / 100.))
+            .fold(0., f32::max)
+    }
+
     #[test]
     fn silence_is_still_and_speech_moves_the_edge() {
         let frame = 1. / 60.;
-        let mut motion = Motion::default();
+        let mut motion = Motion::new(1.);
         let mut quiet = Edge::default();
         for _ in 0..120 {
             quiet = motion.step(frame, Some(0.2));
@@ -329,21 +389,37 @@ mod tests {
         for _ in 0..30 {
             loud = motion.step(frame, Some(0.8));
         }
-        assert!(loud.energy > 0.95, "attack is fast: {}", loud.energy);
-        let reach = (0..100u8)
-            .map(|i| loud.offset(f32::from(i) / 100.))
-            .fold(0., f32::max);
-        assert!(reach > SWELL && reach <= MAX_REACH);
+        let peak = motion.energy;
+        assert!(peak > 0.95, "attack is fast: {peak}");
+        let reach = furthest(&loud);
+        assert!(reach > SWELL && reach <= loud.reach());
 
-        let mut settling = loud;
         for _ in 0..6 {
-            settling = motion.step(frame, None);
+            motion.step(frame, None);
         }
         assert!(
-            settling.energy > 0.5 && settling.energy < loud.energy,
+            motion.energy > 0.5 && motion.energy < peak,
             "release is gradual: {}",
-            settling.energy
+            motion.energy
         );
+    }
+
+    #[test]
+    fn motion_setting_scales_how_far_the_voice_moves_the_edge() {
+        let reaches: Vec<f32> = [0., 0.5, 1., 1.5, OverlayConfig::MAX_MOTION]
+            .into_iter()
+            .map(|intensity| {
+                let mut motion = Motion::new(intensity);
+                let mut edge = Edge::default();
+                for _ in 0..30 {
+                    edge = motion.step(1. / 60., Some(0.8));
+                }
+                furthest(&edge)
+            })
+            .collect();
+        assert!(reaches[0].abs() < 1e-6, "still at full voice: {reaches:?}");
+        assert!(reaches.windows(2).all(|w| w[0] < w[1]), "{reaches:?}");
+        assert!(reaches[4] <= MAX_REACH, "fits the room: {reaches:?}");
     }
 
     #[test]

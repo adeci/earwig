@@ -10,15 +10,16 @@ use gpui_kit::component::setting::{
 };
 use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{App, ParentElement as _, SharedString, Styled as _, div, px};
+use gpui_kit::{App, Entity, ParentElement as _, SharedString, Styled as _, div, px};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::ui::settings::pill_preview::{Knob, PillPreview};
 use crate::ui::{UiState, config, edit_config};
 
 const LOCKED_HINT: &str = "Set by system configuration.";
 
-pub fn page(cx: &App) -> SettingPage {
+pub fn page(pill: &Entity<PillPreview>, cx: &App) -> SettingPage {
     let mut groups = Vec::new();
     if let Some(error) = user_error(cx) {
         groups.push(
@@ -36,7 +37,7 @@ pub fn page(cx: &App) -> SettingPage {
         activation(cx),
         audio(cx),
         insertion(cx),
-        overlay(cx),
+        overlay(pill, cx),
         history(cx),
         hotkeys(),
     ]);
@@ -184,7 +185,7 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
     }
 }
 
-fn overlay(cx: &App) -> SettingGroup {
+fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
     SettingGroup::new().title("Overlay").items([
         item(
             cx,
@@ -222,6 +223,24 @@ fn overlay(cx: &App) -> SettingGroup {
                 |c| u64::from(c.overlay.max_lines),
                 |c, v| c.overlay.max_lines = u32::try_from(v).unwrap_or(u32::MAX),
             ),
+        ),
+        pill_item(
+            cx,
+            pill,
+            Knob::Motion,
+            "overlay.motion",
+            "Motion",
+            "How much the edge swells and ripples with your voice. \
+             Applies from the next dictation.",
+        ),
+        pill_item(
+            cx,
+            pill,
+            Knob::Opacity,
+            "overlay.opacity",
+            "Opacity",
+            "How much of what is behind the panel shows through; the text \
+             stays solid. Applies from the next dictation.",
         ),
     ])
 }
@@ -367,11 +386,7 @@ fn item<T: 'static>(
 where
     SettingField<T>: gpui_kit::component::setting::AnySettingField,
 {
-    let locked = UiState::handle(cx)
-        .config()
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .is_locked(key);
+    let locked = is_locked(cx, key);
     let description = if locked {
         format!("{description} {LOCKED_HINT}")
     } else {
@@ -380,6 +395,34 @@ where
     SettingItem::new(title, field)
         .description(description)
         .disabled(locked)
+}
+
+/// A slider row for one of the overlay pill's looks, sharing its preview.
+fn pill_item(
+    cx: &App,
+    pill: &Entity<PillPreview>,
+    knob: Knob,
+    key: &str,
+    title: &'static str,
+    description: &str,
+) -> SettingItem {
+    let locked = is_locked(cx, key);
+    let pill = pill.clone();
+    item(
+        cx,
+        key,
+        title,
+        description,
+        SettingField::render(move |_, _, cx| PillPreview::field(&pill, knob, locked, cx)),
+    )
+}
+
+fn is_locked(cx: &App, key: &str) -> bool {
+    UiState::handle(cx)
+        .config()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_locked(key)
 }
 
 /// A dropdown over a config enum, keyed by its serde name.

@@ -272,8 +272,6 @@ fn open_overlay(cx: &mut App) {
         &overlay_config,
         cx.primary_display().as_deref(),
     );
-    let max_lines = overlay_config.max_lines;
-    let anchor = overlay_config.position;
     // No Base root: it paints an opaque background, and the overlay has no
     // inputs or popovers that need one.
     let mut view = None;
@@ -281,7 +279,7 @@ fn open_overlay(cx: &mut App) {
         Theme::sync_system_appearance(Some(window), cx);
         // Click-through: pointer input goes to whatever is below.
         window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(max_lines, anchor, window, cx));
+        let root = cx.new(|cx| OverlayView::new(&overlay_config, window, cx));
         view = Some(root.clone());
         root
     });
