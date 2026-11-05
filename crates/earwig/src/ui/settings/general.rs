@@ -229,10 +229,11 @@ fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
             cx,
             "overlay.style",
             "Style",
-            "How the panel shows your voice: sound bars above and below it, \
-             or an edge that ripples. Applies from the next dictation.",
+            "How the panel shows your voice: its edge rises and falls with \
+             the sound, or sound bars stand above and below it. Applies from \
+             the next dictation.",
             enum_dropdown_with(
-                &[(OverlayStyle::Bars, "Bars"), (OverlayStyle::Wave, "Wave")],
+                &[(OverlayStyle::Wave, "Wave"), (OverlayStyle::Bars, "Bars")],
                 |c| c.overlay.style,
                 move |style, cx| {
                     edit_config(cx, |c| c.overlay.style = style);
