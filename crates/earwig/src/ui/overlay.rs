@@ -32,6 +32,7 @@ const LINE_HEIGHT: f32 = 22.;
 /// breathes, so the overlay never competes with CPU decoding at display rate.
 const SPEAKING_FRAME: Duration = Duration::from_millis(16);
 const QUIET_FRAME: Duration = Duration::from_millis(50);
+const STILL_FRAME: Duration = Duration::from_millis(250);
 const HEADER_HEIGHT: f32 = 22.;
 const PADDING_X: f32 = 18.;
 const PADDING_Y: f32 = 14.;
@@ -343,20 +344,22 @@ impl OverlayView {
 }
 
 impl Render for OverlayView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dt = self.clock.tick(Instant::now());
         let edge = self
             .motion
             .step(dt, self.is_recording().then_some(self.level));
-        let edge = if cx.reduce_motion() {
-            Edge::default()
+        // Without a GPU, animating would take the CPU the decoder needs.
+        let still = cx.reduce_motion()
+            || window
+                .gpu_specs()
+                .is_some_and(|gpu| gpu.is_software_emulated);
+        let (edge, frame) = if still {
+            (Edge::default(), STILL_FRAME)
+        } else if edge.energy > 0.05 {
+            (edge, SPEAKING_FRAME)
         } else {
-            edge
-        };
-        let frame = if edge.energy > 0.05 {
-            SPEAKING_FRAME
-        } else {
-            QUIET_FRAME
+            (edge, QUIET_FRAME)
         };
         self.schedule_frame(frame, cx);
         let accent = accent::get(cx);
