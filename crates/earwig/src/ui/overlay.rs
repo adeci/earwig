@@ -28,6 +28,10 @@ const INSET: f32 = pill::ROOM;
 /// Gap between the surface and the screen edge it is anchored to.
 const SURFACE_MARGIN: f32 = MARGIN - INSET;
 const LINE_HEIGHT: f32 = 22.;
+/// Frame pacing: smooth while the voice moves the edge, slow when it only
+/// breathes, so the overlay never competes with CPU decoding at display rate.
+const SPEAKING_FRAME: Duration = Duration::from_millis(16);
+const QUIET_FRAME: Duration = Duration::from_millis(50);
 const HEADER_HEIGHT: f32 = 22.;
 const PADDING_X: f32 = 18.;
 const PADDING_Y: f32 = 14.;
@@ -147,6 +151,7 @@ pub struct OverlayView {
     level: f32,
     clock: Clock,
     motion: Motion,
+    frame_pending: bool,
     /// The pill's colours as they fade toward the current phase's.
     look: Option<Look>,
     tabular_numbers: FontFeatures,
@@ -174,6 +179,7 @@ impl OverlayView {
             level: 0.,
             clock: Clock::default(),
             motion: Motion::default(),
+            frame_pending: false,
             look: None,
             tabular_numbers: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
             _appearance: appearance,
@@ -317,12 +323,27 @@ impl OverlayView {
             )),
         }
     }
+
+    /// Re-render after `interval`; the window closing drops the entity and
+    /// ends the loop.
+    fn schedule_frame(&mut self, interval: Duration, cx: &mut Context<Self>) {
+        if self.frame_pending {
+            return;
+        }
+        self.frame_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(interval).await;
+            let _ = this.update(cx, |view, cx| {
+                view.frame_pending = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 impl Render for OverlayView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Redrawn every frame while open; the window closing ends it.
-        window.request_animation_frame();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dt = self.clock.tick(Instant::now());
         let edge = self
             .motion
@@ -332,6 +353,12 @@ impl Render for OverlayView {
         } else {
             edge
         };
+        let frame = if edge.energy > 0.05 {
+            SPEAKING_FRAME
+        } else {
+            QUIET_FRAME
+        };
+        self.schedule_frame(frame, cx);
         let accent = accent::get(cx);
         let theme = cx.theme();
         let target = self.target_look(theme, accent.unwrap_or(theme.primary), edge.energy);
