@@ -9,6 +9,8 @@ use earwig_core::config::ConfigStore;
 use earwig_core::events::Command;
 use earwig_core::models::{CancelToken, DownloadProgress, ModelError, ModelManager, ModelSpec};
 
+use crate::human_size;
+
 #[derive(Subcommand)]
 pub enum ModelsCmd {
     /// Curated and installed models; `*` marks the configured one.
@@ -272,25 +274,5 @@ impl ProgressLine {
             eprintln!();
             self.dirty = false;
         }
-    }
-}
-
-/// Decimal units, as the Hub shows them.
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
-    if bytes < 1000 {
-        return format!("{bytes} B");
-    }
-    #[allow(clippy::cast_precision_loss)] // display only
-    let mut value = bytes as f64 / 1000.0;
-    let mut unit = 0;
-    while value >= 1000.0 && unit < UNITS.len() - 1 {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if value >= 100.0 {
-        format!("{value:.0} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
     }
 }

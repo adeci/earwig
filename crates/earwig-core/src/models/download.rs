@@ -245,7 +245,9 @@ impl Part<'_> {
             self.len += n as u64;
             self.report(false);
         }
-        match end {
+        // Without a length header a short body only shows against the
+        // catalog or Hub size.
+        match end.or(src.size) {
             Some(end) if self.len < end => Err(Failure::Retry(net(&"connection closed early"))),
             _ => Ok(()),
         }
@@ -281,6 +283,8 @@ mod tests {
         Full,
         /// Honor `Range`; pause after `after` body bytes before the rest.
         Stall { after: usize },
+        /// 200 without `Content-Length`; send `limit` bytes, then hang up.
+        Unsized { limit: usize },
     }
 
     struct Server {
@@ -347,6 +351,11 @@ mod tests {
                 data,
             ),
         };
+        if let Reply::Unsized { limit } = reply {
+            let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+            let _ = conn.write_all(&data[..limit]);
+            return range;
+        }
         let _ = conn.write_all(format!("{head}Connection: close\r\n\r\n").as_bytes());
         match reply {
             Reply::Ranged { limit } => {
@@ -360,6 +369,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(300));
                 let _ = conn.write_all(&body[after..]);
             }
+            Reply::Unsized { .. } => unreachable!("answered above"),
         }
         range
     }
@@ -420,6 +430,28 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), data);
         assert!(!part_path(&dest).exists());
         assert_eq!(last, (data.len() as u64, data.len() as u64));
+        assert_eq!(
+            *server.ranges.lock().unwrap(),
+            [None, Some("bytes=600000-".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_short_body_without_length_resumes_against_the_known_size() {
+        let (data, sha) = data();
+        let server = serve(data.clone(), vec![Reply::Unsized { limit: 600_000 }]);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.gguf");
+        run(
+            &server,
+            &sha,
+            Some(data.len() as u64),
+            &dest,
+            &CancelToken::default(),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), data);
         assert_eq!(
             *server.ranges.lock().unwrap(),
             [None, Some("bytes=600000-".to_owned())]

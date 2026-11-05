@@ -1,7 +1,8 @@
 //! Where earwig keeps things (XDG base directories).
 
-use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{env, fs, io};
 
 const APP: &str = "earwig";
 
@@ -40,7 +41,7 @@ pub fn system_configs() -> Vec<PathBuf> {
 }
 
 /// `$XDG_DATA_HOME/earwig`
-pub fn data_dir() -> PathBuf {
+fn data_dir() -> PathBuf {
     xdg("XDG_DATA_HOME", dirs::data_dir).join(APP)
 }
 
@@ -77,4 +78,23 @@ pub fn state_dir() -> PathBuf {
 /// `$XDG_RUNTIME_DIR/earwig.sock`
 pub fn socket() -> PathBuf {
     xdg("XDG_RUNTIME_DIR", dirs::runtime_dir).join(format!("{APP}.sock"))
+}
+
+/// Replace `path` with `contents` via a temp file in the same directory, so
+/// readers see the old file or the new one, never a partial write.
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&tmp, contents)
+        .and_then(|()| fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
 }

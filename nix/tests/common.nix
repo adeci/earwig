@@ -3,26 +3,9 @@
 # NixOS module with the default model pinned, and Python helpers for the test
 # script.
 { self }:
-let
-  # The microphone plays this clip. Prefer the recorded fixture; until it
-  # exists, synthesize the same sentence.
-  fixture = ../../tests/fixtures/quick-brown-fox.wav;
-  sentence = "The quick brown fox jumps over the lazy dog.";
-in
 {
-  inherit sentence;
-
   machine =
     { pkgs, lib, ... }:
-    let
-      clip =
-        if builtins.pathExists fixture then
-          fixture
-        else
-          pkgs.runCommand "quick-brown-fox.wav" { nativeBuildInputs = [ pkgs.espeak-ng ]; } ''
-            espeak-ng -s 140 -w $out ${lib.escapeShellArg sentence}
-          '';
-    in
     {
       imports = [ self.nixosModules.default ];
 
@@ -86,7 +69,7 @@ in
         pkgs.sox
         pkgs.wayland-utils
       ];
-      environment.etc."earwig-test/clip.wav".source = clip;
+      environment.etc."earwig-test/clip.wav".source = ../../tests/fixtures/quick-brown-fox.wav;
 
       # Black on white for OCR, as in nixpkgs' sway test.
       fonts.packages = [ pkgs.inconsolata ];
@@ -103,7 +86,10 @@ in
 
   # Python helpers; the compositor-specific script comes after this.
   prelude = ''
+    import json
+    import re
     import shlex
+    import time
     from datetime import timedelta as td
 
     RUNTIME = "/run/user/1000"
@@ -114,6 +100,56 @@ in
         return machine.succeed(
             f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} {cmd}')}"
         )
+
+
+    def earwig_log() -> str:
+        """The daemon's log (the user service's journal)."""
+        return machine.succeed("journalctl _UID=1000 _SYSTEMD_USER_UNIT=earwig.service -o cat --no-pager")
+
+
+    def log_lines() -> int:
+        return len(earwig_log().splitlines())
+
+
+    def wait_log(pattern: str, timeout: float = 60, since: int = 0) -> str:
+        """Wait for a daemon log line matching `pattern` after the first
+        `since` lines; returns the line."""
+        deadline = time.monotonic() + timeout
+        while True:
+            lines = earwig_log().splitlines()[since:]
+            for line in lines:
+                if re.search(pattern, line):
+                    return line
+            if time.monotonic() > deadline:
+                print("\n".join(lines[-60:]))
+                raise Exception(f"the daemon never logged {pattern!r}")
+            time.sleep(0.5)
+
+
+    def play_clip() -> None:
+        """Speak the clip into the virtual microphone, in the background."""
+        machine.succeed(
+            f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
+        )
+
+
+    def wait_live_text(shot: str) -> str:
+        """After the clip ends, OCR the screen until the overlay shows the
+        live transcript (CPU decoding trails the audio); returns the text."""
+        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
+        text = ""
+
+        def shown(_last_try: bool) -> bool:
+            nonlocal text
+            text = machine.get_screen_text()
+            return any(w in text.lower() for w in ("quick", "brown", "fox"))
+
+        try:
+            retry(shown, timeout=td(seconds=90))
+        finally:
+            print(f"OCR while recording: {text!r}")
+            machine.screenshot(shot)
+        return text
 
 
     def spawn(cmd: str) -> None:
@@ -166,30 +202,69 @@ in
             machine.succeed("truncate --no-create -s 0 /tmp/out")
 
 
+    def status() -> dict:
+        return json.loads(as_alice("earwig status"))
+
+
+    def wait_status(predicate, what: str, timeout: float = 60) -> dict:
+        """Poll `earwig status` until `predicate(status)` holds; returns it."""
+        st = {}
+
+        def check(_last_try: bool) -> bool:
+            nonlocal st
+            code, out = machine.execute(f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} earwig status')}")
+            st = json.loads(out) if code == 0 else {}
+            return bool(st) and bool(predicate(st))
+
+        try:
+            retry(check, timeout=td(seconds=timeout))
+        except Exception:
+            raise Exception(f"timed out waiting for {what}; status: {st}")
+        return st
+
+
+    def watch_events() -> str:
+        """Stream daemon events into a fresh file in the background; returns
+        its path once the subscription is live."""
+        path = machine.succeed("mktemp -u /tmp/earwig-events-XXXXXX").strip()
+        machine.succeed(
+            f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} earwig events > {path}')} >&2 &"
+        )
+        machine.wait_until_succeeds(f"test -s {path}", timeout=td(seconds=30))
+        return path
+
+
+    def wait_insertion(events: str, timeout: float = 120) -> dict:
+        """Wait for the next dictation result in `events`; it must be `inserted`."""
+        result = {}
+
+        def done(_last_try: bool) -> bool:
+            nonlocal result
+            for line in machine.succeed(f"cat {events}").splitlines():
+                event = json.loads(line)
+                if event["event"] in ("inserted", "insert-failed"):
+                    result = event
+                    return True
+            return False
+
+        retry(done, timeout=td(seconds=timeout))
+        assert result["event"] == "inserted", result
+        return result
+
+
+    def print_latency() -> None:
+        """The daemon's per-dictation timings (only logged, so read from the journal)."""
+        print(machine.succeed("journalctl _UID=1000 _SYSTEMD_USER_UNIT=earwig.service -o cat --no-pager | grep -E 'final text|done [0-9]+ ms' || true"))
+
+
     def dictate() -> str:
         """Hold the hotkey (via the CLI, like a compositor bind) over the clip;
         returns the OCR'd screen while recording."""
         as_alice("earwig press")
-        machine.succeed(
-            f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
-        )
-        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
-        # The VM decodes on llvmpipe/CPU, so live text trails the audio by a
-        # few seconds; keep the key held until the overlay shows it.
-        overlay_text = ""
-
-        def live_text_shown(_last_try: bool) -> bool:
-            nonlocal overlay_text
-            overlay_text = machine.get_screen_text()
-            return any(w in overlay_text.lower() for w in ("quick", "brown", "fox"))
-
-        try:
-            retry(live_text_shown, timeout=td(seconds=90))
-        finally:
-            print(f"OCR while recording: {overlay_text!r}")
-            machine.screenshot("overlay_recording")
+        play_clip()
+        text = wait_live_text("overlay_recording")
         as_alice("earwig release")
-        return overlay_text
+        return text
   '';
 
   # Everything that needs earwig itself (daemon, pipeline, overlay, an
@@ -200,14 +275,16 @@ in
             user_unit_active("earwig.service")
         finally:
             print(machine.execute("journalctl _SYSTEMD_USER_UNIT=earwig.service --no-pager | tail -n 30")[1])
-        print(as_alice("earwig status"))
+        print(wait_status(lambda s: s["insert_methods"], "an insertion method"))
 
+    events = watch_events()
     overlay_text = dictate()
 
     with machine.nested("EARWIG: overlay showed live text while recording"):
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
 
     with machine.nested("EARWIG: transcript inserted into the focused terminal"):
+        print(wait_insertion(events))
         machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(minutes=1))
         print(machine.succeed("cat /tmp/out"))
         machine.screenshot("inserted")

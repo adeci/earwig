@@ -11,7 +11,7 @@ mod settings;
 mod tray;
 
 use std::sync::PoisonError;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use earwig_core::config::Config;
 use earwig_core::controller::Handle;
@@ -57,10 +57,7 @@ impl OverlaySurface {
 }
 
 /// Run the GPUI application on the main thread until the daemon quits.
-// `Result` is the entry-point contract the daemon calls; GPUI itself has no
-// fallible startup to report today.
-#[allow(clippy::unnecessary_wraps)]
-pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) -> anyhow::Result<()> {
+pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
     let events = handle.subscribe();
     let (local_tx, local_rx) = flume::unbounded();
     let tray = tray::spawn(handle.clone(), local_tx);
@@ -115,7 +112,13 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) -> anyhow::Re
                 show_settings(cx);
             }
         });
-    Ok(())
+}
+
+/// Wall-clock milliseconds since the Unix epoch, the unit of daemon timestamps.
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Everything the windows render from, owned by the main thread.

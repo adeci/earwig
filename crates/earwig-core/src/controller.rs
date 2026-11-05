@@ -1,18 +1,17 @@
 //! The daemon's heart: one thread that owns the dictation state and talks to
-//! the microphone, the engine and the inserter. Everything else holds a
-//! cloneable [`Handle`].
+//! the microphone, engine and inserter; everything else holds a [`Handle`].
 //!
 //! Threads:
 //! - `earwig-controller`: the [`Session`] state machine, commands, events,
-//!   and [`Shared::status`]. Never blocks on audio, decoding or insertion, so
-//!   Release and Cancel are handled at once.
+//!   and the status snapshot. Never blocks on audio, decoding or insertion,
+//!   so Release and Cancel are handled at once.
 //! - `earwig-engine`: owns the loaded [`Model`]; loads, feeds, finishes.
 //! - `earwig-output`: owns the [`Inserter`]; runs the `[hooks]` filter,
 //!   inserts, appends history, runs `on_insert`.
 //! - `earwig-audio`: the [`Capture`] worker.
 //!
-//! Every recording gets an id; results that arrive for an older (cancelled)
-//! recording are dropped.
+//! Every recording gets an id; results for an older (cancelled) recording
+//! are dropped.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +21,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEvent, Capture, Source};
 use crate::config::{AudioConfig, BackendSetting, Config, ConfigStore};
-use crate::desktop::DesktopCaps;
 use crate::engine::{Backend, EngineFactory, EngineOptions, Model, ModelInfo, Partial};
 use crate::events::{Command, DictationState, Event, ModelStatus, Status};
 use crate::history::{History, HistoryEntry};
@@ -31,46 +29,44 @@ use crate::insert::Inserter;
 use crate::models::{ModelError, ModelManager, ModelSpec};
 use crate::session::{Action, Input, Phase, Session};
 
-/// What the controller is built from.
 pub struct Parts {
     pub config: ConfigStore,
     pub models: Arc<ModelManager>,
     pub history: Arc<History>,
     pub engine: Arc<dyn EngineFactory>,
     pub inserter: Box<dyn Inserter>,
-    pub caps: DesktopCaps,
     /// Names of the hotkey sources started for this session.
     pub hotkey_sources: Vec<String>,
 }
 
-/// Fan-out of [`Event`]s to any number of subscribers. Subscribers that went
-/// away are dropped on the next publish.
+/// Fan-out of [`Event`]s; subscribers that went away are dropped on the next
+/// publish.
 #[derive(Debug, Default)]
-pub struct Bus {
+pub(crate) struct Bus {
     subscribers: Mutex<Vec<flume::Sender<Event>>>,
     closed: AtomicBool,
 }
 
 impl Bus {
-    pub fn publish(&self, event: &Event) {
+    pub(crate) fn publish(&self, event: &Event) {
         self.lock().retain(|tx| tx.send(event.clone()).is_ok());
     }
 
-    /// A new subscriber that first receives `first`. After [`Bus::close`]
-    /// the receiver disconnects right after `first`.
-    pub fn subscribe(&self, first: Event) -> flume::Receiver<Event> {
+    /// A new subscriber that first receives `first()`. It runs under the
+    /// subscriber lock, so no publish can slip between it and registration.
+    /// After [`Bus::close`] the receiver disconnects right after it.
+    fn subscribe(&self, first: impl FnOnce() -> Event) -> flume::Receiver<Event> {
         let (tx, rx) = flume::unbounded();
-        let _ = tx.send(first);
         let mut subscribers = self.lock();
+        let _ = tx.send(first());
         if !self.closed.load(Ordering::Relaxed) {
             subscribers.push(tx);
         }
         rx
     }
 
-    /// Disconnect every subscriber; the controller does this when it exits,
-    /// which is how front ends learn the daemon quit.
-    pub fn close(&self) {
+    /// Front ends learn the daemon quit when their subscription disconnects.
+    fn close(&self) {
         let mut subscribers = self.lock();
         self.closed.store(true, Ordering::Relaxed);
         subscribers.clear();
@@ -89,11 +85,10 @@ pub struct Handle {
     shared: Arc<Shared>,
 }
 
-/// State the controller thread and its handles share.
-pub struct Shared {
+pub(crate) struct Shared {
     pub commands: flume::Sender<Command>,
     pub bus: Bus,
-    /// Latest snapshot, kept current by the controller thread.
+    /// Written before the matching event is published.
     pub status: RwLock<Status>,
     pub config: Arc<RwLock<ConfigStore>>,
     pub models: Arc<ModelManager>,
@@ -102,7 +97,7 @@ pub struct Shared {
 }
 
 impl Handle {
-    pub fn new(shared: Arc<Shared>) -> Self {
+    pub(crate) fn new(shared: Arc<Shared>) -> Self {
         Self { shared }
     }
 
@@ -117,7 +112,7 @@ impl Handle {
 
     /// Every event from now on, starting with a [`Event::Status`] snapshot.
     pub fn subscribe(&self) -> flume::Receiver<Event> {
-        self.shared.bus.subscribe(Event::Status {
+        self.shared.bus.subscribe(|| Event::Status {
             status: self.status(),
         })
     }
@@ -149,13 +144,7 @@ impl Handle {
     }
 }
 
-/// Start the controller with the configured microphone.
-pub fn spawn(parts: Parts) -> anyhow::Result<Handle> {
-    spawn_with_source(parts, Source::Microphone)
-}
-
-/// Start the controller with audio from `source` (tests and
-/// `EARWIG_AUDIO_FILE` pass a [`Source::Clip`]).
+/// Start the controller with audio from `source`.
 pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle> {
     let Parts {
         config,
@@ -163,7 +152,6 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         history,
         engine,
         inserter,
-        caps: _,
         hotkey_sources,
     } = parts;
     let settings = config.config().clone();
@@ -224,7 +212,6 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     Ok(Handle::new(shared))
 }
 
-/// A model and how to load it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ModelRequest {
     spec: ModelSpec,
@@ -254,6 +241,7 @@ fn wanted_model(models: &ModelManager, config: &Config) -> ModelRequest {
 }
 
 enum EngineJob {
+    Unload,
     Load {
         load_id: u64,
         path: PathBuf,
@@ -294,7 +282,6 @@ enum EngineEvent {
     },
 }
 
-/// Load a model for the engine thread, logging how it went.
 fn load_model(
     factory: &dyn EngineFactory,
     load_id: u64,
@@ -349,6 +336,10 @@ fn engine_thread(
                 let (loaded, event) = load_model(factory, load_id, &path, &options);
                 model = loaded;
                 let _ = events.send(event);
+            }
+            EngineJob::Unload => {
+                drop(model.take());
+                active = Err("no speech model loaded".into());
             }
             EngineJob::Begin { id } => {
                 active = match &mut model {
@@ -497,13 +488,11 @@ struct Controller {
     capture: Option<Capture>,
     engine: flume::Sender<EngineJob>,
     output: flume::Sender<OutputJob>,
-    /// Engine and output threads, joined on quit.
     workers: Vec<thread::JoinHandle<()>>,
-    /// Id of the newest recording.
     recording: u64,
     started: Instant,
     started_at_ms: u64,
-    /// When the newest recording stopped (release), for latency logs.
+    /// When the newest recording stopped, for latency logs.
     stopped: Instant,
     duration_ms: u64,
     /// Set to drop the result being inserted.
@@ -847,15 +836,17 @@ impl Controller {
                 });
                 self.loaded = Some(request);
             }
-            Err(ModelError::NotInstalled(model)) => {
-                self.loaded = None;
-                self.set_model(ModelStatus::Missing { model });
-            }
             Err(e) => {
-                self.loaded = None;
-                self.set_model(ModelStatus::Failed {
-                    model: request.spec,
-                    message: e.to_string(),
+                if self.loaded.take().is_some() {
+                    // Don't keep the old model in (GPU) memory.
+                    let _ = self.engine.send(EngineJob::Unload);
+                }
+                self.set_model(match e {
+                    ModelError::NotInstalled(model) => ModelStatus::Missing { model },
+                    e => ModelStatus::Failed {
+                        model: request.spec,
+                        message: e.to_string(),
+                    },
                 });
             }
         }
@@ -923,6 +914,7 @@ impl Controller {
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
 
     use super::*;
     use crate::config::ConfigPaths;
@@ -931,7 +923,8 @@ mod tests {
 
     const TEXT: &str = "hello from the fake engine";
 
-    struct FakeEngine;
+    /// Counts the models alive.
+    struct FakeEngine(Arc<AtomicUsize>);
 
     impl EngineFactory for FakeEngine {
         fn name(&self) -> &'static str {
@@ -941,6 +934,7 @@ mod tests {
             arch == "fake"
         }
         fn load(&self, _path: &Path, _options: &EngineOptions) -> anyhow::Result<Box<dyn Model>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeModel {
                 info: ModelInfo {
                     architecture: "fake".into(),
@@ -948,6 +942,7 @@ mod tests {
                     backend: "cpu".into(),
                 },
                 samples: 0,
+                live: self.0.clone(),
             }))
         }
     }
@@ -955,6 +950,13 @@ mod tests {
     struct FakeModel {
         info: ModelInfo,
         samples: usize,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakeModel {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     impl Model for FakeModel {
@@ -1017,6 +1019,7 @@ mod tests {
         handle: Handle,
         events: flume::Receiver<Event>,
         calls: Arc<Mutex<Calls>>,
+        live_models: Arc<AtomicUsize>,
         _dir: tempfile::TempDir,
     }
 
@@ -1034,22 +1037,28 @@ mod tests {
                 ),
             )
             .unwrap();
+            Self::spawn(dir, vec![system], fail_insert)
+        }
+
+        /// Start with `user.toml` in `dir` and the given system files, and
+        /// wait until the model is ready.
+        fn spawn(dir: tempfile::TempDir, system: Vec<PathBuf>, fail_insert: bool) -> Self {
             let config = ConfigStore::load_from(ConfigPaths {
                 user: dir.path().join("user.toml"),
-                system: vec![system],
+                system,
             })
             .unwrap();
             let calls = Arc::new(Mutex::new(Calls::default()));
+            let live_models = Arc::new(AtomicUsize::new(0));
             let parts = Parts {
                 config,
                 models: Arc::new(ModelManager::new(dir.path().join("models"))),
                 history: Arc::new(History::open(dir.path().join("history.jsonl"), 50).unwrap()),
-                engine: Arc::new(FakeEngine),
+                engine: Arc::new(FakeEngine(live_models.clone())),
                 inserter: Box::new(FakeInserter {
                     fail: fail_insert,
                     calls: calls.clone(),
                 }),
-                caps: DesktopCaps::default(),
                 hotkey_sources: Vec::new(),
             };
             let clip: Arc<[f32]> = vec![0.25; 1_600].into();
@@ -1059,6 +1068,7 @@ mod tests {
                 handle,
                 events,
                 calls,
+                live_models,
                 _dir: dir,
             };
             daemon.wait_for(|e| matches!(e, Event::Model { model: ModelStatus::Ready { .. } }) || matches!(e, Event::Status { status } if matches!(status.model, ModelStatus::Ready { .. })));
@@ -1200,5 +1210,33 @@ mod tests {
         let late = d.handle.subscribe();
         assert!(matches!(late.recv(), Ok(Event::Status { .. })));
         assert!(late.recv().is_err());
+    }
+
+    #[test]
+    fn switching_to_a_missing_model_unloads_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("fake.gguf");
+        fs::write(&model, b"").unwrap();
+        let user = format!("[model]\nmodel = \"{}\"\n", model.display());
+        fs::write(dir.path().join("user.toml"), user).unwrap();
+        let gone = dir.path().join("gone.gguf");
+        let d = Daemon::spawn(dir, Vec::new(), false);
+        assert_eq!(d.live_models.load(Ordering::SeqCst), 1);
+        d.handle.send(Command::UseModel {
+            model: ModelSpec::Path { path: gone },
+        });
+        d.wait_for(|e| {
+            matches!(
+                e,
+                Event::Model {
+                    model: ModelStatus::Missing { .. } | ModelStatus::Failed { .. }
+                }
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while d.live_models.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < deadline, "the old model is still loaded");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

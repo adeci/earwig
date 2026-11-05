@@ -1,7 +1,7 @@
-//! The control socket: `$XDG_RUNTIME_DIR/earwig.sock` ([`crate::paths::socket`]).
+//! The control socket, `$XDG_RUNTIME_DIR/earwig.sock` (mode 0600).
 //!
-//! Protocol: newline-delimited JSON. Each line a client writes is one
-//! [`Command`]. Replies are [`Event`] lines:
+//! Newline-delimited JSON: each client line is one [`Command`]; replies are
+//! [`Event`] lines.
 //! - [`Command::Status`]: one [`Event::Status`].
 //! - [`Command::Subscribe`]: an [`Event::Status`] snapshot, then every event
 //!   until either side hangs up. Lines sent after it are ignored.
@@ -9,9 +9,7 @@
 //! - a line that is not a valid command: one [`Event::Error`].
 //!
 //! The daemon closes a connection when the client closes its write side, so
-//! a client may send several commands, shut down writing, and read replies to
-//! EOF. The socket is mode 0600 inside the per-user runtime directory.
-//! Compositor binds use it through `earwig press|release|toggle|cancel`.
+//! a client may send several commands, shut down writing, and read to EOF.
 
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Write as _};
@@ -19,16 +17,16 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Context as _;
 
 use crate::controller::Handle;
 use crate::events::{Command, Event};
 
-/// Serve [`crate::paths::socket`] for `handle` on a background thread.
-pub fn serve(handle: Handle) -> anyhow::Result<()> {
-    Server::bind(&crate::paths::socket())?.serve(handle)
-}
+/// A client that stops reading for this long is dropped, so it cannot pin a
+/// thread and an ever-growing event queue.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Send one command to the running daemon; returns its reply, if the
 /// command has one.
@@ -50,8 +48,8 @@ pub struct Server {
 }
 
 impl Server {
-    /// Bind `path`. Fails if another daemon answers there; a stale socket
-    /// file left by a crash is replaced.
+    /// Fails if another daemon answers at `path`; a stale socket file left by
+    /// a crash is replaced.
     pub fn bind(path: &Path) -> anyhow::Result<Self> {
         if path.exists() {
             match UnixStream::connect(path) {
@@ -90,6 +88,10 @@ impl Server {
                 for conn in self.listener.incoming() {
                     match conn {
                         Ok(conn) => {
+                            if let Err(e) = conn.set_write_timeout(Some(WRITE_TIMEOUT)) {
+                                log::warn!("control socket: {e}");
+                                continue;
+                            }
                             let handle = handle.clone();
                             let spawned = thread::Builder::new()
                                 .name("earwig-ipc-client".into())
@@ -194,7 +196,6 @@ pub fn subscribe_at(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};
-    use std::time::Duration;
 
     use super::*;
     use crate::config::{ConfigPaths, ConfigStore};
@@ -269,8 +270,8 @@ mod tests {
         );
         let mut events = subscribe_at(&path).unwrap();
         assert!(matches!(events.next(), Some(Ok(Event::Status { .. }))));
-        // The server registers the subscriber before writing the snapshot,
-        // so this publish cannot be missed.
+        // `subscribe` registers before the snapshot is written, so this
+        // publish cannot be missed.
         shared.bus.publish(&Event::Level { level: 0.5 });
         assert_eq!(events.next().unwrap().unwrap(), Event::Level { level: 0.5 });
 
@@ -285,13 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn live_daemon_is_kept_and_stale_socket_replaced() {
+    fn stale_socket_is_replaced_and_live_one_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("earwig.sock");
         drop(UnixListener::bind(&path).unwrap());
         assert!(path.exists());
-        let server = Server::bind(&path).unwrap();
+        let _server = Server::bind(&path).unwrap();
         assert!(Server::bind(&path).is_err());
-        drop(server);
+        assert!(
+            UnixStream::connect(&path).is_ok(),
+            "live socket was removed"
+        );
     }
 }
