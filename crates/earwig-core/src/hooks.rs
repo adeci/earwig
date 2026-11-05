@@ -1,22 +1,22 @@
 //! The `[hooks]` commands: external programs that see the final text.
 //!
-//! - `filter` gets the text on stdin; what it prints replaces the text.
-//!   Trailing line breaks are dropped (so `echo`-style output never presses
-//!   Enter). A failure, a non-zero exit, output that is not UTF-8, or the
-//!   timeout keeps the original text.
+//! - `filter` gets the text on stdin; what it prints replaces the text, minus
+//!   trailing line breaks (so `echo`-style output never presses Enter). A
+//!   failure, a non-zero exit, output that is not UTF-8, or the timeout keeps
+//!   the original text.
 //! - `on_insert` gets the inserted text on stdin and is not awaited.
 //!
 //! Both inherit the daemon's stderr, so their diagnostics land in its log.
 
 use std::io::{Read as _, Write as _};
-use std::process::{Child, Command, Stdio};
+use std::os::unix::process::CommandExt as _;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::HooksConfig;
 
-/// Filter timeout when the config does not set one.
-pub const DEFAULT_FILTER_TIMEOUT: Duration = Duration::from_millis(2000);
+const DEFAULT_FILTER_TIMEOUT: Duration = Duration::from_millis(2000);
 
 /// Run the filter over `text`; returns `text` unchanged when no filter is set
 /// or it fails.
@@ -44,10 +44,10 @@ pub fn on_insert(config: &HooksConfig, text: &str) {
     if config.on_insert.is_empty() {
         return;
     }
-    let mut child = match spawn(&config.on_insert, Stdio::null()) {
+    let mut child = match command(&config.on_insert, Stdio::null()).spawn() {
         Ok(child) => child,
         Err(e) => {
-            log::warn!("on_insert hook {:?} failed: {e:#}", config.on_insert[0]);
+            log::warn!("on_insert hook {:?} failed: {e}", config.on_insert[0]);
             return;
         }
     };
@@ -73,19 +73,23 @@ pub fn on_insert(config: &HooksConfig, text: &str) {
     }
 }
 
-fn spawn(argv: &[String], stdout: Stdio) -> anyhow::Result<Child> {
-    let child = Command::new(&argv[0])
-        .args(&argv[1..])
+fn command(argv: &[String], stdout: Stdio) -> Command {
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .stdin(Stdio::piped())
         .stdout(stdout)
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    Ok(child)
+        .stderr(Stdio::inherit());
+    cmd
 }
 
 fn run_filter(argv: &[String], text: &str, timeout: Duration) -> anyhow::Result<String> {
     let deadline = Instant::now() + timeout;
-    let mut child = spawn(argv, Stdio::piped())?;
+    // Own process group, so a timeout also kills what a shell filter started.
+    let mut child = command(argv, Stdio::piped()).process_group(0).spawn()?;
+    let group = rustix::process::Pid::from_child(&child);
+    let kill_group = || {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    };
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let input = text.to_owned();
@@ -110,12 +114,13 @@ fn run_filter(argv: &[String], text: &str, timeout: Duration) -> anyhow::Result<
         thread::sleep(Duration::from_millis(5));
     };
     let Some(status) = status else {
-        let _ = child.kill();
+        kill_group();
         let _ = child.wait();
         anyhow::bail!("timed out after {} ms", timeout.as_millis());
     };
     anyhow::ensure!(status.success(), "exited with {status}");
     let Ok(output) = output else {
+        kill_group();
         anyhow::bail!("stdout still open after {} ms", timeout.as_millis());
     };
     let mut out = String::from_utf8(output?)?;
@@ -163,6 +168,28 @@ mod tests {
         let started = Instant::now();
         assert_eq!(filter_with("sleep 5; echo late", Some(100)), "hello world");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn timeout_kills_the_filters_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        assert_eq!(filter_with(&script, Some(300)), "hello world");
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let stat = format!("/proc/{}/stat", pid.trim());
+        // Killed means gone or a zombie (state `Z`) waiting for its reaper.
+        let alive = || {
+            std::fs::read_to_string(&stat).is_ok_and(|s| {
+                s.rsplit_once(") ")
+                    .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() {
+            assert!(Instant::now() < deadline, "the filter's child survived");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
