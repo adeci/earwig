@@ -311,7 +311,7 @@ fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
         (
             "Add this to the binds section of ~/.config/niri/config.kdl:".into(),
             Some(
-                "Mod+Space { press { spawn \"earwig\" \"press\"; } \
+                "Ctrl+Space { press { spawn \"earwig\" \"press\"; } \
                  release { spawn \"earwig\" \"release\"; } }"
                     .into(),
             ),
@@ -320,8 +320,8 @@ fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
         (
             "Add this to your sway config:".into(),
             Some(
-                "bindsym --no-repeat $mod+space exec earwig press\n\
-                 bindsym --release $mod+space exec earwig release"
+                "bindsym --no-repeat Ctrl+space exec earwig press\n\
+                 bindsym --release Ctrl+space exec earwig release"
                     .into(),
             ),
         )
@@ -329,8 +329,8 @@ fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
         (
             "Add this to hyprland.conf:".into(),
             Some(
-                "bind = SUPER, space, exec, earwig press\n\
-                 bindr = SUPER, space, exec, earwig release"
+                "bind = CTRL, space, exec, earwig press\n\
+                 bindr = CTRL, space, exec, earwig release"
                     .into(),
             ),
         )

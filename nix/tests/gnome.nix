@@ -9,9 +9,8 @@
 { self }:
 let
   common = import ./common.nix { inherit self; };
-  # earwig's default GlobalShortcuts trigger, LOGO+ALT+space; QEMU's names
-  # for the same chord.
-  key = "meta_l-alt-spc";
+  # earwig's default GlobalShortcuts trigger, CTRL+space, in QEMU's key names.
+  key = "ctrl-spc";
 in
 {
   name = "earwig-gnome";

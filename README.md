@@ -6,10 +6,6 @@ typing, all at once.
 
 ![The overlay while dictating](docs/overlay.png)
 
-Speech never leaves your machine. The default model, Parakeet Unified 0.6B,
-transcribes while you talk, so on a GPU the text is ready about 0.2 s after you
-let go.
-
 ## Setup
 
 On NixOS:
@@ -25,12 +21,12 @@ with your session.
 
 ## Hotkey
 
-On GNOME and KDE, earwig asks to register Super+Alt+Space when it first starts.
+On GNOME and KDE, earwig asks to register Ctrl+Space when it first starts.
 
 On niri, sway, Hyprland and COSMIC, bind it in your compositor. For niri:
 
 ```kdl
-Mod+Space {
+Ctrl+Space {
     press { spawn "earwig" "press"; }
     release { spawn "earwig" "release"; }
 }
@@ -52,7 +48,3 @@ Settings are in `~/.config/earwig/config.toml`; the keys are in
 [config.rs](crates/earwig-core/src/config.rs). A `[hooks] filter` command can
 rewrite each transcript before it's inserted, for word replacements or an LLM
 cleanup pass. `earwig events` streams what the daemon is doing as JSON lines.
-
-## License
-
-MIT

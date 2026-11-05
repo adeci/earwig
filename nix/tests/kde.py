@@ -90,9 +90,9 @@ def accept_dialog(title: str, shot: str) -> None:
 
 
 def tap() -> None:
-    """Tap the dictation shortcut (earwig's default LOGO+ALT+space, bound
-    through the portal): KWin sees a real Meta+Alt+Space press and release."""
-    machine.send_key("meta_l-alt-spc")
+    """Tap the dictation shortcut (earwig's default Ctrl+Space, bound through
+    the portal): KWin sees a real press and release."""
+    machine.send_key("ctrl-spc")
 
 
 def dictate_by_key(target_cls: str, shot: str) -> str:
