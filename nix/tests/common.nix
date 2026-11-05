@@ -142,7 +142,9 @@
         def shown(_last_try: bool) -> bool:
             nonlocal text
             text = machine.get_screen_text()
-            return any(w in text.lower() for w in ("quick", "brown", "fox"))
+            # Any distinctive word of the clip; OCR over a busy background
+            # often mangles one or two of them.
+            return any(w in text.lower() for w in ("quick", "brown", "fox", "jumps", "lazy"))
 
         # CPU-only decoding in a busy VM host can trail the audio by a minute.
         try:
