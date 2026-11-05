@@ -25,7 +25,9 @@ const ROOT: &str = "/org/a11y/atspi/accessible/root";
 /// Bounds for [`FocusWatch::current`]: a large or unresponsive app must not
 /// hold up the watch.
 const SEARCH_LIMIT: usize = 2000;
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(2);
+// Runs in the background at startup; a busy accessibility bus (KDE right
+// after login or a restart) can take several seconds to answer.
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Focus changes on the accessibility bus.
 pub(super) struct FocusWatch {
