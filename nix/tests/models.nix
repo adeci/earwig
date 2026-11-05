@@ -83,7 +83,6 @@ in
         assert " 206 " in headers.splitlines()[0], headers
         machine.succeed("head -c 4 /tmp/head.bin | grep -q GGUF")
 
-    # The rest needs `earwig models` (Models slice).
     with machine.nested("EARWIG: search marks compatible files"):
         out = earwig("models search asr")
         print(out)

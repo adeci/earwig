@@ -1,7 +1,7 @@
 //! The small on-screen pill shown while dictating.
 
 use std::collections::VecDeque;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use earwig_core::config::{OverlayConfig, OverlayPosition};
 use earwig_core::desktop::DesktopCaps;
@@ -14,6 +14,8 @@ use gpui_kit::{
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
     point, px, size,
 };
+
+use crate::ui::now_ms;
 
 const WIDTH: f32 = 560.;
 /// Gap between the pill and the screen edge it is anchored to.
@@ -373,12 +375,6 @@ fn word_count(text: &str) -> usize {
 fn format_elapsed(elapsed: Duration) -> String {
     let secs = elapsed.as_secs();
     format!("{}:{:02}", secs / 60, secs % 60)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

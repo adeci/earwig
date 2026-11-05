@@ -1,5 +1,3 @@
-import json
-
 BUS = "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 TOKEN = "/home/alice/.local/state/earwig/remote-desktop.token"
 PORTAL_KDE = "org.freedesktop.impl.portal.desktop.kde"
@@ -67,10 +65,6 @@ def dialogs(title: str):
     return [w for w in windows() if w["cls"] == PORTAL_KDE and title in w["caption"]]
 
 
-def status():
-    return json.loads(as_alice("earwig status"))
-
-
 def accept_dialog(title: str, shot: str) -> None:
     """Wait for the portal dialog titled `title`, focus it, screenshot it and
     press Return (PortalDialog accepts on Return); it must close."""
@@ -101,19 +95,13 @@ def tap() -> None:
     machine.send_key("meta_l-alt-spc")
 
 
-latencies = []
-
-
 def dictate_by_key(target_cls: str, shot: str) -> str:
     """Tap to latch, speak the clip, tap again to stop once the overlay shows
     live text. Checks the overlay (a non-focusable layer-shell surface while
     `target_cls` keeps focus) and the insertion; returns the method used."""
-    since = log_lines()
+    events = watch_events()
     tap()
-    wait_log(r"recording \d+ started", timeout=20, since=since)
-    machine.sleep(1)
-    state = status()["state"]
-    assert state["state"] == "recording" and state["latched"], f"a tap must latch: {state}"
+    wait_status(lambda s: s["state"]["state"] == "recording" and s["state"]["latched"], "a latched recording", timeout=20)
     play_clip()
     wait_live_text(shot)
 
@@ -127,11 +115,7 @@ def dictate_by_key(target_cls: str, shot: str) -> str:
     assert focus and focus["cls"] == target_cls, f"the overlay took focus: {focus}"
 
     tap()
-    final = wait_log(r"final text \d+ ms after release", timeout=120, since=since)
-    inserted = wait_log(r"inserted \d+ characters via", timeout=60, since=since)
-    done = wait_log(r"done \d+ ms after release", timeout=30, since=since)
-    latencies.append((target_cls, final, done))
-    return inserted.rsplit(" ", 1)[-1]
+    return wait_insertion(events)["method"]
 
 
 start_all()
@@ -146,20 +130,9 @@ with subtest("Plasma session"):
 
 check_virtual_mic()
 
-with subtest("EARWIG: the probe finds KWin's protocols and KDE's portals"):
-    user_unit_active("earwig.service")
-    caps = wait_log(r"desktop capabilities: DesktopCaps", timeout=60)
-    print(caps)
-    expected = {
-        "layer_shell": "true",
-        "input_method": "false",
-        "virtual_keyboard": "false",
-        "data_control": "true",
-        "portal_global_shortcuts": "true",
-        "portal_remote_desktop": "true",
-    }
-    for cap, value in expected.items():
-        assert f"{cap}: {value}" in caps, f"expected {cap}: {value}"
+# The daemon starts serving its socket only once the RemoteDesktop dialog is
+# answered, so `earwig status` would block until then.
+user_unit_active("earwig.service")
 
 with subtest("EARWIG: RemoteDesktop asks once; accepted, a restore token is saved"):
     accept_dialog("Remote Control Requested", "01-remote-desktop-dialog")
@@ -167,6 +140,7 @@ with subtest("EARWIG: RemoteDesktop asks once; accepted, a restore token is save
 
 with subtest("EARWIG: GlobalShortcuts asks to bind the default shortcut; accepted"):
     accept_dialog("Global Shortcuts Requested", "02-global-shortcuts-dialog")
+    # Only the daemon knows when the portal finished binding.
     print(wait_log(r"portal shortcut dictate: .*Space", timeout=30))
 
 with subtest("EARWIG: status shows the portal paths"):
@@ -182,7 +156,7 @@ with subtest("EARWIG: dictation lands in a focused KWrite document"):
     wait_active("org.kde.kwrite")
     machine.sleep(2)
     method = dictate_by_key("org.kde.kwrite", "03-kwrite-recording")
-    assert method == "PortalPaste", method
+    assert method == "portal-paste", method
     machine.sleep(1)
     machine.screenshot("04-kwrite-inserted")
     machine.send_key("ctrl-s")
@@ -190,32 +164,32 @@ with subtest("EARWIG: dictation lands in a focused KWrite document"):
     print(machine.succeed("cat /tmp/kwrite.txt"))
 
 with subtest("EARWIG: dictation lands in Konsole through the terminal chord"):
-    since = log_lines()
     spawn("/run/current-system/sw/bin/konsole -e sh -c 'stty -icanon; exec cat >> /tmp/konsole.txt'")
     wait_active("org.kde.konsole")
     machine.sleep(2)
     method = dictate_by_key("org.kde.konsole", "05-konsole-recording")
-    assert method == "PortalPaste", method
+    assert method == "portal-paste", method
     machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/konsole.txt", timeout=td(seconds=30))
     machine.screenshot("06-konsole-inserted")
-    print(machine.succeed("cat -v /tmp/konsole.txt"))
-    # Ctrl+Shift+V: Konsole was recognized as a terminal over AT-SPI.
-    wait_log(r"role Ok\(Terminal\)", timeout=5, since=since)
+    # Konsole was recognized as a terminal over AT-SPI: Ctrl+Shift+V, not a literal ^V.
+    received = machine.succeed("cat -v /tmp/konsole.txt")
+    print(received)
+    assert "^V" not in received, received
 
 with subtest("EARWIG: after a restart the restore token skips the dialog"):
     since = log_lines()
     user("systemctl --user restart earwig.service")
     user_unit_active("earwig.service")
-    print(wait_log(r"insertion methods: \[PortalPaste\]", timeout=60, since=since))
+    st = wait_status(lambda s: s["insert_methods"], "insertion methods")
+    assert st["insert_methods"] == ["portal-paste"], st
     print(wait_log(r"portal shortcut dictate: .*Space", timeout=60, since=since))
     machine.sleep(10)
     assert not dialogs("Requested"), f"a consent dialog after restart: {windows()}"
     machine.screenshot("07-after-restart")
     wait_active("org.kde.konsole")
     method = dictate_by_key("org.kde.konsole", "08-konsole-after-restart")
-    assert method == "PortalPaste", method
+    assert method == "portal-paste", method
     machine.wait_until_succeeds("test $(grep -oi 'brown fox' /tmp/konsole.txt | wc -l) -ge 2", timeout=td(seconds=30))
     machine.screenshot("09-konsole-after-restart")
 
-for target, final, done in latencies:
-    print(f"LATENCY {target}: {final.split('] ', 1)[-1]} | {done.split('] ', 1)[-1]}")
+print_latency()

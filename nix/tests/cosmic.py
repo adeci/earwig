@@ -1,5 +1,3 @@
-import json
-
 SHORTCUTS = "/home/alice/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom"
 
 
@@ -21,16 +19,16 @@ def toggle_by_key() -> None:
     machine.send_key("meta_l-spc")
 
 
-def dictate_toggle(shot: str, toggle) -> tuple[str, int]:
+def dictate_toggle(shot: str, toggle) -> tuple[str, dict]:
     """Toggle on, speak the clip, toggle off once the overlay shows live
-    text; returns that text and the log position before it."""
-    since = log_lines()
+    text; returns that text and the `inserted` event."""
+    events = watch_events()
     toggle()
-    wait_log(r"recording \d+ started", timeout=30, since=since)
+    wait_status(lambda s: s["state"]["state"] == "recording", "recording", timeout=30)
     play_clip()
     text = wait_live_text(shot)
     toggle()
-    return text, since
+    return text, wait_insertion(events)
 
 
 start_all()
@@ -57,14 +55,10 @@ with subtest("earwig probes COSMIC's capabilities"):
         user_unit_active("earwig.service")
     finally:
         print(earwig_log())
-    caps = wait_log(r"desktop: DesktopCaps", timeout=60)
-    print(caps)
-    for cap in ("layer_shell", "input_method", "virtual_keyboard", "data_control"):
-        assert f"{cap}: true" in caps, f"{cap} missing: {caps}"
-    print(wait_log(r"insertion methods", timeout=30))
-    status = json.loads(as_alice("earwig status"))
-    print(f"status: {status}")
-    assert status["insert_methods"][:2] == ["input-method", "paste"], status
+    st = wait_status(lambda s: s["insert_methods"], "insertion methods")
+    print(f"status: {st}")
+    # input-method needs input-method-v2 + virtual keyboard, paste needs data-control.
+    assert st["insert_methods"][:2] == ["input-method", "paste"], st
 
 with subtest("A COSMIC custom shortcut runs `earwig toggle`"):
     # What Settings → Keyboard → Custom Shortcuts writes; cosmic-comp reloads
@@ -94,12 +88,8 @@ with subtest("COSMIC Text Editor has focus"):
         print(journal_tail())
 
 with subtest("Dictate into the editor with the shortcut"):
-    overlay_text, since = dictate_toggle("03-cosmic-edit-recording", toggle_by_key)
-    print(wait_log(r"final text \d+ ms after release", timeout=120, since=since))
-    inserted = wait_log(r"inserted \d+ characters", timeout=60, since=since)
-    print(inserted)
-    assert inserted.endswith("via InputMethod"), inserted
-    print(wait_log(r"done \d+ ms after release", timeout=30, since=since))
+    overlay_text, inserted = dictate_toggle("03-cosmic-edit-recording", toggle_by_key)
+    assert inserted["method"] == "input-method", inserted
     machine.sleep(1)
     machine.send_key("ctrl-s")
     machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/edit.txt", timeout=td(seconds=30))
@@ -112,13 +102,10 @@ with subtest("Dictate into a terminal with `earwig toggle`"):
     machine.succeed("pkill -f 'cosmic-edit /tmp/edit.txt'")
     start_target_terminal()
     check_typing_reaches_target()
-    _, since = dictate_toggle("05-terminal-recording", lambda: as_alice("earwig toggle"))
-    print(wait_log(r"final text \d+ ms after release", timeout=120, since=since))
-    inserted = wait_log(r"inserted \d+ characters", timeout=60, since=since)
-    print(inserted)
-    assert inserted.endswith("via InputMethod"), inserted
+    _, inserted = dictate_toggle("05-terminal-recording", lambda: as_alice("earwig toggle"))
+    assert inserted["method"] == "input-method", inserted
     machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(seconds=30))
     machine.screenshot("06-terminal-inserted")
     print(machine.succeed("cat /tmp/out"))
 
-print(earwig_log())
+print_latency()
