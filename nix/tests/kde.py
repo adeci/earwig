@@ -130,9 +130,9 @@ with subtest("Plasma session"):
 
 check_virtual_mic()
 
-with subtest("EARWIG: daemon answers"):
-    user_unit_active("earwig.service")
-    print(wait_status(lambda s: True, "earwig status"))
+# The daemon starts serving its socket only once the RemoteDesktop dialog is
+# answered, so `earwig status` would block until then.
+user_unit_active("earwig.service")
 
 with subtest("EARWIG: RemoteDesktop asks once; accepted, a restore token is saved"):
     accept_dialog("Remote Control Requested", "01-remote-desktop-dialog")
