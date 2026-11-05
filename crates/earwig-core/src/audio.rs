@@ -27,9 +27,6 @@ const REOPEN_DELAY: Duration = Duration::from_secs(2);
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a clip recording delivers audio, like a capture buffer.
 const CLIP_TICK: Duration = Duration::from_millis(10);
-/// Capture buffer to ask the device for: small, so the overlay reacts to
-/// the voice at once. Devices that cannot do it keep their default.
-const CAPTURE_BUFFER: Duration = Duration::from_millis(10);
 
 /// Names of the input devices, for `[audio] device`. These are cpal device
 /// ids (ALSA PCM names such as `default` or `pipewire`), stable across runs.
@@ -468,24 +465,23 @@ fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
     let supported = device.default_input_config()?;
     let channels = usize::from(supported.channels());
     let rate = supported.sample_rate();
-    let format = supported.sample_format();
+    let config = supported.config();
     let (tx, rx) = flume::unbounded();
-    let small = small_buffer(*supported.buffer_size(), rate).and_then(|frames| {
-        let config = cpal::StreamConfig {
-            buffer_size: cpal::BufferSize::Fixed(frames),
-            ..supported.config()
-        };
-        build_any(&device, format, config, channels, tx.clone())
-            .inspect_err(|e| {
-                log::debug!("{name}: no {frames}-frame buffer, using its default: {e:#}")
-            })
-            .ok()
-    });
-    let stream = match small {
-        Some(stream) => stream,
-        None => build_any(&device, format, supported.config(), channels, tx)
-            .with_context(|| format!("opening {name}"))?,
-    };
+    // The device's own period, never a fixed one: cpal rings only two
+    // periods, and when PipeWire's graph runs another quantum (512 frames
+    // against 480 asked for) the difference is lost every cycle, chopping
+    // the voice the engine hears.
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, tx),
+        cpal::SampleFormat::F64 => build::<f64>(&device, config, channels, tx),
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, tx),
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, channels, tx),
+        cpal::SampleFormat::I8 => build::<i8>(&device, config, channels, tx),
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, tx),
+        cpal::SampleFormat::U8 => build::<u8>(&device, config, channels, tx),
+        other => anyhow::bail!("{name}: unsupported sample format {other}"),
+    }
+    .with_context(|| format!("opening {name}"))?;
     stream.play().with_context(|| format!("starting {name}"))?;
     let buffer = stream.buffer_size().map_or_else(
         |_| "unknown".to_owned(),
@@ -505,35 +501,6 @@ fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
         last_data: Instant::now(),
         name,
     })
-}
-
-/// The capture buffer to ask for at `rate`: `CAPTURE_BUFFER`, or the
-/// nearest the device supports.
-fn small_buffer(supported: cpal::SupportedBufferSize, rate: u32) -> Option<cpal::FrameCount> {
-    let frames = u32::try_from(u128::from(rate) * CAPTURE_BUFFER.as_millis() / 1000).ok()?;
-    Some(match supported {
-        cpal::SupportedBufferSize::Range { min, max } => frames.clamp(min, max.max(min)),
-        cpal::SupportedBufferSize::Unknown => frames,
-    })
-}
-
-fn build_any(
-    device: &cpal::Device,
-    format: cpal::SampleFormat,
-    config: cpal::StreamConfig,
-    channels: usize,
-    tx: flume::Sender<Raw>,
-) -> anyhow::Result<cpal::Stream> {
-    Ok(match format {
-        cpal::SampleFormat::F32 => build::<f32>(device, config, channels, tx),
-        cpal::SampleFormat::F64 => build::<f64>(device, config, channels, tx),
-        cpal::SampleFormat::I16 => build::<i16>(device, config, channels, tx),
-        cpal::SampleFormat::I32 => build::<i32>(device, config, channels, tx),
-        cpal::SampleFormat::I8 => build::<i8>(device, config, channels, tx),
-        cpal::SampleFormat::U16 => build::<u16>(device, config, channels, tx),
-        cpal::SampleFormat::U8 => build::<u8>(device, config, channels, tx),
-        other => anyhow::bail!("unsupported sample format {other}"),
-    }?)
 }
 
 fn build<T>(
@@ -726,26 +693,5 @@ mod tests {
         assert_eq!(feed.latest(), Spectrum::default(), "cleared once stopped");
         // Nothing arrives between recordings.
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-    }
-
-    #[test]
-    fn capture_asks_for_a_small_buffer_within_the_device_range() {
-        use cpal::SupportedBufferSize::{Range, Unknown};
-        assert_eq!(
-            small_buffer(Range { min: 64, max: 8192 }, 48_000),
-            Some(480)
-        );
-        assert_eq!(
-            small_buffer(
-                Range {
-                    min: 1024,
-                    max: 8192
-                },
-                48_000
-            ),
-            Some(1024)
-        );
-        assert_eq!(small_buffer(Range { min: 16, max: 256 }, 44_100), Some(256));
-        assert_eq!(small_buffer(Unknown, 16_000), Some(160));
     }
 }
