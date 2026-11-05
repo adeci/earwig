@@ -352,13 +352,16 @@ mod tests {
 
     #[test]
     fn preview_moves_while_the_slider_moves_then_settles() {
-        for style in [OverlayStyle::Wave, OverlayStyle::Bars] {
-            let settles_within = 0.1..=0.4;
+        let styles = [
+            (OverlayStyle::Wave, 0.4..=1.8),
+            (OverlayStyle::Bars, 0.1..=0.4),
+        ];
+        for (style, settles_within) in styles {
             let start = Instant::now();
             let mut demo = Demo::new(style, 1.);
             assert!(demo.frame(start).is_none(), "idle preview is still");
 
-            let frames = run(&mut demo, start, 150, 60, 1.5);
+            let frames = run(&mut demo, start, 200, 60, 1.5);
             let reach = frames[..60]
                 .iter()
                 .map(|f| f.map_or(0., |s| s.reach()))

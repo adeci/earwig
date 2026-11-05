@@ -13,6 +13,7 @@ mod overlay;
 mod pill;
 mod settings;
 mod tray;
+mod water;
 mod x11_popup;
 
 use std::sync::PoisonError;

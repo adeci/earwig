@@ -133,8 +133,8 @@ pub enum OverlayPosition {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayStyle {
-    /// The pill's edge rises and falls with the speech bands, mirrored from
-    /// the centre like the bars.
+    /// The pill's outline behaves like water the voice disturbs: speech
+    /// sends ripples around it that ring on and settle after it.
     #[default]
     Wave,
     /// Sound bars above and below a still pill, one pair per speech band.
