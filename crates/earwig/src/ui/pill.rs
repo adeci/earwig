@@ -11,39 +11,35 @@ use gpui_kit::{
 /// Corner radius of the pill at rest.
 const RADIUS: f32 = 24.;
 /// Transparent room the pill needs around it: its shadow fades out (below a
-/// visible step, 2.5 blur radii) before the surface ends, even swollen.
-pub const ROOM: f32 = SHADOW_DROP + 2.5 * SHADOW_BLUR + SWELL;
+/// visible step, 2.5 blur radii) before the surface ends, even at full reach.
+pub const ROOM: f32 = SHADOW_DROP + 2.5 * SHADOW_BLUR + MAX_REACH;
 
 /// Furthest the edge moves out from rest: swell plus a full ripple.
-const MAX_REACH: f32 = SWELL + RIPPLE + IDLE_RIPPLE;
+const MAX_REACH: f32 = SWELL + RIPPLE;
 /// The ambient shadow's offset below the pill and its blur (one standard
 /// deviation of the Gaussian GPUI draws).
 const SHADOW_DROP: f32 = 10.;
 const SHADOW_BLUR: f32 = 12.;
+const BORDER: f32 = 1.5;
 
 /// How far the whole pill grows at full voice.
-const SWELL: f32 = 2.;
+const SWELL: f32 = 3.;
 /// Amplitude of the travelling ripple at full voice.
-const RIPPLE: f32 = 2.6;
-/// The ripple that remains in silence.
-const IDLE_RIPPLE: f32 = 0.3;
-/// The slow in-and-out of a silent pill.
-const BREATH: f32 = 0.7;
-const BREATH_PERIOD: f32 = 4.2;
+const RIPPLE: f32 = 4.2;
 
 /// Seconds the voice energy takes to rise toward a louder level...
-const ATTACK: f32 = 0.06;
+const ATTACK: f32 = 0.05;
 /// ...and to fall back, so the edge flows between syllables.
-const RELEASE: f32 = 0.45;
-/// Seconds colours take to settle on a new phase's.
+const RELEASE: f32 = 0.3;
+/// Seconds colours take to settle (theme or accent changes).
 const FADE: f32 = 0.18;
 /// A stalled frame resumes calmly instead of jumping.
 const MAX_STEP: f32 = 0.05;
 
 /// Mic levels are dB mapped onto 0..1 over -60..0 dBFS; room noise sits
 /// below `VOICE_FLOOR` and ordinary speech reaches the top of the span.
-const VOICE_FLOOR: f32 = 0.3;
-const VOICE_SPAN: f32 = 0.42;
+const VOICE_FLOOR: f32 = 0.35;
+const VOICE_SPAN: f32 = 0.4;
 
 /// Distance between outline samples; fine enough that corners stay round.
 const SAMPLE_SPACING: f32 = 4.;
@@ -59,19 +55,19 @@ struct Wave {
 
 const WAVES: [Wave; 3] = [
     Wave {
-        cycles: 2.,
-        weight: 0.35,
-        speed: 1.4,
-    },
-    Wave {
         cycles: 3.,
-        weight: 0.4,
-        speed: -2.1,
+        weight: 0.3,
+        speed: 2.,
     },
     Wave {
-        cycles: 5.,
-        weight: 0.25,
-        speed: 3.,
+        cycles: 7.,
+        weight: 0.4,
+        speed: -3.4,
+    },
+    Wave {
+        cycles: 12.,
+        weight: 0.3,
+        speed: 5.,
     },
 ];
 
@@ -93,7 +89,6 @@ impl Clock {
 #[derive(Default)]
 pub struct Motion {
     energy: f32,
-    breath: f32,
     phases: [f32; WAVES.len()],
 }
 
@@ -108,17 +103,14 @@ impl Motion {
             RELEASE
         };
         self.energy += (target - self.energy) * approach(dt, response);
-        self.breath = (self.breath + dt * TAU / BREATH_PERIOD) % TAU;
-        // Quiet waves drift; speech carries them along faster.
-        let pace = 0.25 + self.energy;
         for (phase, wave) in self.phases.iter_mut().zip(&WAVES) {
-            *phase = (*phase + wave.speed * pace * dt).rem_euclid(TAU);
+            *phase = (*phase + wave.speed * self.energy * dt).rem_euclid(TAU);
         }
 
         Edge {
             energy: self.energy,
-            swell: SWELL * self.energy + BREATH * (1. - self.energy) * self.breath.sin(),
-            ripple: RIPPLE * self.energy + IDLE_RIPPLE,
+            swell: SWELL * self.energy,
+            ripple: RIPPLE * self.energy,
             phases: self.phases,
         }
     }
@@ -192,7 +184,7 @@ pub fn paint(bounds: Bounds<Pixels>, edge: Edge, look: Look, window: &mut Window
     if let Ok(path) = body.build() {
         window.paint_path(path, look.fill);
     }
-    let mut line = PathBuilder::stroke(px(1.));
+    let mut line = PathBuilder::stroke(px(BORDER));
     line.add_polygon(&outline, true);
     if let Ok(path) = line.build() {
         window.paint_path(path, look.border);
@@ -324,15 +316,14 @@ mod tests {
     }
 
     #[test]
-    fn silence_breathes_and_speech_swells() {
+    fn silence_is_still_and_speech_moves_the_edge() {
         let frame = 1. / 60.;
         let mut motion = Motion::default();
         let mut quiet = Edge::default();
         for _ in 0..120 {
-            quiet = motion.step(frame, Some(0.1));
+            quiet = motion.step(frame, Some(0.2));
         }
-        assert!(quiet.energy < 1e-3);
-        assert!(quiet.swell.abs() <= BREATH);
+        assert!((0..100u8).all(|i| quiet.offset(f32::from(i) / 100.).abs() < 1e-3));
 
         let mut loud = quiet;
         for _ in 0..30 {
@@ -345,12 +336,12 @@ mod tests {
         assert!(reach > SWELL && reach <= MAX_REACH);
 
         let mut settling = loud;
-        for _ in 0..10 {
+        for _ in 0..6 {
             settling = motion.step(frame, None);
         }
         assert!(
             settling.energy > 0.5 && settling.energy < loud.energy,
-            "release is slow: {}",
+            "release is gradual: {}",
             settling.energy
         );
     }

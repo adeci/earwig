@@ -24,8 +24,8 @@ use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode, 
 
 use overlay::{Outcome, OverlayView};
 
-/// How long the success flash stays up after the text was inserted.
-const SUCCESS_FLASH: Duration = Duration::from_millis(600);
+/// How long the final text stays up after it was inserted.
+const SUCCESS_FLASH: Duration = Duration::from_millis(350);
 /// The failure flash carries a sentence to read, so it stays a little longer.
 const FAILURE_FLASH: Duration = Duration::from_millis(1800);
 
@@ -223,17 +223,14 @@ fn set_state(state: DictationState, cx: &mut App) {
         tray.set_state(state);
     }
     match state {
-        DictationState::Recording {
-            latched,
-            started_at_ms,
-        } => {
+        DictationState::Recording { started_at_ms, .. } => {
             // A new recording supersedes any pending close; the window of a
             // previous flash is reused.
             cx.global_mut::<UiState>().close_generation += 1;
             if cx.global::<UiState>().overlay.is_none() {
                 open_overlay(cx);
             }
-            update_overlay(cx, |o| o.recording(latched, started_at_ms));
+            update_overlay(cx, |o| o.recording(started_at_ms));
         }
         DictationState::Finalizing => update_overlay(cx, OverlayView::finalizing),
         DictationState::Idle => {

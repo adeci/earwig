@@ -10,9 +10,9 @@ use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOpti
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Bounds, Context, Div, FontFeatures, FontWeight, HighlightStyle, Hsla, IntoElement,
-    ParentElement as _, Pixels, PlatformDisplay, Point, Render, SharedString, Size, Styled as _,
-    StyledText, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowKind, WindowOptions, canvas, div, point, px, size,
+    ParentElement as _, Pixels, PlatformDisplay, Point, Render, Size, Styled as _, StyledText,
+    Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions, canvas, div, point, px, size,
 };
 
 use crate::ui::accent;
@@ -132,9 +132,7 @@ pub enum Outcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
-    Recording {
-        latched: bool,
-    },
+    Recording,
     /// Recording stopped at `stopped_at_ms`; final text on its way.
     Finalizing,
     Done(Outcome),
@@ -172,7 +170,7 @@ impl OverlayView {
         Self {
             max_lines: max_lines.max(1),
             position,
-            phase: Phase::Recording { latched: false },
+            phase: Phase::Recording,
             started_at_ms: now_ms(),
             stopped_at_ms: None,
             committed: String::new(),
@@ -187,9 +185,9 @@ impl OverlayView {
         }
     }
 
-    /// Recording (re)started or its latch changed. A different start time is a
-    /// new recording and clears the previous one's text.
-    pub fn recording(&mut self, latched: bool, started_at_ms: u64) {
+    /// Recording (re)started. A different start time is a new recording and
+    /// clears the previous one's text.
+    pub fn recording(&mut self, started_at_ms: u64) {
         if started_at_ms != self.started_at_ms || !self.is_recording() {
             self.committed.clear();
             self.tentative.clear();
@@ -197,7 +195,7 @@ impl OverlayView {
             self.stopped_at_ms = None;
             self.started_at_ms = started_at_ms;
         }
-        self.phase = Phase::Recording { latched };
+        self.phase = Phase::Recording;
     }
 
     pub fn finalizing(&mut self) {
@@ -220,7 +218,7 @@ impl OverlayView {
     }
 
     pub fn is_recording(&self) -> bool {
-        matches!(self.phase, Phase::Recording { .. })
+        matches!(self.phase, Phase::Recording)
     }
 
     pub fn has_outcome(&self) -> bool {
@@ -232,39 +230,29 @@ impl OverlayView {
         Duration::from_millis(end.saturating_sub(self.started_at_ms))
     }
 
-    /// Accent hairline while listening (brighter with the voice), a neutral
-    /// one once listening stops, and a quiet tint of the outcome at the end.
-    fn target_look(&self, theme: &Theme, accent: Hsla, energy: f32) -> Look {
+    /// The accent hairline stays put; the outcome shows in the text, not as a
+    /// colour flash.
+    fn target_look(theme: &Theme, accent: Hsla) -> Look {
         let dark = theme.is_dark();
-        // Dark surfaces read as raised when slightly lighter than the page.
-        let fill = if dark {
-            theme.background.blend(theme.foreground.opacity(0.05))
+        let fill: Hsla = if dark {
+            // Tokyo Night's background: a blue-black charcoal.
+            gpui_kit::rgb(0x001a_1b26).into()
         } else {
             theme.background
         };
-        let (fill, border) = match self.phase {
-            Phase::Recording { .. } => (fill, accent.opacity(0.55 + 0.45 * energy)),
-            Phase::Finalizing => (fill, theme.border),
-            Phase::Done(Outcome::Inserted) => (pill::mix(fill, theme.success, 0.08), theme.success),
-            Phase::Done(Outcome::Failed { .. }) => {
-                (pill::mix(fill, theme.danger, 0.08), theme.danger)
-            }
-        };
         Look {
             fill: fill.opacity(0.97),
-            border,
+            border: accent.opacity(0.9),
             dark,
         }
     }
 
     fn header(&self, theme: &Theme) -> Div {
-        let (dot, status): (Hsla, Option<SharedString>) = match self.phase {
-            Phase::Recording { .. } => (theme.danger, None),
-            Phase::Finalizing => (theme.warning, Some("Finishing…".into())),
-            Phase::Done(Outcome::Inserted) => (theme.success, Some("Inserted".into())),
-            Phase::Done(Outcome::Failed { .. }) => (theme.danger, Some("Not inserted".into())),
+        let status = match self.phase {
+            Phase::Done(Outcome::Failed { .. }) => Some("Not inserted"),
+            _ => None,
         };
-        let latched = matches!(self.phase, Phase::Recording { latched: true });
+        let dot = theme.danger;
         let words = word_count(&self.committed) + word_count(&self.tentative);
         div()
             .flex()
@@ -285,17 +273,6 @@ impl OverlayView {
                 "{words} {}",
                 if words == 1 { "word" } else { "words" }
             ))
-            .when(latched, |this| {
-                this.child(
-                    div()
-                        .px(px(6.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(px(11.))
-                        .child("latched"),
-                )
-            })
             .when_some(status, |this, status| {
                 this.child(div().text_color(dot).child(status))
             })
@@ -364,7 +341,7 @@ impl Render for OverlayView {
         self.schedule_frame(frame, cx);
         let accent = accent::get(cx);
         let theme = cx.theme();
-        let target = self.target_look(theme, accent.unwrap_or(theme.primary), edge.energy);
+        let target = Self::target_look(theme, accent.unwrap_or(theme.primary));
         let look = self.look.map_or(target, |look| look.fade_to(target, dt));
         self.look = Some(look);
         let header = self.header(theme);
