@@ -181,7 +181,6 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
         InsertMethod::InputMethod => "input method",
         InsertMethod::Paste => "paste",
         InsertMethod::PortalPaste => "portal paste",
-        InsertMethod::PortalType => "portal typing",
     }
 }
 

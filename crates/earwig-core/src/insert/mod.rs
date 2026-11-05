@@ -7,8 +7,8 @@
 //! - `paste`: clipboard via data-control plus one paste chord through
 //!   `zwp_virtual_keyboard_v1`; Ctrl+Shift+V when the focused toplevel is a
 //!   terminal. Covers clients without text-input (Electron, XWayland).
-//! - `portal`: RemoteDesktop portal (GNOME, KDE): clipboard portal + paste
-//!   chord, or a keystroke burst, over libei.
+//! - `portal`: RemoteDesktop portal (GNOME, KDE): clipboard portal plus one
+//!   paste chord over libei.
 //!
 //! [`Inserter::insert`] returns [`InsertError::NotApplicable`] when a backend
 //! cannot handle the current focus, so the chain moves on; any other error is
@@ -22,6 +22,15 @@ use crate::events::InsertMethod;
 use input_method::InputMethodInserter;
 use paste::PasteInserter;
 use portal::PortalInserter;
+
+/// Text targets offered on the clipboard, most specific first.
+const MIME_TYPES: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "UTF8_STRING",
+    "TEXT",
+    "STRING",
+];
 
 pub trait Inserter: Send {
     /// Methods this inserter may use, best first (for [`crate::events::Status`]).
@@ -51,14 +60,9 @@ pub mod portal;
 mod wayland;
 
 /// The inserter for this session: the configured method, or for `auto` every
-/// usable backend best first.
-///
-/// `auto` chains the input method (when offered), clipboard plus paste chord
-/// (data-control and a virtual keyboard), and the RemoteDesktop portal only
-/// where that Wayland paste path is missing (GNOME, KDE), since the portal
-/// asks for consent. A backend that fails to connect is logged and left out;
-/// with none left, `methods()` is empty and every insert reports why. A
-/// configured method that cannot connect is an error.
+/// usable backend best first. `auto` uses the portal only where the Wayland
+/// paste path is missing, since it asks for consent, and leaves out backends
+/// that fail to connect; a configured method that cannot connect is an error.
 pub fn auto(config: &InsertConfig, caps: &DesktopCaps) -> anyhow::Result<Box<dyn Inserter>> {
     let backends: Vec<Box<dyn Inserter>> = match config.method {
         InsertSetting::Auto => auto_backends(config, caps),

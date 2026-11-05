@@ -90,8 +90,6 @@ pub enum InsertMethod {
     Paste,
     /// Clipboard set through the RemoteDesktop portal, paste chord over libei.
     PortalPaste,
-    /// Keystrokes over libei (RemoteDesktop portal).
-    PortalType,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

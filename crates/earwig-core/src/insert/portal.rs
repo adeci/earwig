@@ -1,32 +1,16 @@
 //! Insertion through the XDG RemoteDesktop (version 2) and Clipboard portals
-//! and libei: any desktop whose portal backend implements them (GNOME, KDE).
-//! No desktop names are checked; every portal step before a dialog is time
-//! bounded, so a backend that is advertised but cannot work on this
-//! compositor fails fast instead of blocking.
+//! and libei (GNOME, KDE): the text is set as the clipboard through the
+//! portal, then one paste chord goes out over libei.
 //!
-//! One RemoteDesktop session with a keyboard and clipboard access is opened
-//! when the daemon starts. The user approves it once; the restore token in
-//! `<state_dir>/remote-desktop.token` brings it back without a dialog. Keys
-//! go over libei (`ConnectToEIS`) rather than the portal's per-key D-Bus
-//! calls, so a whole transcript leaves in one socket write.
+//! One session is opened at daemon start; the user approves it once and the
+//! restore token in `<state_dir>/remote-desktop.token` brings it back without
+//! a dialog. Every portal step before the dialog is time bounded, so a backend
+//! that is advertised but cannot work fails fast instead of blocking.
 //!
-//! The portal and libei are async. They live on a dedicated thread with its
-//! own executor, which also answers clipboard transfers and EIS pings between
-//! dictations; [`PortalInserter`] talks to it over a channel and waits for
-//! each answer with a timeout.
-//!
-//! Methods, in default order:
-//! - [`InsertMethod::PortalPaste`]: clipboard set through the portal, then one
-//!   paste chord. Atomic and covers every character; the text stays on the
-//!   clipboard. The portal exposes no focused app id, so terminals are
-//!   recognized over the accessibility bus ([`focus`]) and get Ctrl+Shift+V.
-//! - [`InsertMethod::PortalType`]: every character as a key press, all in one
-//!   burst. Used when clipboard access was not granted. Apps redraw per key,
-//!   so long text visibly types out. Not applicable when a character is
-//!   missing from the keyboard layout or Caps Lock is on.
+//! The portal and libei live on a dedicated thread with its own executor,
+//! which also answers clipboard transfers and EIS pings between dictations.
 
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -48,7 +32,7 @@ use reis::event::{DeviceCapability, EiEvent};
 use xkbcommon::xkb;
 
 use self::focus::FocusWatch;
-use super::{InsertError, Inserter};
+use super::{InsertError, Inserter, MIME_TYPES};
 use crate::events::InsertMethod;
 
 mod focus;
@@ -58,12 +42,6 @@ mod focus;
 pub const APP_ID: &str = "io.github.adeci.earwig";
 
 const TOKEN_FILE: &str = "remote-desktop.token";
-
-/// Paste first. Measured in GNOME 50 (VM, GTK 4 text view, 500 characters):
-/// paste complete in the app after ~45 ms, typing after ~2.5 s, with every
-/// character drawn on its own; a burst into a ~2000 character paragraph made
-/// the GTK client drop its Wayland connection.
-const DEFAULT_ORDER: [InsertMethod; 2] = [InsertMethod::PortalPaste, InsertMethod::PortalType];
 
 /// How long [`PortalInserter`] waits for the portal thread to finish one job.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -77,21 +55,18 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// `Start` while the consent dialog waits for the user.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Close the session after this long without requests: GNOME shows a
-/// "remote control" indicator while it is open.
+/// Upper bound on [`PortalInserter::connect`]: every setup step in a row.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5 + 300 + 5 + 10);
+
+/// GNOME shows a "remote control" indicator while the session is open.
 const IDLE_CLOSE: Duration = Duration::from_secs(60);
 
 /// Longest wait for the portal to confirm a new clipboard selection before
 /// the paste chord goes out anyway.
 const OWNER_TIMEOUT: Duration = Duration::from_millis(500);
 
-const TEXT_MIME_TYPES: &[&str] = &[
-    "text/plain;charset=utf-8",
-    "text/plain",
-    "UTF8_STRING",
-    "STRING",
-    "TEXT",
-];
+/// evdev `KEY_V`, for layouts without a Latin `v`.
+const KEY_V: u32 = 47;
 
 /// Run a portal step, failing after `limit`.
 pub(crate) async fn bounded<T>(
@@ -107,56 +82,49 @@ pub(crate) async fn bounded<T>(
     .with_context(|| what.to_owned())
 }
 
-/// Tell xdg-desktop-portal which app this process is
-/// (`org.freedesktop.host.portal.Registry.Register`). Since
-/// xdg-desktop-portal 1.21 host apps without an app id are refused by
-/// GlobalShortcuts, and GNOME keys RemoteDesktop restore data by it.
+/// Tell xdg-desktop-portal which app this process is. Since 1.21 host apps
+/// without an app id are refused by GlobalShortcuts, and GNOME keys
+/// RemoteDesktop restore data by it.
 ///
 /// It has to be the first portal call on the process-wide D-Bus connection
-/// and may happen only once, so every portal user calls this first; later
-/// calls return immediately.
+/// and may happen only once, so every portal user calls this first.
 pub(crate) fn register_app_id() {
     static REGISTERED: LazyLock<()> = LazyLock::new(|| {
-        let result = async_io::block_on(async {
+        let result = async_io::block_on(bounded(SETUP_TIMEOUT, "portal registry", async {
             let app_id = ashpd::AppID::try_from(APP_ID)?;
-            ashpd::register_host_app(app_id).await
-        });
+            Ok(ashpd::register_host_app(app_id).await?)
+        }));
         match result {
             Ok(()) => log::debug!("registered with the portal as {APP_ID}"),
             // Portals before 1.20 have no registry and identify host apps by
             // their systemd unit instead.
-            Err(e) => log::warn!("could not register app id {APP_ID} with the portal: {e}"),
+            Err(e) => log::warn!("could not register app id {APP_ID} with the portal: {e:#}"),
         }
     });
     LazyLock::force(&REGISTERED);
 }
 
 /// A RemoteDesktop session with a keyboard over libei, plus clipboard access.
-/// The user approves it once; the restore token in `state_dir` keeps it.
-///
-/// GNOME shows a "remote control" indicator while the session is open, so it
-/// closes after [`IDLE_CLOSE`] without requests and is restored (no dialog,
-/// ~80 ms) by the next one.
+/// It closes after [`IDLE_CLOSE`] without requests and is restored (no
+/// dialog, ~80 ms) by the next one.
 pub struct PortalInserter {
     requests: flume::Sender<Request>,
-    order: Vec<InsertMethod>,
 }
 
 enum Job {
-    Type(String),
     Paste(String),
     Copy(String),
 }
 
 struct Request {
     job: Job,
+    /// Dropped by a caller that timed out; the job is then skipped.
     reply: flume::Sender<Result<(), InsertError>>,
 }
 
 impl PortalInserter {
     /// Open (or restore) the portal session. Called at daemon start so the
-    /// consent dialog never interrupts a dictation. Blocks until the user
-    /// answers the dialog (if one is shown) and libei offers a keyboard.
+    /// consent dialog never interrupts a dictation.
     pub fn connect(state_dir: &Path) -> anyhow::Result<Self> {
         register_app_id();
         let token_file = state_dir.join(TOKEN_FILE);
@@ -166,31 +134,13 @@ impl PortalInserter {
             .name("earwig-portal".into())
             .spawn(move || async_io::block_on(run(&token_file, &ready_tx, &requests_rx)))
             .context("spawning the portal thread")?;
-        let clipboard = ready_rx
-            .recv()
-            .context("the portal thread exited during setup")??;
-        if !clipboard {
-            log::warn!("clipboard access not granted; portal paste is unavailable");
-        }
-        let order = DEFAULT_ORDER
-            .into_iter()
-            .filter(|m| clipboard || *m != InsertMethod::PortalPaste)
-            .collect();
-        Ok(Self { requests, order })
-    }
-
-    /// Insert with exactly `method`, without falling back to the other one.
-    fn insert_with(&mut self, method: InsertMethod, text: &str) -> Result<(), InsertError> {
-        let job = match method {
-            InsertMethod::PortalType => Job::Type(text.to_owned()),
-            InsertMethod::PortalPaste => Job::Paste(text.to_owned()),
-            other => {
-                return Err(InsertError::NotApplicable(format!(
-                    "{other:?} is not a portal method"
-                )));
-            }
-        };
-        self.call(job)
+        async_io::block_on(bounded(CONNECT_TIMEOUT, "portal setup", async {
+            ready_rx
+                .recv_async()
+                .await
+                .context("the portal thread exited during setup")?
+        }))?;
+        Ok(Self { requests })
     }
 
     fn call(&self, job: Job) -> Result<(), InsertError> {
@@ -210,10 +160,25 @@ impl PortalInserter {
     }
 }
 
+impl Inserter for PortalInserter {
+    fn methods(&self) -> Vec<InsertMethod> {
+        vec![InsertMethod::PortalPaste]
+    }
+
+    fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError> {
+        self.call(Job::Paste(text.to_owned()))?;
+        Ok(InsertMethod::PortalPaste)
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError> {
+        self.call(Job::Copy(text.to_owned()))
+    }
+}
+
 /// The portal thread: serve sessions while watching which widget has focus.
 async fn run(
     token_file: &Path,
-    ready: &flume::Sender<anyhow::Result<bool>>,
+    ready: &flume::Sender<anyhow::Result<()>>,
     requests: &flume::Receiver<Request>,
 ) {
     let terminal = Cell::new(false);
@@ -246,7 +211,7 @@ async fn watch_focus(terminal: &Cell<bool>) {
 /// next request.
 async fn sessions(
     token_file: &Path,
-    ready: &flume::Sender<anyhow::Result<bool>>,
+    ready: &flume::Sender<anyhow::Result<()>>,
     requests: &flume::Receiver<Request>,
     terminal: &Cell<bool>,
 ) {
@@ -257,7 +222,7 @@ async fn sessions(
             return;
         }
     };
-    if ready.send(Ok(portal.clipboard.is_some())).is_err() {
+    if ready.send(Ok(())).is_err() {
         return;
     }
     let mut pending = None;
@@ -271,7 +236,6 @@ async fn sessions(
             End::Idle => log::debug!("RemoteDesktop session closed after {IDLE_CLOSE:?} idle"),
             End::Lost(reason) => log::warn!("RemoteDesktop session lost: {reason}"),
         }
-        // Reconnect when the next request comes.
         loop {
             let Ok(request) = requests.recv_async().await else {
                 return;
@@ -290,44 +254,16 @@ async fn sessions(
     }
 }
 
-impl Inserter for PortalInserter {
-    fn methods(&self) -> Vec<InsertMethod> {
-        self.order.clone()
-    }
-
-    fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError> {
-        let mut reasons = Vec::new();
-        for method in self.order.clone() {
-            match self.insert_with(method, text) {
-                Ok(()) => return Ok(method),
-                Err(InsertError::NotApplicable(reason)) => {
-                    log::debug!("{method:?} not applicable: {reason}");
-                    reasons.push(reason);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(InsertError::NotApplicable(reasons.join("; ")))
-    }
-
-    fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError> {
-        self.call(Job::Copy(text.to_owned()))
-    }
-}
-
-/// The portal objects. Kept apart from [`Worker`] because the signal streams
-/// borrow them while the worker changes.
+/// Kept apart from [`Worker`] because the signal streams borrow it while the
+/// worker changes.
 struct Portal {
     session: Session<RemoteDesktop>,
-    /// `Some` when clipboard access was granted.
-    clipboard: Option<Clipboard>,
+    clipboard: Clipboard,
 }
 
-/// What the portal thread owns besides [`Portal`].
 struct Worker {
     ei: reis::event::Connection,
-    /// A second handle on the EIS socket to wait for room when a long burst
-    /// fills the socket buffer.
+    /// A second handle on the EIS socket to wait for room when it is full.
     socket: Async<OwnedFd>,
     keyboard: Option<Keyboard>,
     /// What we offer on the clipboard.
@@ -346,36 +282,17 @@ enum Input {
     Closed(Option<()>),
 }
 
-/// Why [`Worker::serve`] returned.
 enum End {
     Shutdown,
     Idle,
     Lost(String),
 }
 
-/// Ask for clipboard access in the RemoteDesktop session. `None` when the
-/// portal lacks the Clipboard interface; paste is then unavailable.
-async fn request_clipboard(session: &Session<RemoteDesktop>) -> Option<Clipboard> {
-    let clipboard = Clipboard::new()
-        .await
-        .inspect_err(|e| log::warn!("the Clipboard portal is not available: {e}"))
-        .ok()?;
-    clipboard
-        .request(
-            session,
-            ashpd::desktop::clipboard::RequestClipboardOptions::default(),
-        )
-        .await
-        .inspect_err(|e| log::warn!("requesting clipboard access failed: {e}"))
-        .ok()?;
-    Some(clipboard)
-}
-
 /// A RemoteDesktop session with the keyboard selected (restored from `token`
 /// when there is one) and clipboard access requested; not started yet.
 async fn create_session(
     token: Option<&str>,
-) -> anyhow::Result<(RemoteDesktop, Session<RemoteDesktop>, Option<Clipboard>)> {
+) -> anyhow::Result<(RemoteDesktop, Session<RemoteDesktop>, Clipboard)> {
     let remote = RemoteDesktop::new().await?;
     if remote.version() < 2 {
         bail!(
@@ -397,7 +314,16 @@ async fn create_session(
         .await?
         .response()?;
     // Clipboard access has to be requested before `Start`.
-    let clipboard = request_clipboard(&session).await;
+    let clipboard = Clipboard::new()
+        .await
+        .context("the Clipboard portal is not available")?;
+    clipboard
+        .request(
+            &session,
+            ashpd::desktop::clipboard::RequestClipboardOptions::default(),
+        )
+        .await
+        .context("requesting clipboard access")?;
     Ok((remote, session, clipboard))
 }
 
@@ -409,8 +335,6 @@ impl Worker {
             .ok()
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty());
-        // No user interaction before `Start`: a backend that cannot work on
-        // this compositor fails or hangs here, before any dialog.
         let (remote, session, clipboard) = bounded(
             SETUP_TIMEOUT,
             "RemoteDesktop setup",
@@ -439,6 +363,9 @@ impl Worker {
         if !started.devices().contains(DeviceType::Keyboard) {
             bail!("keyboard access was not granted");
         }
+        if !started.is_clipboard_enabled() {
+            bail!("clipboard access was not granted");
+        }
         match started.restore_token() {
             Some(token) => {
                 if let Err(e) = save_token(token_file, token) {
@@ -447,7 +374,6 @@ impl Worker {
             }
             None => log::debug!("the portal returned no restore token"),
         }
-        let clipboard = clipboard.filter(|_| started.is_clipboard_enabled());
 
         let (socket, ei, events) = bounded(SETUP_TIMEOUT, "connecting to EIS", async {
             let fd = remote
@@ -474,36 +400,21 @@ impl Worker {
             dead: None,
         };
         let mut events = events;
-        future::or(
-            async {
-                while !worker.keyboard.as_ref().is_some_and(|k| k.resumed) {
-                    match events.next().await {
-                        Some(Ok(event)) => worker.on_ei(event)?,
-                        Some(Err(e)) => return Err(anyhow!(e).context("libei")),
-                        None => bail!("the EIS connection closed during setup"),
-                    }
-                    if let Some(reason) = &worker.dead {
-                        bail!("{reason}");
-                    }
+        bounded(EIS_SETUP_TIMEOUT, "waiting for the EIS keyboard", async {
+            while !worker.keyboard.as_ref().is_some_and(|k| k.resumed) {
+                match events.next().await {
+                    Some(Ok(event)) => worker.on_ei(event)?,
+                    Some(Err(e)) => return Err(anyhow!(e).context("libei")),
+                    None => bail!("the EIS connection closed during setup"),
                 }
-                Ok(())
-            },
-            async {
-                Timer::after(EIS_SETUP_TIMEOUT).await;
-                Err(anyhow!(
-                    "no keyboard from the EIS server within {EIS_SETUP_TIMEOUT:?}"
-                ))
-            },
-        )
-        .await?;
-        log::info!(
-            "RemoteDesktop portal ready (keyboard over libei, clipboard {})",
-            if clipboard.is_some() {
-                "granted"
-            } else {
-                "not granted"
+                if let Some(reason) = &worker.dead {
+                    bail!("{reason}");
+                }
             }
-        );
+            Ok(())
+        })
+        .await?;
+        log::info!("RemoteDesktop portal ready");
         Ok((Portal { session, clipboard }, worker, events))
     }
 
@@ -517,23 +428,21 @@ impl Worker {
         pending: Option<Request>,
         terminal: &Cell<bool>,
     ) -> End {
-        if let Some(Request { job, reply }) = pending {
-            let _ = reply.send(self.run(portal, job, terminal.get()).await);
+        if let Some(request) = pending {
+            self.handle(portal, request, terminal.get()).await;
         }
         // `None` once a source has ended.
         let mut events = Some(events);
-        let mut transfers: Option<Pin<Box<dyn Stream<Item = u32> + '_>>> = match &portal.clipboard {
-            Some(clipboard) => match clipboard
-                .receive_selection_transfer::<RemoteDesktop>()
-                .await
-            {
-                Ok(stream) => Some(Box::pin(stream.map(|(_session, _mime, serial)| serial))),
-                Err(e) => {
-                    log::warn!("cannot serve clipboard requests: {e}");
-                    None
-                }
-            },
-            None => None,
+        let mut transfers: Option<Pin<Box<dyn Stream<Item = u32> + '_>>> = match portal
+            .clipboard
+            .receive_selection_transfer::<RemoteDesktop>()
+            .await
+        {
+            Ok(stream) => Some(Box::pin(stream.map(|(_session, _mime, serial)| serial))),
+            Err(e) => {
+                log::warn!("cannot serve clipboard requests: {e}");
+                None
+            }
         };
         let mut closed: Option<Pin<Box<dyn Stream<Item = ()> + '_>>> =
             match portal.session.receive_closed().await {
@@ -568,8 +477,8 @@ impl Worker {
             )
             .await;
             match input {
-                Input::Request(Request { job, reply }) => {
-                    let _ = reply.send(self.run(portal, job, terminal.get()).await);
+                Input::Request(request) => {
+                    self.handle(portal, request, terminal.get()).await;
                     idle.set_after(IDLE_CLOSE);
                 }
                 Input::Shutdown => return End::Shutdown,
@@ -597,35 +506,22 @@ impl Worker {
         }
     }
 
-    async fn run(&mut self, portal: &Portal, job: Job, terminal: bool) -> Result<(), InsertError> {
-        match job {
-            Job::Type(text) => {
-                let keyboard = self.keyboard()?;
-                if keyboard.caps_lock {
-                    return Err(InsertError::NotApplicable("Caps Lock is on".into()));
+    async fn handle(&mut self, portal: &Portal, request: Request, terminal: bool) {
+        let Request { job, reply } = request;
+        let result = match job {
+            Job::Copy(text) => self.set_selection(portal, text, &reply).await,
+            Job::Paste(text) => async {
+                let chord = self.keyboard()?.chord.events(terminal);
+                self.set_selection(portal, text, &reply).await?;
+                if reply.is_disconnected() {
+                    return Ok(());
                 }
-                let strokes = text
-                    .chars()
-                    .map(|c| keyboard.map.stroke(c))
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| {
-                        InsertError::NotApplicable(
-                            "the text has characters the keyboard layout cannot type".into(),
-                        )
-                    })?;
-                self.send_keys(&strokes).await?;
+                self.send_keys(&chord).await?;
                 Ok(())
             }
-            Job::Paste(text) => {
-                let chord = self.keyboard()?.map.paste(terminal).ok_or_else(|| {
-                    InsertError::NotApplicable("the keyboard layout has no Control key".into())
-                })?;
-                self.set_selection(portal, text).await?;
-                self.send_keys(&[chord]).await?;
-                Ok(())
-            }
-            Job::Copy(text) => self.set_selection(portal, text).await,
-        }
+            .await,
+        };
+        let _ = reply.send(result);
     }
 
     fn keyboard(&self) -> Result<&Keyboard, InsertError> {
@@ -640,28 +536,22 @@ impl Worker {
         }
     }
 
-    /// Send all strokes in one burst: one frame per key event (a logical
-    /// hardware event each), one write.
-    async fn send_keys(&mut self, strokes: &[Stroke]) -> anyhow::Result<()> {
+    /// Send key events in one burst: one frame per event, one write.
+    async fn send_keys(&mut self, keys: &[(u32, bool)]) -> anyhow::Result<()> {
         let sequence = self.sequence;
         self.sequence = self.sequence.wrapping_add(1);
         let keyboard = self.keyboard()?;
         let device = keyboard.device.device();
         let serial = self.ei.serial();
         device.start_emulating(serial, sequence);
-        let mut events = Vec::with_capacity(8);
-        for stroke in strokes {
-            events.clear();
-            keyboard.map.key_events(*stroke, &mut events);
-            for &(key, down) in &events {
-                let state = if down {
-                    ei::keyboard::KeyState::Press
-                } else {
-                    ei::keyboard::KeyState::Released
-                };
-                keyboard.keys.key(key, state);
-                device.frame(serial, now_us());
-            }
+        for &(key, down) in keys {
+            let state = if down {
+                ei::keyboard::KeyState::Press
+            } else {
+                ei::keyboard::KeyState::Released
+            };
+            keyboard.keys.key(key, state);
+            device.frame(serial, now_us());
         }
         device.stop_emulating(serial);
         self.flush().await
@@ -682,28 +572,34 @@ impl Worker {
         }
     }
 
-    async fn set_selection(&mut self, portal: &Portal, text: String) -> Result<(), InsertError> {
-        let Some(clipboard) = &portal.clipboard else {
-            return Err(InsertError::NotApplicable(
-                "clipboard access was not granted".into(),
-            ));
-        };
+    /// Set the clipboard unless the caller of `reply` has given up.
+    async fn set_selection(
+        &mut self,
+        portal: &Portal,
+        text: String,
+        reply: &flume::Sender<Result<(), InsertError>>,
+    ) -> Result<(), InsertError> {
+        if reply.is_disconnected() {
+            return Ok(());
+        }
         self.selection = Some(text);
         // The portal may answer before the compositor has made the selection
         // current (xdg-desktop-portal-kde hands it to KWin over data-control
         // without a roundtrip), and a paste chord sent then pastes the
         // previous clipboard. Wait until the portal reports this session as
         // the owner; subscribe first, as the signal can precede the reply.
-        let owner_changes = clipboard
+        let owner_changes = portal
+            .clipboard
             .receive_selection_owner_changed::<RemoteDesktop>()
             .await
             .inspect_err(|e| log::debug!("cannot watch the clipboard owner: {e}"))
             .ok();
         let started = std::time::Instant::now();
-        clipboard
+        portal
+            .clipboard
             .set_selection(
                 &portal.session,
-                SetSelectionOptions::default().set_mime_types(TEXT_MIME_TYPES),
+                SetSelectionOptions::default().set_mime_types(MIME_TYPES),
             )
             .await
             .context("setting the clipboard through the portal")?;
@@ -729,9 +625,7 @@ impl Worker {
 
     /// An app pastes: write our selection into the pipe the portal hands us.
     async fn transfer(&self, portal: &Portal, serial: u32) -> anyhow::Result<()> {
-        let Some(clipboard) = &portal.clipboard else {
-            return Ok(());
-        };
+        let clipboard = &portal.clipboard;
         let text = self.selection.as_deref().unwrap_or_default();
         let fd = clipboard.selection_write(&portal.session, serial).await?;
         let written = async {
@@ -776,15 +670,6 @@ impl Worker {
                     self.keyboard.as_mut().expect("checked").resumed = true;
                 }
             }
-            EiEvent::KeyboardModifiers(mods) => {
-                if self.is_keyboard(&mods.device) {
-                    let keyboard = self.keyboard.as_mut().expect("checked");
-                    keyboard.caps_lock = mods.locked & keyboard.caps_mask != 0;
-                    if mods.group != keyboard.map.group {
-                        keyboard.map = CharMap::new(&keyboard.keymap, mods.group);
-                    }
-                }
-            }
             EiEvent::Disconnected(disconnected) => {
                 self.dead = Some(format!(
                     "the EIS server disconnected ({:?}{})",
@@ -827,15 +712,19 @@ fn now_us() -> u64 {
         + u64::try_from(now.tv_nsec).unwrap_or_default() / 1_000
 }
 
-/// The libei keyboard and what its layout can type.
 struct Keyboard {
     device: reis::event::Device,
     keys: ei::Keyboard,
-    keymap: xkb::Keymap,
-    map: CharMap,
-    caps_mask: xkb::ModMask,
-    caps_lock: bool,
+    chord: ChordKeys,
     resumed: bool,
+}
+
+/// evdev codes (XKB keycode - 8) of the paste chord keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChordKeys {
+    ctrl: u32,
+    shift: u32,
+    v: u32,
 }
 
 impl Keyboard {
@@ -862,136 +751,36 @@ impl Keyboard {
             )
         }?
         .context("compiling the EIS keymap")?;
-        let map = CharMap::new(&keymap, 0);
-        let caps_mask = 1 << keymap.mod_get_index(xkb::MOD_NAME_CAPS);
         Ok(Self {
             device,
             keys,
-            keymap,
-            map,
-            caps_mask,
-            caps_lock: false,
+            chord: ChordKeys::new(&keymap)?,
             resumed: false,
         })
     }
 }
 
-const SHIFT: u8 = 1;
-const LEVEL3: u8 = 2;
-const CONTROL: u8 = 4;
-
-/// One key press with the modifiers held around it. Keys are evdev codes
-/// (XKB keycode - 8), what libei sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Stroke {
-    key: u32,
-    mods: u8,
-}
-
-/// Which key (and modifiers) types each character in one layout group.
-struct CharMap {
-    group: u32,
-    chars: HashMap<char, Stroke>,
-    shift: Option<u32>,
-    level3: Option<u32>,
-    control: Option<u32>,
-}
-
-/// evdev `KEY_V`, for Ctrl+V on layouts without a Latin `v`.
-const KEY_V: u32 = 47;
-
-impl CharMap {
-    /// Simulate every key under no modifier, Shift, AltGr (level 3) and
-    /// Shift+AltGr, and keep the first (fewest modifiers) way to get each
-    /// character.
-    fn new(keymap: &xkb::Keymap, group: u32) -> Self {
-        let evdev = |code: xkb::Keycode| code.raw() - 8;
-        let shift = find_key(keymap, xkb::Keysym::Shift_L);
-        let level3 = find_key(keymap, xkb::Keysym::ISO_Level3_Shift);
-        let control = find_key(keymap, xkb::Keysym::Control_L);
-        let modifier_keys = [shift, level3, control];
-
-        let mut chars = HashMap::new();
-        for mods in [0, SHIFT, LEVEL3, SHIFT | LEVEL3] {
-            let mut state = xkb::State::new(keymap);
-            state.update_mask(0, 0, 0, 0, 0, group);
-            let mut held = |bit: u8, key: Option<xkb::Keycode>| {
-                if mods & bit == 0 {
-                    return true;
-                }
-                key.is_some_and(|key| {
-                    state.update_key(key, xkb::KeyDirection::Down);
-                    true
-                })
-            };
-            if !held(SHIFT, shift) || !held(LEVEL3, level3) {
-                continue;
-            }
-            for raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
-                let code = xkb::Keycode::new(raw);
-                if raw < 8 || modifier_keys.contains(&Some(code)) {
-                    continue;
-                }
-                let sym = state.key_get_one_sym(code);
-                if sym == xkb::Keysym::NoSymbol || sym.is_keypad_key() {
-                    continue;
-                }
-                let c = if sym == xkb::Keysym::Return {
-                    '\n'
-                } else {
-                    match char::from_u32(state.key_get_utf32(code)) {
-                        Some(c) if c == '\t' || !c.is_control() => c,
-                        _ => continue,
-                    }
-                };
-                chars.entry(c).or_insert(Stroke {
-                    key: evdev(code),
-                    mods,
-                });
-            }
-        }
-        Self {
-            group,
-            chars,
-            shift: shift.map(evdev),
-            level3: level3.map(evdev),
-            control: control.map(evdev),
-        }
+impl ChordKeys {
+    fn new(keymap: &xkb::Keymap) -> anyhow::Result<Self> {
+        let evdev = |sym| find_key(keymap, sym).map(|code| code.raw() - 8);
+        Ok(Self {
+            ctrl: evdev(xkb::Keysym::Control_L).context("the EIS keymap has no Control key")?,
+            shift: evdev(xkb::Keysym::Shift_L).context("the EIS keymap has no Shift key")?,
+            v: evdev(xkb::Keysym::v).unwrap_or(KEY_V),
+        })
     }
 
-    fn stroke(&self, c: char) -> Option<Stroke> {
-        self.chars.get(&c).copied()
-    }
-
-    /// Ctrl+V (Ctrl+Shift+V for terminals), on the key that types `v` when
-    /// there is one.
-    fn paste(&self, terminal: bool) -> Option<Stroke> {
-        self.control?;
-        let key = match self.stroke('v') {
-            Some(Stroke { key, mods: 0 }) => key,
-            _ => KEY_V,
+    /// Ctrl+V, or Ctrl+Shift+V for terminals.
+    fn events(self, terminal: bool) -> Vec<(u32, bool)> {
+        let held: &[u32] = if terminal {
+            &[self.shift, self.ctrl]
+        } else {
+            &[self.ctrl]
         };
-        let mods = if terminal { CONTROL | SHIFT } else { CONTROL };
-        Some(Stroke { key, mods })
-    }
-
-    /// Press the modifiers, tap the key, release the modifiers.
-    fn key_events(&self, stroke: Stroke, out: &mut Vec<(u32, bool)>) {
-        let modifiers = [
-            (SHIFT, self.shift),
-            (LEVEL3, self.level3),
-            (CONTROL, self.control),
-        ];
-        let held = modifiers
-            .iter()
-            .filter(|(bit, _)| stroke.mods & bit != 0)
-            .filter_map(|(_, key)| *key);
-        out.extend(held.clone().map(|key| (key, true)));
-        out.push((stroke.key, true));
-        out.push((stroke.key, false));
-        let mut released: Vec<_> = held.map(|key| (key, false)).collect();
-        released.reverse();
-        out.extend(released);
+        let mut events: Vec<_> = held.iter().map(|&key| (key, true)).collect();
+        events.extend([(self.v, true), (self.v, false)]);
+        events.extend(held.iter().rev().map(|&key| (key, false)));
+        events
     }
 }
 
@@ -1009,97 +798,23 @@ mod tests {
     use super::*;
 
     // evdev codes from linux/input-event-codes.h
-    const KEY_1: u32 = 2;
-    const KEY_Q: u32 = 16;
-    const KEY_Y: u32 = 21;
-    const KEY_ENTER: u32 = 28;
-    const KEY_A: u32 = 30;
-    const KEY_APOSTROPHE: u32 = 40;
-    const KEY_LEFTSHIFT: u32 = 42;
-    const KEY_SPACE: u32 = 57;
     const KEY_LEFTCTRL: u32 = 29;
-    const KEY_TAB: u32 = 15;
+    const KEY_LEFTSHIFT: u32 = 42;
+    const KEY_DOT: u32 = 52;
 
-    fn keymap(layout: &str) -> xkb::Keymap {
+    fn chord_keys(layout: &str, variant: &str) -> ChordKeys {
         let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-        xkb::Keymap::new_from_names(&context, "evdev", "pc105", layout, "", None, 0)
-            .expect("compiling a keymap from the system's xkeyboard-config")
-    }
-
-    #[expect(clippy::unnecessary_wraps, reason = "compared with CharMap lookups")]
-    fn on(key: u32, mods: u8) -> Option<Stroke> {
-        Some(Stroke { key, mods })
+        let keymap =
+            xkb::Keymap::new_from_names(&context, "evdev", "pc105", layout, variant, None, 0)
+                .expect("compiling a keymap from the system's xkeyboard-config");
+        ChordKeys::new(&keymap).unwrap()
     }
 
     #[test]
-    fn us_layout_types_ascii_with_the_fewest_modifiers() {
-        let map = CharMap::new(&keymap("us"), 0);
-        assert_eq!(map.stroke('a'), on(KEY_A, 0));
-        assert_eq!(map.stroke('A'), on(KEY_A, SHIFT));
-        assert_eq!(map.stroke('!'), on(KEY_1, SHIFT));
-        assert_eq!(map.stroke('1'), on(KEY_1, 0));
-        assert_eq!(map.stroke(' '), on(KEY_SPACE, 0));
-        assert_eq!(map.stroke('\n'), on(KEY_ENTER, 0));
-        assert_eq!(map.stroke('\t'), on(KEY_TAB, 0));
-    }
-
-    #[test]
-    fn characters_missing_from_the_layout_have_no_stroke() {
-        let map = CharMap::new(&keymap("us"), 0);
-        assert_eq!(map.stroke('é'), None);
-        assert_eq!(map.stroke('ß'), None);
-        assert_eq!(map.stroke('\r'), None);
-    }
-
-    #[test]
-    fn altgr_levels_and_swapped_keys_follow_the_layout() {
-        let map = CharMap::new(&keymap("de"), 0);
-        assert_eq!(map.stroke('z'), on(KEY_Y, 0));
-        assert_eq!(map.stroke('ä'), on(KEY_APOSTROPHE, 0));
-        assert_eq!(map.stroke('Ä'), on(KEY_APOSTROPHE, SHIFT));
-        assert_eq!(map.stroke('@'), on(KEY_Q, LEVEL3));
-    }
-
-    #[test]
-    fn the_active_group_decides_the_characters() {
-        let keymap = keymap("us,ru");
-        let latin = CharMap::new(&keymap, 0);
-        let cyrillic = CharMap::new(&keymap, 1);
-        assert_eq!(latin.stroke('ф'), None);
-        assert_eq!(cyrillic.stroke('ф'), on(KEY_A, 0));
-        // Ctrl+V stays on the V key when the group has no Latin v.
-        assert_eq!(cyrillic.paste(false), on(KEY_V, CONTROL));
-        assert_eq!(latin.paste(false), on(KEY_V, CONTROL));
-        assert_eq!(latin.paste(true), on(KEY_V, CONTROL | SHIFT));
-    }
-
-    #[test]
-    fn modifiers_wrap_the_key_and_release_in_reverse() {
-        let map = CharMap::new(&keymap("de"), 0);
-        let level3 = map.level3.expect("de has a level 3 shift key");
-        let mut events = Vec::new();
-        map.key_events(
-            Stroke {
-                key: KEY_Q,
-                mods: SHIFT | LEVEL3,
-            },
-            &mut events,
-        );
+    fn the_chord_uses_the_layouts_v_and_wraps_it_in_modifiers() {
+        let us = chord_keys("us", "");
         assert_eq!(
-            events,
-            [
-                (KEY_LEFTSHIFT, true),
-                (level3, true),
-                (KEY_Q, true),
-                (KEY_Q, false),
-                (level3, false),
-                (KEY_LEFTSHIFT, false),
-            ]
-        );
-        events.clear();
-        map.key_events(map.paste(true).expect("de has Control"), &mut events);
-        assert_eq!(
-            events,
+            us.events(true),
             [
                 (KEY_LEFTSHIFT, true),
                 (KEY_LEFTCTRL, true),
@@ -1109,5 +824,16 @@ mod tests {
                 (KEY_LEFTSHIFT, false),
             ]
         );
+        assert_eq!(
+            us.events(false),
+            [
+                (KEY_LEFTCTRL, true),
+                (KEY_V, true),
+                (KEY_V, false),
+                (KEY_LEFTCTRL, false),
+            ]
+        );
+        assert_eq!(chord_keys("us", "dvorak").v, KEY_DOT);
+        assert_eq!(chord_keys("ru", "").v, KEY_V);
     }
 }

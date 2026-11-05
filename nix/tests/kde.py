@@ -172,7 +172,7 @@ with subtest("EARWIG: GlobalShortcuts asks to bind the default shortcut; accepte
 with subtest("EARWIG: status shows the portal paths"):
     st = status()
     print(f"status: {st}")
-    assert st["insert_methods"] == ["portal-paste", "portal-type"], st
+    assert st["insert_methods"] == ["portal-paste"], st
     assert "portal" in st["hotkey_sources"], st
     assert not dialogs("Remote Control"), "a second RemoteDesktop dialog"
 
@@ -206,7 +206,7 @@ with subtest("EARWIG: after a restart the restore token skips the dialog"):
     since = log_lines()
     user("systemctl --user restart earwig.service")
     user_unit_active("earwig.service")
-    print(wait_log(r"insertion methods: \[PortalPaste, PortalType\]", timeout=60, since=since))
+    print(wait_log(r"insertion methods: \[PortalPaste\]", timeout=60, since=since))
     print(wait_log(r"portal shortcut dictate: .*Space", timeout=60, since=since))
     machine.sleep(10)
     assert not dialogs("Requested"), f"a consent dialog after restart: {windows()}"
