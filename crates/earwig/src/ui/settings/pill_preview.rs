@@ -22,11 +22,12 @@ use crate::ui::{UiState, accent, config, edit_config};
 const SCALE: f32 = 0.5;
 const PILL_WIDTH: f32 = 120.;
 const PILL_HEIGHT: f32 = 30.;
-/// Checkered backdrop around the preview pill, so its transparency shows;
-/// wide enough for the bars or the edge at the widest motion.
+/// Checkered backdrop around the preview pill, so its transparency shows,
+/// with room above and below for the bars or the edge at the widest motion.
 const CARD_MARGIN: f32 = 12.;
+const CARD_MARGIN_Y: f32 = pill::MAX_REACH * SCALE + 1.;
 const CARD_WIDTH: f32 = PILL_WIDTH + 2. * CARD_MARGIN;
-const CARD_HEIGHT: f32 = PILL_HEIGHT + 2. * CARD_MARGIN;
+const CARD_HEIGHT: f32 = PILL_HEIGHT + 2. * CARD_MARGIN_Y;
 const CHECKER: f32 = 6.;
 const SLIDER_WIDTH: f32 = 180.;
 /// Same pacing as the overlay while the voice moves the pill.
@@ -205,7 +206,13 @@ impl Render for PillPreview {
             move |bounds, (), window, _| {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     paint_checker(bounds, base, check, window);
-                    let pill = bounds.dilate(px(-CARD_MARGIN));
+                    let pill = Bounds::new(
+                        point(
+                            bounds.left() + px(CARD_MARGIN),
+                            bounds.top() + px(CARD_MARGIN_Y),
+                        ),
+                        size(px(PILL_WIDTH), px(PILL_HEIGHT)),
+                    );
                     pill::paint(pill, &shape, look, SCALE, window);
                 });
             },
@@ -345,11 +352,8 @@ mod tests {
 
     #[test]
     fn preview_moves_while_the_slider_moves_then_settles() {
-        let styles = [
-            (OverlayStyle::Bars, 0.1..=0.4),
-            (OverlayStyle::Wave, 0.5..=1.2),
-        ];
-        for (style, settles_within) in styles {
+        for style in [OverlayStyle::Wave, OverlayStyle::Bars] {
+            let settles_within = 0.1..=0.4;
             let start = Instant::now();
             let mut demo = Demo::new(style, 1.);
             assert!(demo.frame(start).is_none(), "idle preview is still");

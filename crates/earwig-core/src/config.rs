@@ -133,11 +133,12 @@ pub enum OverlayPosition {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayStyle {
-    /// Sound bars above and below a still pill, one pair per speech band.
+    /// The pill's edge rises and falls with the speech bands, mirrored from
+    /// the centre like the bars.
     #[default]
-    Bars,
-    /// The pill's edge swells and ripples.
     Wave,
+    /// Sound bars above and below a still pill, one pair per speech band.
+    Bars,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -210,7 +211,7 @@ impl Default for OverlayConfig {
             enabled: true,
             position: OverlayPosition::Bottom,
             max_lines: 3,
-            style: OverlayStyle::Bars,
+            style: OverlayStyle::default(),
             motion: 1.,
             opacity: Self::DEFAULT_OPACITY,
             border: 0.,
@@ -506,13 +507,13 @@ mod tests {
     fn overlay_looks_default_round_trip_and_clamp() {
         let (_dir, mut store) = store("", "");
         let overlay = &store.config().overlay;
-        assert_eq!(overlay.style, OverlayStyle::Bars);
+        assert_eq!(overlay.style, OverlayStyle::Wave);
         assert!((overlay.motion() - 1.).abs() < f32::EPSILON);
         assert!((overlay.opacity() - 0.97).abs() < f32::EPSILON);
         assert!(overlay.border().abs() < f32::EPSILON, "borderless");
         store
             .update(|c| {
-                c.overlay.style = OverlayStyle::Wave;
+                c.overlay.style = OverlayStyle::Bars;
                 c.overlay.motion = 1.5;
                 c.overlay.opacity = 0.7;
                 c.overlay.border = 1.5;
@@ -521,11 +522,11 @@ mod tests {
         let written = fs::read_to_string(&store.paths().user).unwrap();
         assert_eq!(
             written.trim(),
-            "[overlay]\nborder = 1.5\nmotion = 1.5\nopacity = 0.7\nstyle = \"wave\""
+            "[overlay]\nborder = 1.5\nmotion = 1.5\nopacity = 0.7\nstyle = \"bars\""
         );
         let (_dir, reloaded) = self::store(&written, "");
         let overlay = &reloaded.config().overlay;
-        assert_eq!(overlay.style, OverlayStyle::Wave);
+        assert_eq!(overlay.style, OverlayStyle::Bars);
         assert!((overlay.motion() - 1.5).abs() < f32::EPSILON);
         assert!((overlay.opacity() - 0.7).abs() < f32::EPSILON);
         assert!((overlay.border() - 1.5).abs() < f32::EPSILON);

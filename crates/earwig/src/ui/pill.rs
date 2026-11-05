@@ -1,7 +1,8 @@
 //! The overlay's pill: a rounded rectangle over a soft drop shadow that
-//! shows the voice in one of two styles. Bars: thin accent bars above and
-//! below a still pill, mirrored from the centre outward, low bands in the
-//! middle. Wave: the edge itself swells and ripples, painted as a path.
+//! shows the voice in one of two styles, both following the same speech
+//! bands, mirrored from the centre outward with low bands in the middle.
+//! Wave: the top and bottom edges rise and fall with the bands, painted as
+//! a path. Bars: thin accent bars above and below a still pill.
 
 use std::f32::consts::TAU;
 use std::time::Instant;
@@ -17,16 +18,14 @@ use gpui_kit::{
 /// Corner radius of the pill at rest.
 const RADIUS: f32 = 24.;
 /// Transparent room the pill needs around it: its shadow fades out (below a
-/// visible step, 2.5 blur radii) before the surface ends, even when the wave
-/// carries it out to full reach. Bars leave the shadow where it is and fit
-/// well within that.
-pub const ROOM: f32 = SHADOW_DROP + 2.5 * SHADOW_BLUR + WAVE_REACH;
-const _: () = assert!(BARS_REACH < ROOM);
+/// visible step, 2.5 blur radii) before the surface ends, and the edge or
+/// the bars at full reach stay a pixel clear of it.
+pub const ROOM: f32 = larger(SHADOW_DROP + 2.5 * SHADOW_BLUR, MAX_REACH + 1.);
 
 /// Furthest anything moves out from the pill at the widest motion setting.
 pub const MAX_REACH: f32 = larger(WAVE_REACH, BARS_REACH);
-/// A full swell and ripple...
-const WAVE_REACH: f32 = OverlayConfig::MAX_MOTION * (SWELL + RIPPLE);
+/// The edge at its peak...
+const WAVE_REACH: f32 = OverlayConfig::MAX_MOTION * PEAK;
 /// ...or full bars beyond their gap.
 const BARS_REACH: f32 = BAR_GAP + OverlayConfig::MAX_MOTION * BAR_LENGTH;
 /// The ambient shadow's offset below the pill and its blur (one standard
@@ -34,27 +33,42 @@ const BARS_REACH: f32 = BAR_GAP + OverlayConfig::MAX_MOTION * BAR_LENGTH;
 const SHADOW_DROP: f32 = 10.;
 const SHADOW_BLUR: f32 = 12.;
 
-/// How far the whole pill grows at full voice and motion 1.
-const SWELL: f32 = 3.;
-/// Amplitude of the travelling ripple at full voice and motion 1.
-const RIPPLE: f32 = 4.2;
+/// How far the edge stands out where a band is at the top, at motion 1.
+const PEAK: f32 = 18.;
+/// Each band stands out from the mean of its neighbours by this many times
+/// its difference from them (an unsharp mask), so formants peak instead of
+/// merging into a plateau.
+const CONTRAST: f32 = 2.;
+/// The band profile is raised to this power, which narrows its peaks and
+/// keeps quieter bands low while staying smooth.
+const SHARPNESS: f32 = 1.8;
+/// Fraction of the way from the centre to a corner where the highest band
+/// stands; the bands spread evenly up to it.
+const BAND_END: f32 = 0.85;
+/// Siri's attenuation `(K / (K + x⁴))^K` with `x = FOCUS` times the way to
+/// the corners: the edge moves most in the middle and calms toward the ends
+/// (to 57% halfway, 10% at four fifths).
+const FOCUS: f32 = 1.8;
+const FOCUS_K: f32 = 2.;
+/// The edge comes to rest over this span of the way to the corners (0 at
+/// the centre, 1 where the corners begin), so corners and ends stay round.
+const TAPER: (f32, f32) = (0.82, 1.);
+/// A fine ripple travelling outward from the centre takes up to this share
+/// off the edge's rise, so held sounds still shimmer...
+const SHIMMER: f32 = 0.2;
+/// ...with this many crests between the centre and a corner...
+const SHIMMER_CYCLES: f32 = 10.;
+/// ...passing at this many radians per second.
+const SHIMMER_SPEED: f32 = 2. * TAU;
 
-/// Seconds the wave's voice energy takes to rise toward a louder level...
-const ATTACK: f32 = 0.015;
-/// ...and to fall back, so the edge flows between syllables.
-const RELEASE: f32 = 0.3;
 /// Seconds colours take to settle (theme or accent changes).
 const FADE: f32 = 0.18;
 /// A stalled frame resumes calmly instead of jumping.
 const MAX_STEP: f32 = 0.05;
 
-/// Mic levels are dB mapped onto 0..1 over -60..0 dBFS; room noise sits
-/// below `VOICE_FLOOR` and ordinary speech reaches the top of the span.
-const VOICE_FLOOR: f32 = 0.35;
-const VOICE_SPAN: f32 = 0.4;
-
-/// Distance between outline samples; fine enough that corners stay round.
-const SAMPLE_SPACING: f32 = 4.;
+/// Distance between outline samples, in pixels drawn: a sixth of a band's
+/// span on the overlay's pill, so peaks stay round.
+const SAMPLE_SPACING: f32 = 1.5;
 
 /// Space between the pill's edge and the foot of its bars.
 const BAR_GAP: f32 = 3.;
@@ -67,9 +81,9 @@ const BAR_PITCH: f32 = 8.;
 /// Bars shorter than this many pixels are not drawn, so silence and
 /// near-silence show a clean pill rather than dots.
 const MIN_BAR: f32 = 1.5;
-/// Seconds a full bar takes to fall to nothing once its band falls silent;
-/// it gathers speed like a dropped object. Bars rise as fast as the
-/// analysis does (a few milliseconds).
+/// Seconds a full band takes to fall to nothing once it falls silent; it
+/// gathers speed like a dropped object. Bands rise as fast as the analysis
+/// does (a few milliseconds).
 const DROP: f32 = 0.13;
 const GRAVITY: f32 = 2. / (DROP * DROP);
 /// Bar opacity from the shortest to the tallest.
@@ -78,33 +92,6 @@ const BAR_ALPHA: (f32, f32) = (0.55, 0.95);
 const fn larger(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
-
-/// One travelling sine around the perimeter. Whole cycles keep the outline
-/// closed; mixed speeds and directions keep it from looking mechanical.
-struct Wave {
-    cycles: f32,
-    weight: f32,
-    /// Radians per second at full voice.
-    speed: f32,
-}
-
-const WAVES: [Wave; 3] = [
-    Wave {
-        cycles: 3.,
-        weight: 0.3,
-        speed: 2.,
-    },
-    Wave {
-        cycles: 7.,
-        weight: 0.4,
-        speed: -3.4,
-    },
-    Wave {
-        cycles: 12.,
-        weight: 0.3,
-        speed: 5.,
-    },
-];
 
 /// Seconds between rendered frames.
 #[derive(Default)]
@@ -125,12 +112,11 @@ pub struct Motion {
     style: OverlayStyle,
     /// The motion setting: how far the voice moves the pill.
     intensity: f32,
-    /// Wave: smoothed voice energy and the phases the edge animates with.
-    energy: f32,
-    phases: [f32; WAVES.len()],
-    /// Bars: each band's height (0..1) and how fast it is falling.
+    /// Each band's height (0..1) and how fast it is falling.
     heights: [f32; BANDS],
     falling: [f32; BANDS],
+    /// Wave: phase of the shimmer.
+    shimmer: f32,
 }
 
 impl Motion {
@@ -138,10 +124,9 @@ impl Motion {
         Self {
             style,
             intensity,
-            energy: 0.,
-            phases: [0.; WAVES.len()],
             heights: [0.; BANDS],
             falling: [0.; BANDS],
+            shimmer: 0.,
         }
     }
 
@@ -156,15 +141,26 @@ impl Motion {
     /// Advance by `dt` seconds. `voice` is the latest reading while
     /// recording, `None` once recording stopped, which lets the pill settle.
     pub fn step(&mut self, dt: f32, voice: Option<&Spectrum>) -> Shape {
+        self.follow(dt, voice);
         match self.style {
-            OverlayStyle::Bars => Shape::Bars(self.step_bars(dt, voice)),
-            OverlayStyle::Wave => Shape::Wave(self.step_wave(dt, voice.map(|v| v.level))),
+            OverlayStyle::Bars => Shape::Bars(Bars {
+                heights: self.heights,
+                length: BAR_LENGTH * self.intensity,
+            }),
+            OverlayStyle::Wave => {
+                self.shimmer = (self.shimmer + SHIMMER_SPEED * dt).rem_euclid(TAU);
+                Shape::Wave(Edge::new(
+                    &self.heights,
+                    PEAK * self.intensity,
+                    self.shimmer,
+                ))
+            }
         }
     }
 
-    /// A bar jumps up with its band and falls under gravity, never below
-    /// where its band is now.
-    fn step_bars(&mut self, dt: f32, voice: Option<&Spectrum>) -> Bars {
+    /// A band jumps up with the voice and falls under gravity, never below
+    /// where the voice has it now.
+    fn follow(&mut self, dt: f32, voice: Option<&Spectrum>) {
         for (band, (height, falling)) in self.heights.iter_mut().zip(&mut self.falling).enumerate()
         {
             let target = voice.map_or(0., |v| v.bands[band]);
@@ -176,30 +172,6 @@ impl Motion {
                 *height = (*height - *falling * dt).max(target);
             }
         }
-        Bars {
-            heights: self.heights,
-            length: BAR_LENGTH * self.intensity,
-        }
-    }
-
-    fn step_wave(&mut self, dt: f32, level: Option<f32>) -> Edge {
-        let target = level.map_or(0., voice);
-        let response = if target > self.energy {
-            ATTACK
-        } else {
-            RELEASE
-        };
-        self.energy += (target - self.energy) * approach(dt, response);
-        for (phase, wave) in self.phases.iter_mut().zip(&WAVES) {
-            *phase = (*phase + wave.speed * self.energy * dt).rem_euclid(TAU);
-        }
-
-        let travel = self.energy * self.intensity;
-        Edge {
-            swell: SWELL * travel,
-            ripple: RIPPLE * travel,
-            phases: self.phases,
-        }
     }
 }
 
@@ -207,11 +179,6 @@ impl Motion {
 /// that closes on it with time constant `response`.
 fn approach(dt: f32, response: f32) -> f32 {
     1. - (-dt / response).exp()
-}
-
-/// How much of the voice range a mic level reaches, 0 in silence.
-fn voice(level: f32) -> f32 {
-    ((level - VOICE_FLOOR) / VOICE_SPAN).clamp(0., 1.)
 }
 
 /// What the voice does to the pill at one instant.
@@ -239,30 +206,84 @@ impl Shape {
     }
 }
 
-/// The pill's outline at one instant.
+/// The pill's top and bottom edges at one instant: a smooth profile through
+/// the band heights, mirrored from the centre to either corner.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Edge {
-    swell: f32,
-    ripple: f32,
-    phases: [f32; WAVES.len()],
+    /// Band heights (0..1) with their contrast raised.
+    heights: [f32; BANDS],
+    /// Pixels the edge stands out where a band is at the top.
+    peak: f32,
+    shimmer: f32,
 }
 
 impl Edge {
-    /// Outward displacement in pixels at `u`, the fraction of the way
-    /// around the perimeter.
-    fn offset(&self, u: f32) -> f32 {
-        let ripple: f32 = WAVES
-            .iter()
-            .zip(self.phases)
-            .map(|(wave, phase)| wave.weight * (TAU * wave.cycles * u + phase).sin())
-            .sum();
-        self.swell + self.ripple * ripple
+    #[allow(clippy::cast_possible_wrap)]
+    fn new(heights: &[f32; BANDS], peak: f32, shimmer: f32) -> Edge {
+        Edge {
+            heights: std::array::from_fn(|band| {
+                let [below, at, above] = [-1, 0, 1].map(|d| mirrored(heights, band as isize + d));
+                (at + CONTRAST * (at - f32::midpoint(below, above))).clamp(0., 1.)
+            }),
+            peak,
+            shimmer,
+        }
     }
 
-    /// The most the edge can stand out from rest right now, in pixels.
-    pub fn reach(&self) -> f32 {
-        self.swell + self.ripple
+    /// Outward displacement in pixels at `from_centre`, the distance from
+    /// the pill's middle as a fraction of the way to where its corners begin.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn offset(&self, from_centre: f32) -> f32 {
+        let calm = smoothstep(TAPER.0, TAPER.1, from_centre);
+        if self.peak <= 0. || calm >= 1. {
+            return 0.;
+        }
+        let at = from_centre / BAND_END * (BANDS - 1) as f32;
+        let below = at.floor();
+        let band = below as isize;
+        let height = catmull_rom(
+            [band - 1, band, band + 1, band + 2].map(|b| mirrored(&self.heights, b)),
+            at - below,
+        )
+        .clamp(0., 1.)
+        .powf(SHARPNESS);
+        let focus = (FOCUS_K / (FOCUS_K + (FOCUS * from_centre).powi(4))).powf(FOCUS_K);
+        let shimmer =
+            SHIMMER * 0.5 * (1. + (TAU * SHIMMER_CYCLES * from_centre - self.shimmer).sin());
+        self.peak * focus * (1. - calm) * height * (1. - shimmer)
     }
+
+    /// How far the edge stands out at the tallest band right now, in pixels.
+    pub fn reach(&self) -> f32 {
+        self.heights
+            .iter()
+            .copied()
+            .fold(0., f32::max)
+            .powf(SHARPNESS)
+            * self.peak
+    }
+}
+
+/// Band `band` of `heights`, mirrored across the centre and held beyond the
+/// highest band.
+fn mirrored(heights: &[f32; BANDS], band: isize) -> f32 {
+    heights[band.unsigned_abs().min(BANDS - 1)]
+}
+
+/// The Catmull-Rom spline through four evenly spaced values at `t` (0..1)
+/// of the way between the middle two: smooth, and through every value.
+fn catmull_rom([before, from, to, after]: [f32; 4], t: f32) -> f32 {
+    let (t2, t3) = (t * t, t * t * t);
+    0.5 * (2. * from
+        + (to - before) * t
+        + (2. * before - 5. * from + 4. * to - after) * t2
+        + (3. * (from - to) + after - before) * t3)
+}
+
+/// 0 up to `from`, 1 from `to`, easing in and out between.
+fn smoothstep(from: f32, to: f32, x: f32) -> f32 {
+    let t = ((x - from) / (to - from)).clamp(0., 1.);
+    t * t * (3. - 2. * t)
 }
 
 /// Band heights (0..1) and the length of a full bar in pixels.
@@ -360,17 +381,12 @@ pub fn software_rendered(window: &Window) -> bool {
 /// Paint the shadow, body, border and voice of a pill resting at `bounds`,
 /// drawn at `scale`.
 pub fn paint(bounds: Bounds<Pixels>, shape: &Shape, look: Look, scale: f32, window: &mut Window) {
+    paint_shadow(bounds, look, scale, window);
     match shape {
-        Shape::Wave(edge) => paint_wave(bounds, *edge, look, scale, window),
+        Shape::Wave(edge) if edge.reach() > 0. => paint_wave(bounds, edge, look, scale, window),
+        Shape::Wave(_) => paint_body(bounds, look, scale, window),
         Shape::Bars(bars) => {
-            paint_shadow(bounds, Edge::default(), look, scale, window);
-            let mut body = fill(bounds, look.fill).corner_radii(Corners::all(px(RADIUS * scale)));
-            if let Some(width) = look.border_width(scale) {
-                body = body
-                    .border_widths(Edges::all(width))
-                    .border_color(look.accent);
-            }
-            window.paint_quad(body);
+            paint_body(bounds, look, scale, window);
             for (bar, height) in bar_layout(bounds, bars, scale) {
                 let alpha = BAR_ALPHA.0 + (BAR_ALPHA.1 - BAR_ALPHA.0) * height;
                 window.paint_quad(
@@ -382,14 +398,19 @@ pub fn paint(bounds: Bounds<Pixels>, shape: &Shape, look: Look, scale: f32, wind
     }
 }
 
-fn paint_wave(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, window: &mut Window) {
-    paint_shadow(bounds, edge, look, scale, window);
-    let outline = outline(bounds, RADIUS * scale)
-        .map(|(at, normal, u)| {
-            let offset = edge.offset(u) * scale;
-            point(px(at.x + normal.x * offset), px(at.y + normal.y * offset))
-        })
-        .collect::<Vec<_>>();
+/// The pill at rest: an exact rounded rectangle.
+fn paint_body(bounds: Bounds<Pixels>, look: Look, scale: f32, window: &mut Window) {
+    let mut body = fill(bounds, look.fill).corner_radii(Corners::all(px(RADIUS * scale)));
+    if let Some(width) = look.border_width(scale) {
+        body = body
+            .border_widths(Edges::all(width))
+            .border_color(look.accent);
+    }
+    window.paint_quad(body);
+}
+
+fn paint_wave(bounds: Bounds<Pixels>, edge: &Edge, look: Look, scale: f32, window: &mut Window) {
+    let outline = wave_outline(bounds, edge, scale);
     let mut body = PathBuilder::fill();
     body.add_polygon(&outline, true);
     if let Ok(path) = body.build() {
@@ -402,6 +423,19 @@ fn paint_wave(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, window
             window.paint_path(path, look.accent);
         }
     }
+}
+
+/// The outline of a pill at `bounds` with its edges moved out by `edge`.
+fn wave_outline(bounds: Bounds<Pixels>, edge: &Edge, scale: f32) -> Vec<Point<Pixels>> {
+    let radius = corner_radius(bounds, RADIUS * scale);
+    let centre = f32::from(bounds.center().x);
+    let half_run = (f32::from(bounds.size.width) / 2. - radius).max(f32::EPSILON);
+    outline(bounds, radius)
+        .map(|(at, normal)| {
+            let offset = edge.offset((at.x - centre).abs() / half_run) * scale;
+            point(px(at.x + normal.x * offset), px(at.y + normal.y * offset))
+        })
+        .collect()
 }
 
 /// The bars of a pill at `bounds` that are long enough to draw, with their
@@ -449,13 +483,13 @@ fn bar_layout(
     })
 }
 
-/// A wide ambient shadow and a tight contact one. Shadows are drawn only
-/// outside the element they belong to; tucking that element just inside the
-/// smallest the edge gets right now (and spreading by as much) keeps the
-/// troughs of a ripple shaded instead of revealing a hard rim, while a
-/// translucent fill shows no shadow band beneath it.
-fn paint_shadow(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, window: &mut Window) {
-    let tuck = px(((edge.ripple - edge.swell).max(0.) + 1.) * scale);
+/// A wide ambient shadow and a tight contact one, cast by the pill at rest.
+/// Shadows are drawn only outside the element they belong to; tucking that
+/// element a pixel inside the body (and spreading by as much) keeps its
+/// anti-aliased rim shaded, while a translucent fill shows no shadow band
+/// beneath it.
+fn paint_shadow(bounds: Bounds<Pixels>, look: Look, scale: f32, window: &mut Window) {
+    let tuck = px(scale);
     let (ambient, contact) = if look.dark { (0.5, 0.3) } else { (0.16, 0.1) };
     let shadow = |alpha: f32, y: f32, blur: f32| BoxShadow {
         color: Hsla::black().opacity(alpha * look.depth),
@@ -464,11 +498,9 @@ fn paint_shadow(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, wind
         spread_radius: tuck,
         inset: false,
     };
-    let swell = edge.swell * scale;
-    let rest = bounds.dilate(px(swell));
     window.paint_drop_shadows(
-        rest.dilate(-tuck),
-        Corners::all(px(RADIUS * scale + swell)),
+        bounds.dilate(-tuck),
+        Corners::all(px(RADIUS * scale)),
         &[
             shadow(ambient, SHADOW_DROP, SHADOW_BLUR),
             shadow(contact, 1., 3.),
@@ -476,20 +508,24 @@ fn paint_shadow(bounds: Bounds<Pixels>, edge: Edge, look: Look, scale: f32, wind
     );
 }
 
-/// Evenly spaced points around the rounded rectangle, clockwise from the
-/// start of the top edge, with their outward normal and how far around the
-/// perimeter (0..1) each one is.
-fn outline(
-    bounds: Bounds<Pixels>,
-    radius: f32,
-) -> impl Iterator<Item = (Point<f32>, Point<f32>, f32)> {
+/// The corner radius of a pill at `bounds`: `radius`, or less where the
+/// pill is too small for it.
+fn corner_radius(bounds: Bounds<Pixels>, radius: f32) -> f32 {
+    radius
+        .min(f32::from(bounds.size.width) / 2.)
+        .min(f32::from(bounds.size.height) / 2.)
+}
+
+/// Evenly spaced points around the rounded rectangle with corner radius
+/// `radius`, clockwise from the start of the top edge, with their outward
+/// normal.
+fn outline(bounds: Bounds<Pixels>, radius: f32) -> impl Iterator<Item = (Point<f32>, Point<f32>)> {
     let (left, top) = (f32::from(bounds.left()), f32::from(bounds.top()));
     let (right, bottom) = (f32::from(bounds.right()), f32::from(bounds.bottom()));
-    let r = radius.min((right - left) / 2.).min((bottom - top) / 2.);
+    let r = corner_radius(bounds, radius);
     let straight_x = right - left - 2. * r;
     let straight_y = bottom - top - 2. * r;
     let arc = TAU / 4. * r;
-    let perimeter = 2. * (straight_x + straight_y) + 4. * arc;
 
     // Each side is a straight run followed by the corner that turns into the
     // next side; `angle` is the direction of the side's outward normal.
@@ -499,32 +535,23 @@ fn outline(
         (point(right - r, bottom), straight_x, TAU / 4.),
         (point(left, bottom - r), straight_y, TAU / 2.),
     ];
-    let mut travelled = 0.;
     sides.into_iter().flat_map(move |(start, length, angle)| {
         let normal = point(angle.cos(), angle.sin());
         let along = point(-normal.y, normal.x);
         let corner = point(start.x + along.x * length, start.y + along.y * length);
         let centre = point(corner.x - normal.x * r, corner.y - normal.y * r);
-        let from = travelled;
-        travelled += length + arc;
         let count = samples(length + arc);
         (0..count).map(move |i| {
             #[allow(clippy::cast_precision_loss)]
             let s = (length + arc) * i as f32 / count as f32;
-            let u = (from + s) / perimeter;
             if s < length {
-                (
-                    point(start.x + along.x * s, start.y + along.y * s),
-                    normal,
-                    u,
-                )
+                (point(start.x + along.x * s, start.y + along.y * s), normal)
             } else {
                 let turned = angle + (s - length) / r.max(f32::EPSILON);
                 let normal = point(turned.cos(), turned.sin());
                 (
                     point(centre.x + normal.x * r, centre.y + normal.y * r),
                     normal,
-                    u,
                 )
             }
         })
@@ -562,10 +589,11 @@ mod tests {
         }
     }
 
-    fn level(level: f32) -> Spectrum {
-        Spectrum {
-            level,
-            ..Spectrum::default()
+    /// The overlay's pill: wide enough that a band spans several samples.
+    fn overlay_bounds() -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(10.), px(20.)),
+            size: size(px(560.), px(80.)),
         }
     }
 
@@ -586,66 +614,160 @@ mod tests {
     #[test]
     fn outline_hugs_the_rounded_rectangle() {
         let points: Vec<_> = outline(bounds(), RADIUS).collect();
-        let (first, _, u0) = points[0];
-        assert_eq!((first.x, first.y, u0), (10. + RADIUS, 20., 0.));
-        for (at, normal, u) in &points {
-            assert!((0. ..1.).contains(u));
+        let (first, _) = points[0];
+        assert_eq!((first.x, first.y), (10. + RADIUS, 20.));
+        for (at, normal) in &points {
             assert!((normal.x.hypot(normal.y) - 1.).abs() < 1e-4);
             assert!((9.99..=210.01).contains(&at.x) && (19.99..=100.01).contains(&at.y));
+            // On a straight side, or on the arc of the nearest corner.
+            let nearest = point(
+                at.x.clamp(10. + RADIUS, 210. - RADIUS),
+                at.y.clamp(20. + RADIUS, 100. - RADIUS),
+            );
+            let from_centre = (at.x - nearest.x).hypot(at.y - nearest.y);
+            assert!((from_centre - RADIUS).abs() < 1e-3, "{at:?} off the pill");
         }
-        assert!(points.windows(2).all(|w| w[0].2 < w[1].2));
     }
 
-    fn furthest(edge: &Edge) -> f32 {
-        (0..100u8)
-            .map(|i| edge.offset(f32::from(i) / 100.))
-            .fold(0., f32::max)
+    fn full_voice() -> Spectrum {
+        Spectrum {
+            level: 1.,
+            bands: [1.; BANDS],
+        }
+    }
+
+    fn one_band(band: usize) -> Spectrum {
+        let mut voice = Spectrum::default();
+        voice.bands[band] = 1.;
+        voice
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn along(steps: u16) -> impl Iterator<Item = f32> {
+        (0..=steps).map(move |i| 1.2 * f32::from(i) / f32::from(steps))
     }
 
     #[test]
-    fn silence_is_still_and_speech_moves_the_edge() {
-        let mut motion = Motion::new(OverlayStyle::Wave, 1.);
-        let mut quiet = Edge::default();
-        for _ in 0..120 {
-            quiet = wave(motion.step(FRAME, Some(&level(0.2))));
+    fn silence_is_the_exact_pill() {
+        let mut motion = Motion::new(OverlayStyle::Wave, OverlayConfig::MAX_MOTION);
+        motion.step(FRAME, Some(&full_voice()));
+        let mut shapes = vec![Shape::still(OverlayStyle::Wave)];
+        for _ in 0..30 {
+            shapes.push(motion.step(FRAME, Some(&Spectrum::default())));
         }
-        assert!((0..100u8).all(|i| quiet.offset(f32::from(i) / 100.).abs() < 1e-3));
-
-        let mut loud = quiet;
-        for _ in 0..4 {
-            loud = wave(motion.step(FRAME, Some(&level(0.8))));
+        shapes.push(motion.step(FRAME, None));
+        for &shape in shapes[..1].iter().chain(&shapes[16..]) {
+            let edge = wave(shape);
+            assert!(edge.reach().abs() < f32::EPSILON, "settled: {edge:?}");
+            assert!(along(240).all(|d| edge.offset(d) == 0.));
+            let rest: Vec<_> = outline(bounds(), RADIUS)
+                .map(|(at, _)| point(px(at.x), px(at.y)))
+                .collect();
+            assert_eq!(wave_outline(bounds(), &edge, 1.), rest);
         }
-        let peak = motion.energy;
-        assert!(peak > 0.95, "attack is fast: {peak}");
-        let reach = furthest(&loud);
-        assert!(reach > SWELL && reach <= loud.reach());
+    }
 
-        for _ in 0..6 {
-            motion.step(FRAME, None);
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn one_band_lifts_its_own_stretch_of_the_edge_mirrored() {
+        let spacing = BAND_END / (BANDS - 1) as f32;
+        let mut peaks = Vec::new();
+        for band in [2, 9, 17] {
+            let mut motion = Motion::new(OverlayStyle::Wave, 1.);
+            let edge = wave(motion.step(FRAME, Some(&one_band(band))));
+            let home = band as f32 * spacing;
+            let (peak_at, peak) = along(2400)
+                .map(|d| (d, edge.offset(d)))
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            assert!(
+                (peak_at - home).abs() < spacing / 2.,
+                "band {band} peaks at {peak_at}"
+            );
+            assert!(peak > 0.15 * PEAK, "band {band}: {peak}");
+            peaks.push(peak);
+            for d in along(2400).filter(|d| (d - home).abs() >= 2. * spacing) {
+                assert!(edge.offset(d) == 0., "band {band} moves the edge at {d}");
+            }
+
+            // The same stretch rises on either side of the centre, above and
+            // below; the corners and ends stay put.
+            let bounds = overlay_bounds();
+            let (centre, middle) = (f32::from(bounds.center().x), f32::from(bounds.center().y));
+            let half_run = f32::from(bounds.size.width) / 2. - RADIUS;
+            let mut quadrants = [0_f32; 4];
+            for (p, (at, _)) in wave_outline(bounds, &edge, 1.)
+                .iter()
+                .zip(outline(bounds, RADIUS))
+            {
+                let lift = (f32::from(p.x) - at.x).hypot(f32::from(p.y) - at.y);
+                if lift == 0. {
+                    continue;
+                }
+                let from_centre = (at.x - centre).abs() / half_run;
+                assert!((from_centre - home).abs() < 2. * spacing, "{at:?} moved");
+                let quadrant = usize::from(at.x > centre) + 2 * usize::from(at.y > middle);
+                quadrants[quadrant] = quadrants[quadrant].max(lift);
+            }
+            for lift in quadrants {
+                assert!(
+                    (lift - peak).abs() < 0.1 * peak,
+                    "band {band}: {quadrants:?} vs {peak}"
+                );
+            }
         }
         assert!(
-            motion.energy > 0.5 && motion.energy < peak,
-            "release is gradual: {}",
-            motion.energy
+            peaks.windows(2).all(|w| w[0] > w[1]),
+            "calmer outward: {peaks:?}"
         );
     }
 
     #[test]
-    fn motion_setting_scales_how_far_the_voice_moves_the_edge() {
+    fn the_wave_jumps_with_the_voice_then_falls_within_the_drop_time() {
+        let mut motion = Motion::new(OverlayStyle::Wave, 1.);
+        let shape = motion.step(FRAME, Some(&one_band(5)));
+        assert!((shape.reach() - PEAK).abs() < 1e-4, "no attack lag");
+        let mut silent_for = 0.;
+        let mut reaches = Vec::new();
+        while silent_for < DROP + 2. * FRAME {
+            reaches.push(motion.step(FRAME, Some(&Spectrum::default())).reach());
+            silent_for += FRAME;
+        }
+        assert!(reaches[2] > 0.5 * PEAK, "hangs a moment: {reaches:?}");
+        assert!(
+            reaches.last().unwrap().abs() < f32::EPSILON,
+            "and settles: {reaches:?}"
+        );
+    }
+
+    #[test]
+    fn motion_setting_scales_the_wave_within_its_room() {
+        let bounds = bounds();
         let reaches: Vec<f32> = [0., 0.5, 1., 1.5, OverlayConfig::MAX_MOTION]
             .into_iter()
             .map(|intensity| {
                 let mut motion = Motion::new(OverlayStyle::Wave, intensity);
-                let mut edge = Edge::default();
-                for _ in 0..30 {
-                    edge = wave(motion.step(FRAME, Some(&level(0.8))));
-                }
-                furthest(&edge)
+                (0..30)
+                    .map(|_| wave(motion.step(FRAME, Some(&full_voice()))))
+                    .flat_map(|edge| wave_outline(bounds, &edge, 1.))
+                    .map(|p| {
+                        let x = (f32::from(bounds.left()) - f32::from(p.x))
+                            .max(f32::from(p.x) - f32::from(bounds.right()));
+                        let y = (f32::from(bounds.top()) - f32::from(p.y))
+                            .max(f32::from(p.y) - f32::from(bounds.bottom()));
+                        x.max(y)
+                    })
+                    .fold(0., f32::max)
             })
             .collect();
-        assert!(reaches[0].abs() < 1e-6, "still at full voice: {reaches:?}");
+        assert!(reaches[0].abs() < 1e-3, "still at full voice: {reaches:?}");
         assert!(reaches.windows(2).all(|w| w[0] < w[1]), "{reaches:?}");
-        assert!(reaches[4] <= MAX_REACH, "fits the room: {reaches:?}");
+        assert!(reaches[4] <= WAVE_REACH + 1e-3, "{reaches:?}");
+        assert!(
+            reaches[4] + 1. <= ROOM,
+            "a pixel clear of the surface's edge"
+        );
+        assert!(reaches[4] > 0.9 * WAVE_REACH, "{reaches:?}");
     }
 
     #[test]
