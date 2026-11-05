@@ -40,10 +40,6 @@ impl X11Popup {
         ))
     }
 
-    pub fn is_moved(&self) -> bool {
-        self.origin.is_some()
-    }
-
     /// Put the window's top-left corner at `origin` (logical pixels).
     pub fn move_to(&mut self, origin: Point<Pixels>, scale: f32) {
         if self.origin == Some(origin) {

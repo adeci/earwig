@@ -214,10 +214,14 @@ impl Look {
 /// Whether the edge should hold still: the desktop asks for reduced motion,
 /// or there is no GPU and animating would take the CPU the decoder needs.
 pub fn holds_still(window: &Window, cx: &App) -> bool {
-    cx.reduce_motion()
-        || window
-            .gpu_specs()
-            .is_some_and(|gpu| gpu.is_software_emulated)
+    cx.reduce_motion() || software_rendered(window)
+}
+
+/// Whether GPUI draws on the CPU.
+pub fn software_rendered(window: &Window) -> bool {
+    window
+        .gpu_specs()
+        .is_some_and(|gpu| gpu.is_software_emulated)
 }
 
 /// Paint the shadow, body and hairline of a pill resting at `bounds`, with

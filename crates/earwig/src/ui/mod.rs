@@ -7,6 +7,7 @@
 //! [`Command`] or a config edit.
 
 mod accent;
+mod layer_area;
 mod overlay;
 mod pill;
 mod settings;
@@ -20,8 +21,7 @@ use earwig_core::config::Config;
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
-use gpui_kit::component::Theme;
-use gpui_kit::{AnyWindowHandle, App, AppContext as _, Entity, Global, QuitMode, WindowingModes};
+use gpui_kit::{AnyWindowHandle, App, Entity, Global, QuitMode, WindowingModes};
 
 use overlay::{Outcome, OverlayView};
 
@@ -132,7 +132,7 @@ pub(crate) struct UiState {
     surface: OverlaySurface,
     status: Status,
     tray: Option<tray::TrayHandle>,
-    overlay: Option<(AnyWindowHandle, Entity<OverlayView>)>,
+    overlay: Option<Entity<OverlayView>>,
     settings: Option<AnyWindowHandle>,
     /// Bumped whenever a scheduled overlay close becomes stale.
     close_generation: u64,
@@ -226,8 +226,14 @@ fn set_state(state: DictationState, cx: &mut App) {
     match state {
         DictationState::Recording { started_at_ms, .. } => {
             // A new recording supersedes any pending close; the window of a
-            // previous flash is reused.
+            // previous flash is reused unless the pill was dragged: a new
+            // dictation starts at home.
             cx.global_mut::<UiState>().close_generation += 1;
+            if let Some(view) = cx.global::<UiState>().overlay.clone()
+                && view.read(cx).moved_before(started_at_ms)
+            {
+                close_overlay(cx);
+            }
             if cx.global::<UiState>().overlay.is_none() {
                 open_overlay(cx);
             }
@@ -235,7 +241,7 @@ fn set_state(state: DictationState, cx: &mut App) {
         }
         DictationState::Finalizing => update_overlay(cx, OverlayView::finalizing),
         DictationState::Idle => {
-            let Some((_, view)) = cx.global::<UiState>().overlay.clone() else {
+            let Some(view) = cx.global::<UiState>().overlay.clone() else {
                 return;
             };
             let (recording, outcome) = {
@@ -254,7 +260,7 @@ fn set_state(state: DictationState, cx: &mut App) {
 }
 
 fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
-    if let Some((_, view)) = cx.global::<UiState>().overlay.clone() {
+    if let Some(view) = cx.global::<UiState>().overlay.clone() {
         view.update(cx, |view, cx| {
             f(view);
             cx.notify();
@@ -265,38 +271,21 @@ fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
 fn open_overlay(cx: &mut App) {
     let state = cx.global::<UiState>();
     let overlay_config = config(&state.handle).overlay;
-    if !overlay_config.enabled || state.surface == OverlaySurface::None {
+    let (caps, surface) = (state.caps.clone(), state.surface);
+    if !overlay_config.enabled || surface == OverlaySurface::None {
         return;
     }
-    let options = overlay::overlay_window_options(
-        &state.caps,
-        &overlay_config,
-        cx.primary_display().as_deref(),
-    );
-    let surface = state.surface;
-    // No Base root: it paints an opaque background, and the overlay has no
-    // inputs or popovers that need one.
-    let mut view = None;
-    let opened = cx.open_window(options, |window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
-        // Click-through until the pill is painted and takes its own bounds.
-        window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(&overlay_config, surface, window, cx));
-        view = Some(root.clone());
-        root
-    });
-    match (opened, view) {
-        (Ok(window), Some(view)) => {
-            cx.global_mut::<UiState>().overlay = Some((window.into(), view));
-        }
-        (Err(e), _) => log::error!("opening the overlay: {e:#}"),
-        (Ok(_), None) => {}
+    match overlay::open(&overlay_config, &caps, surface, cx) {
+        Ok(view) => cx.global_mut::<UiState>().overlay = Some(view),
+        Err(e) => log::error!("opening the overlay: {e:#}"),
     }
 }
 
 fn close_overlay(cx: &mut App) {
-    if let Some((window, _)) = cx.global_mut::<UiState>().overlay.take() {
-        let _ = window.update(cx, |_, window, _| window.remove_window());
+    if let Some(view) = cx.global_mut::<UiState>().overlay.take() {
+        for window in view.read(cx).windows() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
     }
 }
 

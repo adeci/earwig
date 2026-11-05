@@ -1652,6 +1652,8 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "x11rb",
 ]
 
