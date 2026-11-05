@@ -75,7 +75,6 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
             history,
             engine,
             inserter,
-            caps: caps.clone(),
             hotkey_sources,
         },
         source,
