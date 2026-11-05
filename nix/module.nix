@@ -90,10 +90,10 @@ in
       source = configFile;
     };
 
-    # Insertion through the RemoteDesktop portal (GNOME, KDE) tells terminals
-    # apart by the accessibility role of the focused widget, and Qt apps only
-    # export that over AT-SPI when asked. Without this, Konsole gets Ctrl+V
-    # (a literal ^V) instead of Ctrl+Shift+V.
+    # Insertion through the RemoteDesktop portal tells terminals apart by the
+    # accessibility role of the focused widget, and Qt apps only export that
+    # over AT-SPI when asked. Without this, Konsole (on any desktop that uses
+    # the portal path) gets Ctrl+V, a literal ^V, instead of Ctrl+Shift+V.
     environment.sessionVariables.QT_LINUX_ACCESSIBILITY_ALWAYS_ON = lib.mkDefault "1";
 
     systemd.user.services.earwig = {

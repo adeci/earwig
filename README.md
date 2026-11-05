@@ -57,7 +57,7 @@ the text is put on the clipboard and kept in history.
 With the RemoteDesktop portal, earwig recognizes a focused terminal by its
 accessibility role. Qt apps such as Konsole report it only with
 `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` in the session environment; the NixOS
-module sets it on Plasma, elsewhere set it yourself or Konsole gets Ctrl+V.
+module sets it, elsewhere set it yourself or Konsole gets Ctrl+V.
 
 ## Install
 
@@ -126,9 +126,10 @@ bindr = SUPER, space, exec, earwig release
 bind = SUPER SHIFT, space, exec, earwig cancel
 ```
 
-**GNOME, KDE**: earwig registers "Dictate" and "Cancel dictation" with the
-GlobalShortcuts portal on first start. Confirm them in the dialog and change
-them later in the system keyboard settings.
+**GNOME, KDE**: earwig registers "Dictate" (default Super+Alt+Space; Super+Space
+is GNOME's input-source switch) and "Cancel dictation" with the GlobalShortcuts
+portal on first start. Confirm them in the dialog and change them later in the
+system keyboard settings.
 
 **COSMIC**: Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts →
 Add Shortcut, command `earwig toggle`, key e.g. Super+Space. That is stored in
