@@ -1,26 +1,19 @@
-//! What the daemon says and what it accepts.
-//!
-//! These types are the wire protocol of the control socket (one JSON object
-//! per line) and the in-process feed the UI renders from, so scripts, status
-//! bars and the GPUI front end all see the same thing.
+//! The control socket's wire format (one JSON object per line) and the
+//! in-process feed the UI renders from.
 
 use serde::{Deserialize, Serialize};
 
 use crate::models::ModelSpec;
 
-/// A request to the daemon.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Command {
-    /// Hotkey went down.
     Press,
-    /// Hotkey went up.
     Release,
     /// Start if idle, otherwise stop and insert. For press-only bindings.
     Toggle,
     /// Drop the current recording without inserting anything.
     Cancel,
-    /// Open (or raise) the settings window.
     ShowSettings,
     /// Reply with one [`Event::Status`].
     Status,
@@ -29,30 +22,37 @@ pub enum Command {
     /// Re-read the config files and apply changes (audio device, model, ...).
     ReloadConfig,
     /// Switch the active model; it must already be on disk.
-    UseModel { model: ModelSpec },
-    /// Exit the daemon.
+    UseModel {
+        model: ModelSpec,
+    },
     Quit,
 }
 
-/// Something the daemon reports.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
     /// Full snapshot; the reply to [`Command::Status`] and the first event of
     /// every subscription.
-    Status { status: Status },
-    /// Dictation state changed.
-    State { state: DictationState },
+    Status {
+        status: Status,
+    },
+    State {
+        state: DictationState,
+    },
     /// Microphone level while recording, 0.0 (silence) to 1.0 (loud).
-    Level { level: f32 },
+    Level {
+        level: f32,
+    },
     /// Live transcript of the current recording. `committed` only grows within
     /// a recording; `tentative` is the tail that may still be rewritten.
     Transcript {
         committed: String,
         tentative: String,
     },
-    /// The final text reached the focused application.
-    Inserted { text: String, method: InsertMethod },
+    Inserted {
+        text: String,
+        method: InsertMethod,
+    },
     /// The final text could not be inserted. It was left on the clipboard when
     /// `on_clipboard` is true.
     InsertFailed {
@@ -60,10 +60,13 @@ pub enum Event {
         reason: String,
         on_clipboard: bool,
     },
-    /// The active model changed state.
-    Model { model: ModelStatus },
+    Model {
+        model: ModelStatus,
+    },
     /// A non-fatal problem worth showing to the user.
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// The settings window was requested (tray, CLI, socket).
     ShowSettings,
 }
@@ -104,7 +107,7 @@ pub enum ModelStatus {
     },
     Ready {
         model: ModelSpec,
-        /// Architecture reported by the engine, e.g. `parakeet-unified`.
+        /// GGUF `general.architecture`, e.g. `parakeet`.
         architecture: String,
         /// Whether live text comes from native streaming (true) or periodic
         /// re-decoding (false).
