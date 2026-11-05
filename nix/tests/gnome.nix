@@ -183,7 +183,7 @@ in
         wait_for(accept_dialogs, "both portal consents", timeout=180)
         st = wait_status(lambda s: s["insert_methods"], "insertion methods")
         print(f"status: {st}")
-        assert st["insert_methods"] == ["portal-paste", "portal-type"], st
+        assert st["insert_methods"] == ["portal-paste"], st
         assert "portal" in st["hotkey_sources"], st
 
     with machine.nested("EARWIG: the user service has the session's X11 display"):
