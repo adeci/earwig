@@ -48,7 +48,6 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     );
     let engine: Arc<dyn EngineFactory> = Arc::new(TranscribeEngine::new());
     let caps = desktop::probe();
-    log::debug!("desktop: {caps:?}");
     let inserter = insert::auto(&settings.insert, &caps).unwrap_or_else(|e| {
         log::warn!("no way to insert text in this session ({e:#}); dictations go to history");
         Box::new(Unavailable(format!("{e:#}")))
@@ -94,11 +93,9 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     server.serve(handle.clone())?;
     log::info!("listening on {}", socket.display());
 
-    let result = if headless {
-        Ok(())
-    } else {
-        crate::ui::run(handle.clone(), caps, open_settings)
-    };
+    if !headless {
+        crate::ui::run(handle.clone(), caps, open_settings);
+    }
     // Headless: wait for a Quit command. Either way, return only once the
     // controller has freed the model; GPU backends crash at process exit
     // while a model is alive.
@@ -108,7 +105,7 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     }
     while events.recv().is_ok() {}
     let _ = fs::remove_file(&socket);
-    result
+    Ok(())
 }
 
 /// Stand-in when no insertion backend works here: every dictation fails to
