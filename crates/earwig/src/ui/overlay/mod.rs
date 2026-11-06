@@ -857,6 +857,13 @@ impl OverlayView {
                             // Only the pill takes the pointer; everywhere
                             // else clicks reach whatever is below.
                             window.set_input_region(Some(&[bounds]));
+                            // With room for the shadow and the water, which
+                            // the region clips on Windows.
+                            #[cfg(windows)]
+                            crate::ui::platform::set_input_region(
+                                window,
+                                Some(bounds.dilate(px(INSET))),
+                            );
                             if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
                                 window.refresh();

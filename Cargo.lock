@@ -1658,6 +1658,7 @@ dependencies = [
  "ctrlc",
  "earwig-core",
  "earwig-transcribe",
+ "embed-resource",
  "env_logger",
  "flume",
  "futures-lite",
@@ -1670,6 +1671,7 @@ dependencies = [
  "tray-icon",
  "wayland-client",
  "wayland-protocols-wlr",
+ "windows-sys 0.61.2",
  "x11rb",
 ]
 
@@ -1715,6 +1717,14 @@ dependencies = [
  "flume",
  "log",
  "transcribe-cpp",
+]
+
+[[package]]
+name = "earwigw"
+version = "0.1.0"
+dependencies = [
+ "dirs 7.0.0",
+ "embed-resource",
 ]
 
 [[package]]

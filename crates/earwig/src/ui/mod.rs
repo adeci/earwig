@@ -8,7 +8,6 @@
 
 mod accent;
 mod drag;
-#[cfg(not(windows))]
 mod icon;
 mod overlay;
 mod pill;
@@ -34,13 +33,6 @@ const SUCCESS_FLASH: Duration = Duration::from_millis(350);
 const FAILURE_FLASH: Duration = Duration::from_millis(1800);
 
 /// Requests that do not come from the daemon (tray clicks).
-#[cfg_attr(
-    windows,
-    expect(
-        dead_code,
-        reason = "only the tray sends these, and Windows has none yet"
-    )
-)]
 enum Local {
     ShowSettings,
 }
@@ -53,7 +45,8 @@ pub(crate) enum OverlaySurface {
     #[cfg(target_os = "linux")]
     LayerShell,
     /// A borderless popup window that [`platform::Popup`] moves: an
-    /// override-redirect X11 window, through XWayland on GNOME.
+    /// override-redirect X11 window, through XWayland on GNOME; a
+    /// non-activating topmost tool window on Windows.
     Popup,
     /// Nothing suitable; showing a normal window would steal focus from the
     /// app the text is meant for, so no overlay.

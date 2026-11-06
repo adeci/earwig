@@ -1,4 +1,5 @@
-//! Small helpers for the Win32 calls of [`crate::ipc`] and [`crate::hooks`].
+//! Small helpers for the Win32 calls of [`crate::ipc`], [`crate::hooks`],
+//! [`crate::hotkey`] and [`crate::insert`].
 
 use std::ffi::OsStr;
 use std::io;
@@ -25,4 +26,12 @@ pub(crate) fn wide(s: &OsStr) -> Vec<u16> {
 pub(crate) fn is(err: &io::Error, code: u32) -> bool {
     err.raw_os_error()
         .is_some_and(|raw| u32::try_from(raw).is_ok_and(|raw| raw == code))
+}
+
+/// The scan code of virtual key `vk` on the current keyboard layout.
+pub(crate) fn scan_code(vk: u16) -> u16 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
+    // SAFETY: no preconditions.
+    let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
+    u16::try_from(scan).unwrap_or(0)
 }

@@ -11,12 +11,15 @@
 //!   `TrayHandle::set_state`.
 //! - `follow_accent(tx, cx)`: sends the desktop's accent colour, and every
 //!   change of it, to `tx`.
+//!
+//! Windows also has `set_input_region`, as GPUI does not implement
+//! `Window::set_input_region` there, and `autostart`/`set_autostart`.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 mod tray_icon;
 #[cfg(windows)]
 mod windows;
@@ -33,3 +36,5 @@ pub(crate) use os::usable_area;
 pub(crate) use os::{
     Popup, TrayHandle, application, follow_accent, home_display, overlay_surface, spawn_tray,
 };
+#[cfg(windows)]
+pub(crate) use os::{autostart, set_autostart, set_input_region};

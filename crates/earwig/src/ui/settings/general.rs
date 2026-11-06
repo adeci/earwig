@@ -43,8 +43,10 @@ pub fn page(pill: &Entity<PillPreview>, cx: &App) -> SettingPage {
         appearance(cx),
         overlay(pill, cx),
         history(cx),
-        hotkeys(),
+        hotkeys(cx),
     ]);
+    #[cfg(windows)]
+    groups.push(startup());
     SettingPage::new("General")
         .icon(IconName::Settings2)
         .default_open(true)
@@ -169,11 +171,17 @@ fn insertion(cx: &App) -> SettingGroup {
         "Insert method",
         &format!("How the final text reaches the focused app. Available here: {available}."),
         enum_dropdown(
+            #[cfg(target_os = "linux")]
             &[
                 (InsertSetting::Auto, "Automatic"),
                 (InsertSetting::InputMethod, "Input method"),
                 (InsertSetting::Paste, "Clipboard and paste"),
                 (InsertSetting::Portal, "Remote desktop portal"),
+            ],
+            #[cfg(not(target_os = "linux"))]
+            &[
+                (InsertSetting::Auto, "Automatic"),
+                (InsertSetting::Paste, "Clipboard and paste"),
             ],
             |c| c.insert.method,
             |c, v| c.insert.method = v,
@@ -322,58 +330,119 @@ fn history(cx: &App) -> SettingGroup {
 
 /// How the hotkey is bound on this desktop. earwig cannot bind keys itself
 /// on Wayland; the compositor (or the portal) sends it press and release.
-fn hotkeys() -> SettingGroup {
-    SettingGroup::new()
-        .title("Hotkey")
-        .item(SettingItem::render(|_, _, cx| {
-            let desktop = UiState::caps(cx).desktop.clone();
-            let sources = UiState::status(cx).hotkey_sources.join(", ");
-            let trigger = config(UiState::handle(cx)).hotkey.portal_trigger;
-            let muted = cx.theme().muted_foreground;
-            let (intro, snippet) = hotkey_help(&desktop, &trigger);
-            v_flex()
-                .w_full()
-                .gap_2()
-                .text_sm()
-                .child(intro)
-                .when_some(snippet, |this, snippet| {
-                    this.child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .gap_2()
-                            .p_2()
-                            .rounded(px(6.))
-                            .bg(cx.theme().muted)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_xs()
-                                    .child(snippet.clone()),
-                            )
-                            .child(
-                                Clipboard::new("copy-hotkey-snippet")
-                                    .tooltip("Copy")
-                                    .value(snippet),
-                            ),
-                    )
-                })
-                .when(!sources.is_empty(), |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("Listening on: {sources}")),
-                    )
-                })
-        }))
+/// On Windows earwig watches the key itself.
+#[cfg_attr(
+    not(windows),
+    expect(unused_variables, reason = "only Windows picks the key here")
+)]
+fn hotkeys(cx: &App) -> SettingGroup {
+    let group = SettingGroup::new().title("Hotkey");
+    #[cfg(windows)]
+    let group = group.item(item(
+        cx,
+        "hotkey.key",
+        "Key",
+        "The key to hold or tap.",
+        key_dropdown(cx),
+    ));
+    group.item(SettingItem::render(|_, _, cx| {
+        let desktop = UiState::caps(cx).desktop.clone();
+        let sources = UiState::status(cx).hotkey_sources.join(", ");
+        let trigger = config(UiState::handle(cx)).hotkey.portal_trigger;
+        let muted = cx.theme().muted_foreground;
+        let (intro, snippet) = hotkey_help(&desktop, &trigger);
+        v_flex()
+            .w_full()
+            .gap_2()
+            .text_sm()
+            .child(intro)
+            .when_some(snippet, |this, snippet| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap_2()
+                        .p_2()
+                        .rounded(px(6.))
+                        .bg(cx.theme().muted)
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_xs()
+                                .child(snippet.clone()),
+                        )
+                        .child(
+                            Clipboard::new("copy-hotkey-snippet")
+                                .tooltip("Copy")
+                                .value(snippet),
+                        ),
+                )
+            })
+            .when(!sources.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("Listening on: {sources}")),
+                )
+            })
+    }))
+}
+
+/// A few keys that do nothing on their own in Windows, and whatever key is
+/// configured besides.
+#[cfg(windows)]
+fn key_dropdown(cx: &App) -> SettingField<SharedString> {
+    let mut options: Vec<(SharedString, SharedString)> = [
+        ("RightCtrl", "Right Ctrl"),
+        ("RightAlt", "Right Alt"),
+        ("RightShift", "Right Shift"),
+        ("Ctrl+Space", "Ctrl+Space"),
+        ("Ctrl+Alt+Space", "Ctrl+Alt+Space"),
+    ]
+    .into_iter()
+    .map(|(key, label)| (key.into(), label.into()))
+    .collect();
+    let key = config(UiState::handle(cx)).hotkey.key;
+    if !options.iter().any(|(id, _)| id.as_ref() == key) {
+        options.push((key.clone().into(), key.into()));
+    }
+    SettingField::dropdown(
+        options,
+        |cx: &App| config(UiState::handle(cx)).hotkey.key.into(),
+        |key: SharedString, cx: &mut App| edit_config(cx, |c| c.hotkey.key = key.to_string()),
+    )
+}
+
+/// Starting with the session: the per-user sign-in entry on Windows.
+#[cfg(windows)]
+fn startup() -> SettingGroup {
+    SettingGroup::new().title("Startup").item(SettingItem::new(
+        "Start at sign-in",
+        SettingField::switch(
+            |_: &App| crate::ui::platform::autostart(),
+            |enabled, cx: &mut App| {
+                if let Err(e) = crate::ui::platform::set_autostart(enabled) {
+                    log::error!("{e:#}");
+                }
+                cx.refresh_windows();
+            },
+        ),
+    ))
 }
 
 fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
     let desktops: Vec<&str> = desktop.split(':').collect();
     let is = |name: &str| desktops.iter().any(|d| d.eq_ignore_ascii_case(name));
-    if is("niri") {
+    if is("windows") {
+        (
+            "Hold the key to talk, or tap it to keep listening until the next tap. \
+             With another key it is still a shortcut (Right Ctrl+C copies)."
+                .into(),
+            None,
+        )
+    } else if is("niri") {
         (
             "Add this to the binds section of ~/.config/niri/config.kdl:".into(),
             Some(

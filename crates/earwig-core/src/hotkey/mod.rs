@@ -9,8 +9,8 @@
 //!   `press {}`/`release {}`, sway `bindsym --release`, Hyprland `bindr`).
 //! - Linux: the XDG GlobalShortcuts portal (GNOME 48+, KDE).
 //!   `Activated`/`Deactivated` map to press/release.
-//! - macOS, Windows: no global hotkey of their own yet; the socket is the
-//!   only source. They will watch [`HotkeyConfig::key`].
+//! - Windows: a low-level keyboard hook watching [`HotkeyConfig::key`].
+//! - macOS: no global hotkey of its own yet; the socket is the only source.
 //!
 //! Each OS module provides `sources(config, caps)` and `configure(config)`.
 
@@ -22,6 +22,8 @@ mod linux;
 mod macos;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+pub(crate) use windows::INJECTED;
 
 #[cfg(target_os = "linux")]
 use linux as os;

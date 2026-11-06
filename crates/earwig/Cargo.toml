@@ -1,6 +1,6 @@
 [package]
 name = "earwig"
-description = "Local, instant dictation for Linux desktops"
+description = "Local, instant dictation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -31,6 +31,14 @@ x11rb.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
+tray-icon.workspace = true
+windows-sys.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
 
 [lints]
 workspace = true
