@@ -1,5 +1,6 @@
 {
   lib,
+  stdenv,
   craneLib,
   cmake,
   pkg-config,
@@ -20,8 +21,10 @@
   libxcursor,
   libxi,
   libxrandr,
+  apple-sdk_15,
 }:
 let
+  inherit (stdenv.hostPlatform) isLinux;
   root = ./..;
   src = lib.fileset.toSource {
     inherit root;
@@ -36,7 +39,7 @@ let
 
   # GPUI and the Vulkan loader are dlopen'd; dlopen ignores buildInputs, so
   # these go into RUNPATH after fixup.
-  runtimeLibs = [
+  runtimeLibs = lib.optionals isLinux [
     vulkan-loader
     wayland
     libxkbcommon
@@ -55,17 +58,23 @@ let
     strictDeps = true;
     nativeBuildInputs = [
       cmake
+    ]
+    ++ lib.optionals isLinux [
       pkg-config
       shaderc
     ];
-    buildInputs = [
-      spirv-headers
-      vulkan-headers
-      alsa-lib
-      fontconfig
-      freetype
-    ]
-    ++ runtimeLibs;
+    buildInputs =
+      if isLinux then
+        [
+          spirv-headers
+          vulkan-headers
+          alsa-lib
+          fontconfig
+          freetype
+        ]
+        ++ runtimeLibs
+      else
+        [ apple-sdk_15 ];
     # transcribe.cpp is built through the `cmake` crate, not by a cmake
     # configure phase.
     dontUseCmakeConfigure = true;
@@ -81,22 +90,22 @@ craneLib.buildPackage (
     # Workspace tests run as the `tests` flake check, sharing cargoArtifacts.
     doCheck = false;
 
-    nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ addDriverRunpath ];
+    nativeBuildInputs = commonArgs.nativeBuildInputs ++ lib.optionals isLinux [ addDriverRunpath ];
 
-    postInstall = ''
+    postInstall = lib.optionalString isLinux ''
       install -Dm644 assets/io.github.adeci.earwig.desktop \
         $out/share/applications/io.github.adeci.earwig.desktop
       install -Dm644 assets/io.github.adeci.earwig.svg \
         $out/share/icons/hicolor/scalable/apps/io.github.adeci.earwig.svg
     '';
 
-    postFixup = ''
+    postFixup = lib.optionalString isLinux ''
       patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/earwig
       addDriverRunpath $out/bin/earwig
     '';
 
     passthru = {
-      inherit cargoArtifacts commonArgs;
+      inherit cargoArtifacts commonArgs runtimeLibs;
       tests = {
         clippy = craneLib.cargoClippy (
           commonArgs
@@ -119,11 +128,11 @@ craneLib.buildPackage (
     };
 
     meta = {
-      description = "Local, instant dictation for Linux desktops";
+      description = "Local, instant dictation";
       homepage = "https://github.com/adeci/earwig";
       license = lib.licenses.mit;
       mainProgram = "earwig";
-      platforms = lib.platforms.linux;
+      platforms = lib.platforms.linux ++ lib.platforms.darwin;
     };
   }
 )

@@ -1,5 +1,5 @@
 {
-  description = "earwig: local, instant dictation for Linux desktops";
+  description = "earwig: local, instant dictation";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -22,6 +22,7 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       treefmt = forAllSystems (pkgs: treefmt-nix.lib.evalModule pkgs ./nix/treefmt.nix);
@@ -60,7 +61,7 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.callPackage ./nix/devshell.nix {
           craneLib = crane.mkLib pkgs;
-          earwig = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          earwig = self.packages.${pkgs.stdenv.hostPlatform.system}.earwig;
         };
       });
 
