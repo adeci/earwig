@@ -70,7 +70,7 @@ const DISCARD_SIZE: f32 = 24.;
 const SPEAKING_REACH: f32 = 0.35;
 const HEADER_HEIGHT: f32 = 22.;
 const PADDING_X: f32 = 18.;
-const PADDING_Y: f32 = 14.;
+const PADDING_Y: f32 = 18.;
 const GAP: f32 = 8.;
 
 /// Open the overlay's window at home.

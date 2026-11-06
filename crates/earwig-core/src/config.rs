@@ -150,7 +150,7 @@ pub struct OverlayConfig {
     pub max_lines: u32,
     pub style: OverlayStyle,
     /// How far the voice moves the pill (bar height or wave amplitude): 0
-    /// is still, 1 the default, up to [`OverlayConfig::MAX_MOTION`].
+    /// is still, up to [`OverlayConfig::MAX_MOTION`].
     #[serde(serialize_with = "short_float")]
     pub motion: f32,
     /// Opacity of the pill's fill (and the depth of its shadow), from
@@ -173,6 +173,7 @@ fn short_float<S: serde::Serializer>(value: &f32, serializer: S) -> Result<S::Ok
 
 impl OverlayConfig {
     pub const MAX_MOTION: f32 = 2.;
+    pub const DEFAULT_MOTION: f32 = 0.8;
     pub const DEFAULT_OPACITY: f32 = 0.97;
     pub const MIN_OPACITY: f32 = 0.3;
     pub const MAX_BORDER: f32 = 3.;
@@ -180,7 +181,7 @@ impl OverlayConfig {
     /// `motion` within its range; an unreadable value means the default.
     pub fn motion(&self) -> f32 {
         if self.motion.is_nan() {
-            1.
+            Self::DEFAULT_MOTION
         } else {
             self.motion.clamp(0., Self::MAX_MOTION)
         }
@@ -212,7 +213,7 @@ impl Default for OverlayConfig {
             position: OverlayPosition::Bottom,
             max_lines: 3,
             style: OverlayStyle::default(),
-            motion: 1.,
+            motion: Self::DEFAULT_MOTION,
             opacity: Self::DEFAULT_OPACITY,
             border: 0.,
         }
@@ -508,7 +509,7 @@ mod tests {
         let (_dir, mut store) = store("", "");
         let overlay = &store.config().overlay;
         assert_eq!(overlay.style, OverlayStyle::Wave);
-        assert!((overlay.motion() - 1.).abs() < f32::EPSILON);
+        assert!((overlay.motion() - OverlayConfig::DEFAULT_MOTION).abs() < f32::EPSILON);
         assert!((overlay.opacity() - 0.97).abs() < f32::EPSILON);
         assert!(overlay.border().abs() < f32::EPSILON, "borderless");
         store

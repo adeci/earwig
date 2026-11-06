@@ -38,6 +38,9 @@ const SHADOW_BLUR: f32 = 12.;
 /// Pixels a full wave moves the edge at motion 1; the water's heights are
 /// eased into this with `tanh`, so crests stay round and within reach.
 const DEPTH: f32 = 10.;
+/// Troughs sink this fraction as deep as crests rise, so a dip never
+/// crowds the text inside the pill.
+const TROUGH: f32 = 0.4;
 
 /// Seconds colours take to settle (theme or accent changes).
 const FADE: f32 = 0.18;
@@ -212,7 +215,10 @@ impl Edge {
         if depth <= 0. || water.rests() {
             return Edge::default();
         }
-        let offsets = water.surface().map(|h| depth * h.tanh());
+        let offsets = water.surface().map(|h| {
+            let offset = depth * h.tanh();
+            if offset < 0. { offset * TROUGH } else { offset }
+        });
         let inward = offsets.iter().fold(0_f32, |low, &o| low.min(o));
         Edge {
             offsets,
