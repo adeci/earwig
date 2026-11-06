@@ -20,6 +20,7 @@ pub struct Config {
     pub audio: AudioConfig,
     pub model: ModelConfig,
     pub insert: InsertConfig,
+    pub appearance: AppearanceConfig,
     pub overlay: OverlayConfig,
     pub history: HistoryConfig,
     pub hooks: HooksConfig,
@@ -119,6 +120,22 @@ pub struct InsertConfig {
     /// Extra app ids treated as terminals (Ctrl+Shift+V) on top of the
     /// built-in list.
     pub terminals: Vec<String>,
+}
+
+/// The colours of earwig's own windows (the settings window and the
+/// overlay), whatever the desktop's light or dark preference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeSetting {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppearanceConfig {
+    pub theme: ThemeSetting,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,5 +572,22 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert!(unreadable.border().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn theme_defaults_to_dark_round_trips_and_rejects_unknown() {
+        let (_dir, mut store) = store("", "");
+        assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
+        store
+            .update(|c| c.appearance.theme = ThemeSetting::Light)
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[appearance]\ntheme = \"light\"");
+        let (_dir, reloaded) = self::store(&written, "");
+        assert_eq!(reloaded.config().appearance.theme, ThemeSetting::Light);
+
+        let (_dir, store) = self::store("[appearance]\ntheme = \"system\"\n", "");
+        assert!(store.user_error().is_some());
+        assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
     }
 }

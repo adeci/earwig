@@ -297,8 +297,9 @@ pub struct Look {
 }
 
 impl Look {
-    /// The overlay's look at fill `opacity`: Tokyo Night charcoal in dark
-    /// mode, the theme's background in light mode, accent bars and border.
+    /// The overlay's look at fill `opacity`: Tokyo Night charcoal in the
+    /// dark theme (the default), the theme's background in the light one,
+    /// accent bars and border.
     /// The shadow fades with the fill; bars and border stay put.
     pub fn themed(theme: &Theme, accent: Hsla, opacity: f32, border: f32) -> Look {
         let dark = theme.is_dark();

@@ -377,7 +377,10 @@ mod tests {
         };
         let (a, b) = (surface(1), surface(2));
         let peak = a.iter().fold(0_f32, |m, h| m.max(h.abs()));
-        let apart = a.iter().zip(&b).fold(0_f32, |m, (x, y)| m.max((x - y).abs()));
+        let apart = a
+            .iter()
+            .zip(&b)
+            .fold(0_f32, |m, (x, y)| m.max((x - y).abs()));
         assert!(apart > 0.1 * peak, "{apart} apart, peak {peak}");
         for h in [a, b] {
             for run in [0, HALF] {

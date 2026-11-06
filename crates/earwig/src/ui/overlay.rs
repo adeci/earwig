@@ -27,8 +27,8 @@ use gpui_kit::{
     Entity, FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, PlatformDisplay, Point, Render, Size, StatefulInteractiveElement as _, Styled as _,
-    StyledText, Subscription, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
+    StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
 use crate::ui::drag::{Drag, Grab, Pointer};
@@ -86,7 +86,6 @@ pub fn open(
     // inputs or popovers that need one.
     let mut view = None;
     let handle = cx.open_window(options, |window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
         // Click-through until the pill is painted and takes its own bounds.
         window.set_input_region(Some(&[]));
         let root = cx.new(|cx| OverlayView::new(config, surface, voice, window, cx));
@@ -430,8 +429,6 @@ pub struct OverlayView {
     /// closes with the drag surface.
     left_behind: Option<AnyWindowHandle>,
     painted: Painted,
-    /// Follows the system appearance through the resting window.
-    appearance: Subscription,
 }
 
 /// The pill's bounds as last painted in a resting window, and which one:
@@ -509,7 +506,6 @@ impl OverlayView {
             drag_window: None,
             left_behind: None,
             painted: Rc::default(),
-            appearance: observe_appearance(window, cx),
         }
     }
 
@@ -808,11 +804,8 @@ impl OverlayView {
         let options = moved_window_options(self.position, origin, window, area.size);
         let overlay = cx.entity();
         cx.defer(move |cx| {
-            let opened = cx.open_window(options, |window, cx| {
+            let opened = cx.open_window(options, |window, _| {
                 window.set_input_region(Some(&[]));
-                overlay.update(cx, |view, cx| {
-                    view.appearance = observe_appearance(window, cx);
-                });
                 overlay.clone()
             });
             overlay.update(cx, |view, cx| match opened {
@@ -1139,12 +1132,6 @@ fn after_present<V: 'static>(
         })
         .detach();
     });
-}
-
-fn observe_appearance(window: &mut Window, cx: &mut Context<OverlayView>) -> Subscription {
-    cx.observe_window_appearance(window, |_, window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
-    })
 }
 
 /// Root of the drag surface: the pill at its spot on the usable area, drawn

@@ -1,8 +1,11 @@
-//! General settings: activation, audio, insertion, overlay, history, hotkeys.
+//! General settings: activation, audio, insertion, appearance, overlay,
+//! history, hotkeys.
 
 use std::sync::PoisonError;
 
-use earwig_core::config::{ActivationMode, Config, InsertSetting, OverlayPosition, OverlayStyle};
+use earwig_core::config::{
+    ActivationMode, Config, InsertSetting, OverlayPosition, OverlayStyle, ThemeSetting,
+};
 use earwig_core::events::InsertMethod;
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::setting::{
@@ -15,7 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::ui::settings::pill_preview::{Knob, PillPreview};
-use crate::ui::{UiState, config, edit_config};
+use crate::ui::{UiState, apply_theme, config, edit_config};
 
 const LOCKED_HINT: &str = "Set by system configuration.";
 
@@ -37,6 +40,7 @@ pub fn page(pill: &Entity<PillPreview>, cx: &App) -> SettingPage {
         activation(cx),
         audio(cx),
         insertion(cx),
+        appearance(cx),
         overlay(pill, cx),
         history(cx),
         hotkeys(),
@@ -183,6 +187,23 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
         InsertMethod::Paste => "paste",
         InsertMethod::PortalPaste => "portal paste",
     }
+}
+
+fn appearance(cx: &App) -> SettingGroup {
+    SettingGroup::new().title("Appearance").item(item(
+        cx,
+        "appearance.theme",
+        "Theme",
+        "Colours of this window and the overlay, whatever the desktop uses.",
+        enum_dropdown_with(
+            &[(ThemeSetting::Dark, "Dark"), (ThemeSetting::Light, "Light")],
+            |c| c.appearance.theme,
+            |theme, cx| {
+                edit_config(cx, |c| c.appearance.theme = theme);
+                apply_theme(cx);
+            },
+        ),
+    ))
 }
 
 fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {

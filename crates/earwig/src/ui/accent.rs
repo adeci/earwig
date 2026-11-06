@@ -1,6 +1,6 @@
 //! The desktop's accent colour, `org.freedesktop.appearance accent-color`
-//! from the XDG Settings portal. Dark or light comes from GPUI itself, which
-//! follows the portal's `color-scheme`.
+//! from the XDG Settings portal. Dark or light is earwig's own
+//! `[appearance] theme`, not the desktop's `color-scheme`.
 
 use ashpd::desktop::Color;
 use ashpd::desktop::settings::Settings;
