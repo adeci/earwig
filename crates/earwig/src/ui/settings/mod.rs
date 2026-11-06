@@ -28,7 +28,33 @@ pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
         window.set_window_title("earwig settings");
         cx.new(|cx| SettingsView::new(window, cx))
     })?;
+    #[cfg(target_os = "macos")]
+    follow_permissions(window, cx);
     Ok(window)
+}
+
+/// Permissions are granted in System Settings, not here: re-render the
+/// window when one changes, for as long as it is open.
+#[cfg(target_os = "macos")]
+fn follow_permissions(window: AnyWindowHandle, cx: &App) {
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+    cx.spawn(async move |cx| {
+        let mut last = earwig_core::permissions::check();
+        loop {
+            cx.background_executor().timer(EVERY).await;
+            let now = earwig_core::permissions::check();
+            let open = if now == last {
+                cx.update(|cx| window.update(cx, |_, _, _| ()).is_ok())
+            } else {
+                last = now;
+                cx.update(|cx| window.update(cx, |_, window, _| window.refresh()).is_ok())
+            };
+            if !open {
+                break;
+            }
+        }
+    })
+    .detach();
 }
 
 struct SettingsView {
