@@ -30,6 +30,7 @@ stdenvNoCC.mkDerivation {
     done
     png2icns $app/Contents/Resources/earwig.icns icon_*.png
     # No certificate: an ad-hoc signature, sealing Info.plist and resources.
+    chmod -R u+w $app
     rcodesign sign $app
     ln -s ../Applications/earwig.app/Contents/MacOS/earwig $out/bin/earwig
     runHook postInstall
