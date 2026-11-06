@@ -160,7 +160,13 @@ impl ModelManager {
 
     fn installed_model(&self, root: &Path, path: PathBuf, system: bool) -> Option<InstalledModel> {
         let rel = path.strip_prefix(root).ok()?.to_str()?;
-        if !hub::is_gguf(rel) {
+        // Specs name files with `/` on every OS.
+        let rel: std::borrow::Cow<str> = if cfg!(windows) {
+            rel.replace('\\', "/").into()
+        } else {
+            rel.into()
+        };
+        if !hub::is_gguf(&rel) {
             return None;
         }
         let mut parts = rel.splitn(4, '/');

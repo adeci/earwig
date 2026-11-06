@@ -340,7 +340,10 @@ pub(crate) fn user_sid() -> io::Result<String> {
     }
     // SAFETY: a NUL-terminated string from ConvertSidToStringSidW.
     let sid = unsafe {
-        let len = (0..).take_while(|&i| *string.add(i) != 0).count();
+        let mut len = 0;
+        while *string.add(len) != 0 {
+            len += 1;
+        }
         String::from_utf16_lossy(std::slice::from_raw_parts(string, len))
     };
     // SAFETY: allocated by ConvertSidToStringSidW.

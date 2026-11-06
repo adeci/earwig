@@ -52,10 +52,6 @@ pub(crate) enum OverlaySurface {
     LayerShell,
     /// A borderless popup window that [`platform::Popup`] moves: an
     /// override-redirect X11 window, through XWayland on GNOME.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(dead_code, reason = "no overlay on macOS and Windows yet")
-    )]
     Popup,
     /// Nothing suitable; showing a normal window would steal focus from the
     /// app the text is meant for, so no overlay.

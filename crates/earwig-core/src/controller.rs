@@ -1047,7 +1047,7 @@ mod tests {
             fs::write(
                 &system,
                 format!(
-                    "[hotkey]\nhold_threshold_ms = 150\n[model]\nmodel = \"{}\"\n",
+                    "[hotkey]\nhold_threshold_ms = 150\n[model]\nmodel = '{}'\n",
                     model.display()
                 ),
             )
@@ -1232,7 +1232,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = dir.path().join("fake.gguf");
         fs::write(&model, b"").unwrap();
-        let user = format!("[model]\nmodel = \"{}\"\n", model.display());
+        let user = format!("[model]\nmodel = '{}'\n", model.display());
         fs::write(dir.path().join("user.toml"), user).unwrap();
         let gone = dir.path().join("gone.gguf");
         let d = Daemon::spawn(dir, Vec::new(), false);
