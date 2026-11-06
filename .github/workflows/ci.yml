@@ -18,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        # macos-latest is Apple silicon; GitHub no longer accepts macos-14.
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
