@@ -29,7 +29,8 @@ jobs:
           components: clippy, rustfmt
 
       # transcribe.cpp builds its Vulkan backend from source: CMake needs
-      # glslc and the headers, and the binaries link vulkan-1.lib. The
+      # glslc and the headers, and the binaries link vulkan-1.lib (found
+      # through VULKAN_SDK by earwig-transcribe's build script). The
       # runtime (vulkan-1.dll) lets the tests start on a runner without a
       # GPU driver; they fall back to the CPU.
       - name: Install the Vulkan SDK
@@ -38,11 +39,6 @@ jobs:
         with:
           install_runtime: true
           cache: true
-
-      - name: Put the Vulkan loader on the link path
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: echo "LIB=$env:VULKAN_SDK\Lib;$env:LIB" >> $env:GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
 

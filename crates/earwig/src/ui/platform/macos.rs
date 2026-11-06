@@ -4,7 +4,7 @@
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::DictationState;
-use gpui_kit::{App, Application, Hsla, Pixels, Point, Window};
+use gpui_kit::{App, Application, Hsla, Pixels, PlatformDisplay, Point, Window};
 
 use crate::ui::{Local, OverlaySurface};
 
@@ -49,3 +49,7 @@ pub(crate) fn spawn_tray(_handle: Handle, _local: flume::Sender<Local>) -> Optio
 
 /// No accent colour on macOS yet: the feed ends at once.
 pub(crate) fn follow_accent(_tx: &flume::Sender<Option<Hsla>>, _cx: &App) {}
+
+pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>> {
+    cx.primary_display()
+}

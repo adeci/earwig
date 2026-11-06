@@ -8,6 +8,8 @@
 
 mod accent;
 mod drag;
+#[cfg(not(target_os = "macos"))]
+mod icon;
 mod overlay;
 mod pill;
 mod platform;
@@ -33,10 +35,10 @@ const FAILURE_FLASH: Duration = Duration::from_millis(1800);
 
 /// Requests that do not come from the daemon (tray clicks).
 #[cfg_attr(
-    not(target_os = "linux"),
+    target_os = "macos",
     expect(
         dead_code,
-        reason = "only the tray sends these, and only Linux has one yet"
+        reason = "only the tray sends these, and macOS has none yet"
     )
 )]
 enum Local {
@@ -51,7 +53,8 @@ pub(crate) enum OverlaySurface {
     #[cfg(target_os = "linux")]
     LayerShell,
     /// A borderless popup window that [`platform::Popup`] moves: an
-    /// override-redirect X11 window, through XWayland on GNOME.
+    /// override-redirect X11 window, through XWayland on GNOME; a
+    /// non-activating topmost tool window on Windows.
     Popup,
     /// Nothing suitable; showing a normal window would steal focus from the
     /// app the text is meant for, so no overlay.
@@ -63,7 +66,6 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
     let events = handle.subscribe();
     let voice = handle.spectrum();
     let (local_tx, local_rx) = flume::unbounded();
-    let tray = platform::spawn_tray(handle.clone(), local_tx);
     let surface = platform::overlay_surface(&caps);
 
     platform::application(surface, &caps)
@@ -71,6 +73,8 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            // Inside the application: some trays need its run loop.
+            let tray = platform::spawn_tray(handle.clone(), local_tx);
             accent::watch(cx);
             if surface == OverlaySurface::None {
                 log::warn!(

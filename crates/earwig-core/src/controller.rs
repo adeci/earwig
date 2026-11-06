@@ -896,6 +896,9 @@ impl Controller {
         let config = self.config();
         self.session
             .configure(config.hotkey.mode, config.hotkey.hold_threshold_ms);
+        if let Err(e) = crate::hotkey::configure(&config.hotkey) {
+            self.error(format!("hotkey: {e}"));
+        }
         if config.audio != self.audio_config {
             if let Some(capture) = &self.capture {
                 capture.configure(config.audio.clone());

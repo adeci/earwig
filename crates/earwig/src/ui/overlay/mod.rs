@@ -81,7 +81,8 @@ pub fn open(
     voice: Feed,
     cx: &mut App,
 ) -> anyhow::Result<Entity<OverlayView>> {
-    let options = home_window_options(surface, config, cx.primary_display().as_deref());
+    let display = crate::ui::platform::home_display(cx);
+    let options = home_window_options(surface, config, display.as_deref());
     // No Base root: it paints an opaque background, and the overlay has no
     // inputs or popovers that need one.
     let mut view = None;
@@ -99,7 +100,7 @@ pub fn open(
 
 /// Window options for the overlay at home, the one place the platform
 /// choice is made: a layer surface (see `layer_shell.rs`), or else a
-/// borderless popup centred on the primary display.
+/// borderless popup centred on the display the platform picks.
 #[cfg_attr(
     not(target_os = "linux"),
     expect(
@@ -119,7 +120,7 @@ fn home_window_options(
     }
     let origin = display.map_or(point(px(0.), px(0.)), |display| {
         popup_origin(
-            home_spot(display.bounds(), config.position),
+            home_spot(display.visible_bounds(), config.position),
             window_size,
             config.position,
         )
@@ -558,11 +559,11 @@ impl OverlayView {
     }
 
     /// The area the pill moves on: the output's usable area for layer-shell
-    /// (the frame of every overlay surface there), the screen for the
-    /// popup.
+    /// (the frame of every overlay surface there), the screen less its
+    /// panels for the popup.
     fn area(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
         if self.popup.is_some() {
-            window.display(cx).map(|display| display.bounds())
+            window.display(cx).map(|display| display.visible_bounds())
         } else {
             self.usable.map(|area| Bounds::new(Point::default(), area))
         }
@@ -856,6 +857,13 @@ impl OverlayView {
                             // Only the pill takes the pointer; everywhere
                             // else clicks reach whatever is below.
                             window.set_input_region(Some(&[bounds]));
+                            // With room for the shadow and the water, which
+                            // the region clips on Windows.
+                            #[cfg(windows)]
+                            crate::ui::platform::set_input_region(
+                                window,
+                                Some(bounds.dilate(px(INSET))),
+                            );
                             if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
                                 window.refresh();
