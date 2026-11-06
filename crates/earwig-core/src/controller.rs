@@ -624,6 +624,7 @@ impl Controller {
             Command::Release => self.input(Input::Release),
             Command::Toggle => self.input(Input::Toggle),
             Command::Cancel => self.input(Input::Cancel),
+            Command::Chord => self.input(Input::Chord),
             Command::ShowSettings => self.publish(&Event::ShowSettings),
             Command::ReloadConfig => self.reload_config(),
             Command::UseModel { model } => self.use_model(&model),

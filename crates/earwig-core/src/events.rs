@@ -15,6 +15,11 @@ pub enum Command {
     Toggle,
     /// Drop the current recording without inserting anything.
     Cancel,
+    /// The held hotkey turned out to be part of a key combination (a bare
+    /// modifier trigger such as Right Command, chorded with another key):
+    /// a recording its press started is dropped, a latched one it stopped
+    /// still finishes, and its release is ignored.
+    Chord,
     ShowSettings,
     /// Reply with one [`Event::Status`].
     Status,
