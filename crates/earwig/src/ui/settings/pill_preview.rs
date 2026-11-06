@@ -1,10 +1,12 @@
-//! The overlay pill's motion and opacity settings: their sliders and a small
-//! pill that shows the result, wobbling while the motion slider moves.
+//! The overlay pill's look settings: the sliders for motion, opacity and
+//! border, and a small pill that shows the result, speaking while the
+//! motion or the style changes.
 
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
-use earwig_core::config::{Config, OverlayConfig};
+use earwig_core::config::{Config, OverlayConfig, OverlayStyle};
+use earwig_core::spectrum::{BANDS, Spectrum};
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{
@@ -13,24 +15,25 @@ use gpui_kit::{
     point, px, size,
 };
 
-use crate::ui::pill::{self, Clock, Edge, Look, Motion};
+use crate::ui::pill::{self, Clock, Look, Motion, Shape};
 use crate::ui::{UiState, accent, config, edit_config};
 
 /// The preview is the overlay's pill at this size.
 const SCALE: f32 = 0.5;
 const PILL_WIDTH: f32 = 120.;
 const PILL_HEIGHT: f32 = 30.;
-/// Checkered backdrop around the preview pill, so its transparency shows;
-/// wide enough for the edge at the wildest motion.
+/// Checkered backdrop around the preview pill, so its transparency shows,
+/// with room above and below for the bars or the edge at the widest motion.
 const CARD_MARGIN: f32 = 12.;
+const CARD_MARGIN_Y: f32 = pill::MAX_REACH * SCALE + 1.;
 const CARD_WIDTH: f32 = PILL_WIDTH + 2. * CARD_MARGIN;
-const CARD_HEIGHT: f32 = PILL_HEIGHT + 2. * CARD_MARGIN;
+const CARD_HEIGHT: f32 = PILL_HEIGHT + 2. * CARD_MARGIN_Y;
 const CHECKER: f32 = 6.;
 const SLIDER_WIDTH: f32 = 180.;
-/// Same pacing as the overlay while the voice moves its edge.
+/// Same pacing as the overlay while the voice moves the pill.
 const FRAME: Duration = Duration::from_millis(16);
-/// The preview keeps speaking this long after the motion slider last moved,
-/// which bridges the gaps between pointer events of one drag.
+/// The preview keeps speaking this long after the motion slider or style
+/// last changed, which bridges the gaps between pointer events of one drag.
 const HOLD: Duration = Duration::from_millis(150);
 /// Unscaled reach below which the preview counts as still: under a third of
 /// a preview pixel.
@@ -45,14 +48,17 @@ const SYLLABLE_RATE: f32 = 4.5;
 pub enum Knob {
     Motion,
     Opacity,
+    Border,
 }
 
 pub struct PillPreview {
+    style: OverlayStyle,
     motion: Dial,
     opacity: Dial,
-    wobble: Wobble,
+    border: Dial,
+    demo: Demo,
     frame_pending: bool,
-    _sliders: [Subscription; 2],
+    _sliders: [Subscription; 3],
 }
 
 /// A slider, its value as of the last change seen, and the pending write.
@@ -67,38 +73,51 @@ impl PillPreview {
         let overlay = config(UiState::handle(cx)).overlay;
         let motion = Dial::new(0., OverlayConfig::MAX_MOTION, 0.1, overlay.motion(), cx);
         let opacity = Dial::new(OverlayConfig::MIN_OPACITY, 1., 0.01, overlay.opacity(), cx);
+        let border = Dial::new(0., OverlayConfig::MAX_BORDER, 0.5, overlay.border(), cx);
         // Observed rather than subscribed: assistive-technology steps change
         // the value without emitting an event.
         let sliders = [
             cx.observe(&motion.state, |this, _, cx| {
                 if let Some(value) = this.motion.changed(|c, v| c.overlay.motion = v, cx) {
-                    this.wobble.nudge(value, Instant::now());
+                    this.demo.nudge(value, Instant::now());
                 }
             }),
             cx.observe(&opacity.state, |this, _, cx| {
                 this.opacity.changed(|c, v| c.overlay.opacity = v, cx);
             }),
+            cx.observe(&border.state, |this, _, cx| {
+                this.border.changed(|c, v| c.overlay.border = v, cx);
+            }),
         ];
         Self {
-            wobble: Wobble::new(motion.value),
+            style: overlay.style,
+            demo: Demo::new(overlay.style, motion.value),
             motion,
             opacity,
+            border,
             frame_pending: false,
             _sliders: sliders,
         }
     }
 
+    /// The style select changed: show the new style speaking.
+    pub fn set_style(&mut self, style: OverlayStyle, cx: &mut Context<Self>) {
+        self.style = style;
+        self.demo.motion.set_style(style);
+        self.demo.nudge(self.motion.value, Instant::now());
+        cx.notify();
+    }
+
     /// A setting row's control: the knob's slider, with the preview beside
-    /// the motion slider and room for it beside the opacity one, so the
-    /// sliders line up.
+    /// the motion slider and room for it beside the others, so the sliders
+    /// line up.
     pub fn field(view: &Entity<Self>, knob: Knob, disabled: bool, cx: &App) -> Div {
         let this = view.read(cx);
+        let spacer = || div().w(px(CARD_WIDTH)).into_any_element();
         let (slider, beside) = match knob {
             Knob::Motion => (&this.motion.state, view.clone().into_any_element()),
-            Knob::Opacity => (
-                &this.opacity.state,
-                div().w(px(CARD_WIDTH)).into_any_element(),
-            ),
+            Knob::Opacity => (&this.opacity.state, spacer()),
+            Knob::Border => (&this.border.state, spacer()),
         };
         h_flex()
             .gap_4()
@@ -165,21 +184,21 @@ impl Dial {
 
 impl Render for PillPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let edge = if pill::holds_still(window, cx) {
-            self.wobble.settle();
-            Edge::default()
+        let shape = if pill::holds_still(window, cx) {
+            self.demo.settle();
+            Shape::still(self.style)
         } else {
-            match self.wobble.frame(Instant::now()) {
-                Some(edge) => {
+            match self.demo.frame(Instant::now()) {
+                Some(shape) => {
                     self.schedule_frame(cx);
-                    edge
+                    shape
                 }
-                None => Edge::default(),
+                None => Shape::still(self.style),
             }
         };
         let theme = cx.theme();
         let accent = accent::get(cx).unwrap_or(theme.primary);
-        let look = Look::themed(theme, accent, self.opacity.value);
+        let look = Look::themed(theme, accent, self.opacity.value, self.border.value);
         let (base, check) = (theme.background, theme.muted_foreground.opacity(0.3));
 
         canvas(
@@ -187,8 +206,14 @@ impl Render for PillPreview {
             move |bounds, (), window, _| {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     paint_checker(bounds, base, check, window);
-                    let pill = bounds.dilate(px(-CARD_MARGIN));
-                    pill::paint(pill, edge, look, SCALE, window);
+                    let pill = Bounds::new(
+                        point(
+                            bounds.left() + px(CARD_MARGIN),
+                            bounds.top() + px(CARD_MARGIN_Y),
+                        ),
+                        size(px(PILL_WIDTH), px(PILL_HEIGHT)),
+                    );
+                    pill::paint(pill, &shape, look, SCALE, window);
                 });
             },
         )
@@ -220,22 +245,22 @@ fn paint_checker(bounds: Bounds<Pixels>, base: Hsla, check: Hsla, window: &mut W
 }
 
 /// The preview's motion: a synthetic voice speaks while the motion slider
-/// moves, then the edge settles the way the overlay's does when recording
-/// stops.
-struct Wobble {
+/// or the style changes, then the pill settles the way the overlay's does
+/// when recording stops.
+struct Demo {
     motion: Motion,
     clock: Clock,
-    /// When the slider last moved; `None` once the edge has settled.
+    /// When a setting last changed; `None` once the pill has settled.
     moved_at: Option<Instant>,
     /// Seconds of synthetic voice so far, so each nudge continues the
     /// sentence instead of restarting it.
     spoken: f32,
 }
 
-impl Wobble {
-    fn new(intensity: f32) -> Self {
+impl Demo {
+    fn new(style: OverlayStyle, intensity: f32) -> Self {
         Self {
-            motion: Motion::new(intensity),
+            motion: Motion::new(style, intensity),
             clock: Clock::default(),
             moved_at: None,
             spoken: 0.,
@@ -252,21 +277,21 @@ impl Wobble {
         self.clock = Clock::default();
     }
 
-    /// The edge at `now`, or `None` when it is still.
-    fn frame(&mut self, now: Instant) -> Option<Edge> {
+    /// The pill at `now`, or `None` when it is still.
+    fn frame(&mut self, now: Instant) -> Option<Shape> {
         let moved_at = self.moved_at?;
         let dt = self.clock.tick(now);
         let speaking = now.saturating_duration_since(moved_at) < HOLD;
-        let level = speaking.then(|| {
+        let voice = speaking.then(|| {
             self.spoken += dt;
-            synthetic_level(self.spoken)
+            synthetic_voice(self.spoken)
         });
-        let edge = self.motion.step(dt, level);
-        if !speaking && edge.reach() < SETTLED {
+        let shape = self.motion.step(dt, voice.as_ref());
+        if !speaking && shape.reach() < SETTLED {
             self.settle();
             return None;
         }
-        Some(edge)
+        Some(shape)
     }
 }
 
@@ -279,6 +304,28 @@ fn synthetic_level(t: f32) -> f32 {
     0.3 + 0.5 * syllable * stress
 }
 
+/// That talking as speech bands: a low fundamental and two formants that
+/// drift from vowel to vowel, all following the syllables.
+#[allow(clippy::cast_precision_loss)]
+fn synthetic_voice(t: f32) -> Spectrum {
+    let level = synthetic_level(t);
+    let loudness = ((level - 0.3) / 0.5).clamp(0., 1.);
+    let first = 0.3 + 0.08 * (TAU * 1.3 * t).sin();
+    let second = 0.62 + 0.12 * (TAU * 0.9 * t + 1.).sin();
+    let bump = |x: f32, centre: f32, width: f32| (-((x - centre) / width).powi(2)).exp();
+    Spectrum {
+        level,
+        bands: std::array::from_fn(|band| {
+            let x = band as f32 / (BANDS - 1) as f32;
+            let shape = 0.6 * bump(x, 0.05, 0.12)
+                + 0.9 * bump(x, first, 0.1)
+                + 0.6 * bump(x, second, 0.12)
+                + 0.12;
+            (shape * loudness).clamp(0., 1.)
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,49 +333,65 @@ mod tests {
     /// `frames` frames at 60 Hz from `start`, nudging the slider to
     /// `intensity` on each of the first `nudging`.
     fn run(
-        wobble: &mut Wobble,
+        demo: &mut Demo,
         start: Instant,
         frames: u32,
         nudging: u32,
         intensity: f32,
-    ) -> Vec<Option<Edge>> {
+    ) -> Vec<Option<Shape>> {
         (0..frames)
             .map(|i| {
                 let now = start + Duration::from_secs(1) * i / 60;
                 if i < nudging {
-                    wobble.nudge(intensity, now);
+                    demo.nudge(intensity, now);
                 }
-                wobble.frame(now)
+                demo.frame(now)
             })
             .collect()
     }
 
     #[test]
     fn preview_moves_while_the_slider_moves_then_settles() {
-        let start = Instant::now();
-        let mut wobble = Wobble::new(1.);
-        assert!(wobble.frame(start).is_none(), "idle preview is still");
+        let styles = [
+            (OverlayStyle::Wave, 0.4..=1.8),
+            (OverlayStyle::Bars, 0.1..=0.4),
+        ];
+        for (style, settles_within) in styles {
+            let start = Instant::now();
+            let mut demo = Demo::new(style, 1.);
+            assert!(demo.frame(start).is_none(), "idle preview is still");
 
-        let frames = run(&mut wobble, start, 150, 60, 1.5);
-        let reach = frames[..60]
-            .iter()
-            .map(|f| f.map_or(0., |e| e.reach()))
-            .fold(0., f32::max);
-        assert!(reach > 5., "moves while the slider does: {reach}");
-        let settled_at = frames.iter().position(Option::is_none).unwrap();
-        #[allow(clippy::cast_precision_loss)]
-        let after_last_change = (settled_at - 60) as f32 / 60.;
-        assert!(
-            (0.5..=1.2).contains(&after_last_change),
-            "eases out after the slider stops: {after_last_change} s"
-        );
-        assert!(frames[settled_at..].iter().all(Option::is_none));
+            let frames = run(&mut demo, start, 200, 60, 1.5);
+            let reach = frames[..60]
+                .iter()
+                .map(|f| f.map_or(0., |s| s.reach()))
+                .fold(0., f32::max);
+            assert!(reach > 5., "{style:?} moves while the slider does: {reach}");
+            let settled_at = frames.iter().position(Option::is_none).unwrap();
+            #[allow(clippy::cast_precision_loss)]
+            let after_last_change = (settled_at - 60) as f32 / 60.;
+            assert!(
+                settles_within.contains(&after_last_change),
+                "{style:?} eases out after the slider stops: {after_last_change} s"
+            );
+            assert!(frames[settled_at..].iter().all(Option::is_none));
+        }
     }
 
     #[test]
     fn preview_at_zero_motion_stays_still() {
-        let mut wobble = Wobble::new(0.);
-        let frames = run(&mut wobble, Instant::now(), 60, 60, 0.);
-        assert!(frames.iter().flatten().all(|e| e.reach() < 1e-6));
+        for style in [OverlayStyle::Bars, OverlayStyle::Wave] {
+            let mut demo = Demo::new(style, 0.);
+            let frames = run(&mut demo, Instant::now(), 60, 60, 0.);
+            assert!(frames.iter().flatten().all(|s| s.reach() < 1e-6));
+        }
+    }
+
+    #[test]
+    fn synthetic_voice_falls_silent_between_syllables() {
+        let pause = 0.75 / SYLLABLE_RATE;
+        assert!(synthetic_voice(pause).bands.iter().all(|&b| b < 1e-3));
+        let peak = 0.25 / SYLLABLE_RATE;
+        assert!(synthetic_voice(peak).bands.iter().any(|&b| b > 0.6));
     }
 }

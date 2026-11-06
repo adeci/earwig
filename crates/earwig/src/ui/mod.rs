@@ -7,20 +7,23 @@
 //! [`Command`] or a config edit.
 
 mod accent;
+mod drag;
 mod layer_area;
 mod overlay;
 mod pill;
 mod settings;
 mod tray;
+mod water;
 mod x11_popup;
 
 use std::sync::PoisonError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use earwig_core::config::Config;
+use earwig_core::config::{Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
+use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{AnyWindowHandle, App, Entity, Global, QuitMode, WindowingModes};
 
 use overlay::{Outcome, OverlayView};
@@ -62,6 +65,7 @@ impl OverlaySurface {
 /// Run the GPUI application on the main thread until the daemon quits.
 pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
     let events = handle.subscribe();
+    let voice = handle.spectrum();
     let (local_tx, local_rx) = flume::unbounded();
     let tray = tray::spawn(handle.clone(), local_tx);
     let surface = OverlaySurface::for_desktop(&caps);
@@ -95,6 +99,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
                 close_generation: 0,
                 input_devices: Vec::new(),
             });
+            apply_theme(cx);
 
             cx.spawn(async move |cx| {
                 while let Ok(event) = events.recv_async().await {
@@ -102,6 +107,22 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
                 }
                 log::info!("daemon event feed closed; quitting the UI");
                 cx.update(|cx| cx.quit());
+            })
+            .detach();
+
+            // A voice shows on the next frame, however slowly the overlay
+            // was pacing itself; wake-ups coalesce, so this never queues.
+            cx.spawn(async move |cx| {
+                let wakes = voice.wakes();
+                while wakes.recv_async().await.is_ok() {
+                    cx.update(|cx| {
+                        if let Some(view) = cx.global::<UiState>().overlay.clone()
+                            && view.read(cx).hears()
+                        {
+                            view.update(cx, |_, cx| cx.notify());
+                        }
+                    });
+                }
             })
             .detach();
 
@@ -185,6 +206,25 @@ pub(crate) fn edit_config(cx: &mut App, edit: impl FnOnce(&mut Config)) {
     cx.refresh_windows();
 }
 
+/// Theme every window with the configured scheme. Cheap when it is already
+/// in place, so it runs whenever a window opens and picks up hand edits.
+pub(crate) fn apply_theme(cx: &mut App) {
+    let theme = UiState::handle(cx)
+        .config()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .config()
+        .appearance
+        .theme;
+    let mode = match theme {
+        ThemeSetting::Dark => ThemeMode::Dark,
+        ThemeSetting::Light => ThemeMode::Light,
+    };
+    if cx.theme().mode != mode {
+        Theme::change(mode, None, cx);
+    }
+}
+
 fn apply(event: Event, cx: &mut App) {
     match event {
         Event::Status { status } => {
@@ -197,7 +237,8 @@ fn apply(event: Event, cx: &mut App) {
             cx.global_mut::<UiState>().status.state = state;
             set_state(state, cx);
         }
-        Event::Level { level } => update_overlay(cx, |o| o.push_level(level)),
+        // For socket clients; the overlay follows the faster spectrum feed.
+        Event::Level { .. } => {}
         Event::Transcript {
             committed,
             tentative,
@@ -271,11 +312,12 @@ fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
 fn open_overlay(cx: &mut App) {
     let state = cx.global::<UiState>();
     let overlay_config = config(&state.handle).overlay;
-    let (caps, surface) = (state.caps.clone(), state.surface);
+    let (caps, surface, voice) = (state.caps.clone(), state.surface, state.handle.spectrum());
     if !overlay_config.enabled || surface == OverlaySurface::None {
         return;
     }
-    match overlay::open(&overlay_config, &caps, surface, cx) {
+    apply_theme(cx);
+    match overlay::open(&overlay_config, &caps, surface, voice, cx) {
         Ok(view) => cx.global_mut::<UiState>().overlay = Some(view),
         Err(e) => log::error!("opening the overlay: {e:#}"),
     }
@@ -287,6 +329,13 @@ fn close_overlay(cx: &mut App) {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
     }
+}
+
+/// The pill's × was clicked: drop the dictation (nothing is inserted) and
+/// get out of the way at once.
+pub(crate) fn discard(cx: &mut App) {
+    UiState::handle(cx).send(Command::Cancel);
+    close_overlay(cx);
 }
 
 fn schedule_overlay_close(after: Duration, cx: &mut App) {
@@ -306,6 +355,7 @@ fn schedule_overlay_close(after: Duration, cx: &mut App) {
 
 fn show_settings(cx: &mut App) {
     refresh_input_devices(cx);
+    apply_theme(cx);
     if let Some(window) = cx.global::<UiState>().settings
         && window
             .update(cx, |_, window, _| window.activate_window())

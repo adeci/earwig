@@ -6,7 +6,7 @@ mod models;
 mod pill_preview;
 
 use gpui_kit::component::setting::Settings;
-use gpui_kit::component::{ActiveTheme as _, Theme, TitleBar, v_flex};
+use gpui_kit::component::{ActiveTheme as _, TitleBar, v_flex};
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, IntoElement,
     ParentElement as _, Render, Styled as _, Window, WindowBounds, WindowOptions, div, px, size,
@@ -25,7 +25,6 @@ pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
         ..TitleBar::window_options()
     };
     let (window, _) = gpui_kit::open_window(options, cx, |window, cx| {
-        Theme::sync_system_appearance(Some(window), cx);
         window.set_window_title("earwig settings");
         cx.new(|cx| SettingsView::new(window, cx))
     })?;

@@ -1,8 +1,11 @@
-//! General settings: activation, audio, insertion, overlay, history, hotkeys.
+//! General settings: activation, audio, insertion, appearance, overlay,
+//! history, hotkeys.
 
 use std::sync::PoisonError;
 
-use earwig_core::config::{ActivationMode, Config, InsertSetting, OverlayPosition};
+use earwig_core::config::{
+    ActivationMode, Config, InsertSetting, OverlayPosition, OverlayStyle, ThemeSetting,
+};
 use earwig_core::events::InsertMethod;
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::setting::{
@@ -15,7 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::ui::settings::pill_preview::{Knob, PillPreview};
-use crate::ui::{UiState, config, edit_config};
+use crate::ui::{UiState, apply_theme, config, edit_config};
 
 const LOCKED_HINT: &str = "Set by system configuration.";
 
@@ -37,6 +40,7 @@ pub fn page(pill: &Entity<PillPreview>, cx: &App) -> SettingPage {
         activation(cx),
         audio(cx),
         insertion(cx),
+        appearance(cx),
         overlay(pill, cx),
         history(cx),
         hotkeys(),
@@ -185,7 +189,25 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
     }
 }
 
+fn appearance(cx: &App) -> SettingGroup {
+    SettingGroup::new().title("Appearance").item(item(
+        cx,
+        "appearance.theme",
+        "Theme",
+        "Colours of this window and the overlay, whatever the desktop uses.",
+        enum_dropdown_with(
+            &[(ThemeSetting::Dark, "Dark"), (ThemeSetting::Light, "Light")],
+            |c| c.appearance.theme,
+            |theme, cx| {
+                edit_config(cx, |c| c.appearance.theme = theme);
+                apply_theme(cx);
+            },
+        ),
+    ))
+}
+
 fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
+    let preview = pill.clone();
     SettingGroup::new().title("Overlay").items([
         item(
             cx,
@@ -224,13 +246,29 @@ fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
                 |c, v| c.overlay.max_lines = u32::try_from(v).unwrap_or(u32::MAX),
             ),
         ),
+        item(
+            cx,
+            "overlay.style",
+            "Style",
+            "How the panel shows your voice: its edge ripples like water, or \
+             sound bars stand above and below it. Applies from the next \
+             dictation.",
+            enum_dropdown_with(
+                &[(OverlayStyle::Wave, "Wave"), (OverlayStyle::Bars, "Bars")],
+                |c| c.overlay.style,
+                move |style, cx| {
+                    edit_config(cx, |c| c.overlay.style = style);
+                    preview.update(cx, |preview, cx| preview.set_style(style, cx));
+                },
+            ),
+        ),
         pill_item(
             cx,
             pill,
             Knob::Motion,
             "overlay.motion",
             "Motion",
-            "How much the edge swells and ripples with your voice. \
+            "How far your voice moves the bars or the edge. \
              Applies from the next dictation.",
         ),
         pill_item(
@@ -241,6 +279,15 @@ fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
             "Opacity",
             "How much of what is behind the panel shows through; the text \
              stays solid. Applies from the next dictation.",
+        ),
+        pill_item(
+            cx,
+            pill,
+            Knob::Border,
+            "overlay.border",
+            "Border",
+            "Width of the accent outline around the panel; none at 0. \
+             Applies from the next dictation.",
         ),
     ])
 }
@@ -434,6 +481,20 @@ fn enum_dropdown<T>(
 where
     T: Serialize + DeserializeOwned + 'static,
 {
+    enum_dropdown_with(choices, get, move |value, cx| {
+        edit_config(cx, |c| set(c, value));
+    })
+}
+
+/// [`enum_dropdown`] that applies a choice with `set`.
+fn enum_dropdown_with<T>(
+    choices: &[(T, &'static str)],
+    get: fn(&Config) -> T,
+    set: impl Fn(T, &mut App) + 'static,
+) -> SettingField<SharedString>
+where
+    T: Serialize + DeserializeOwned + 'static,
+{
     let options = choices
         .iter()
         .map(|(value, label)| (serde_key(value), SharedString::from(*label)))
@@ -444,7 +505,7 @@ where
         move |key: SharedString, cx: &mut App| match serde_json::from_value::<T>(
             serde_json::Value::String(key.to_string()),
         ) {
-            Ok(value) => edit_config(cx, |c| set(c, value)),
+            Ok(value) => set(value, cx),
             Err(e) => log::error!("unknown option {key}: {e}"),
         },
     )

@@ -28,8 +28,12 @@
 
       services.earwig = {
         enable = true;
-        # The VM has no GPU worth using; lavapipe would only be slower.
-        settings.model.backend = "cpu";
+        settings = {
+          # The VM has no GPU worth using; lavapipe would only be slower.
+          model.backend = "cpu";
+          # Dark text on light for OCR, like foot below.
+          appearance.theme = "light";
+        };
       };
 
       security.rtkit.enable = true;
