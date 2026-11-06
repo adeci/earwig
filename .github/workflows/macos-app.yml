@@ -40,6 +40,9 @@ jobs:
       - name: Dictate with the overlay up
         run: |
           mkdir -p shots
+          # The pill holds still when the system asks for reduced motion.
+          defaults read com.apple.universalaccess reduceMotion || true
+          defaults write com.apple.universalaccess reduceMotion -bool false || true
           echo 'overlay.max_lines = 2' > "$HOME/Library/Application Support/earwig/config.toml"
           EARWIG_AUDIO_FILE=tests/fixtures/dictation-sentences.wav RUST_LOG=info \
             result/Applications/earwig.app/Contents/MacOS/earwig daemon 2> shots/daemon.log &
