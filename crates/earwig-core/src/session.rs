@@ -10,7 +10,8 @@
 //! - [`ActivationMode::Toggle`]: each press starts or stops.
 //!
 //! [`Input::Toggle`] (press-only bindings) starts a latched recording or
-//! stops one in every mode. A pressed key ignores further presses until it is
+//! stops one in every mode. [`Input::Chord`] takes back the press of a key
+//! that turned out to be part of a key combination. A pressed key ignores further presses until it is
 //! released, which absorbs compositor key repeat and the release that follows
 //! a stopping press.
 
@@ -24,6 +25,7 @@ pub enum Input {
     Release,
     Toggle,
     Cancel,
+    Chord,
 }
 
 /// What the caller should do after an input.
@@ -86,6 +88,7 @@ impl Session {
             Input::Release => self.release(now),
             Input::Toggle => self.toggle(now),
             Input::Cancel => self.cancel(),
+            Input::Chord => self.chord(),
         }
     }
 
@@ -162,6 +165,21 @@ impl Session {
                 Some(Action::Finish)
             }
             Phase::Finalizing => None,
+        }
+    }
+
+    /// While the key is down, a recording can only be one its press
+    /// started: a press that stops a latched recording finalizes it.
+    fn chord(&mut self) -> Option<Action> {
+        if !std::mem::replace(&mut self.key_down, false) {
+            return None;
+        }
+        match self.phase {
+            Phase::Recording { .. } => {
+                self.phase = Phase::Idle;
+                Some(Action::Discard)
+            }
+            Phase::Idle | Phase::Finalizing => None,
         }
     }
 
@@ -295,6 +313,51 @@ mod tests {
         s.handle(Input::Release, t.at(3_000));
         assert_eq!(s.handle(Input::Cancel, t.at(3_010)), Some(Action::Discard));
         assert_eq!(s.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn a_chord_takes_back_the_press_that_started_recording() {
+        for mode in [
+            ActivationMode::HoldOrToggle,
+            ActivationMode::Hold,
+            ActivationMode::Toggle,
+        ] {
+            let (mut s, t) = session(mode);
+            s.handle(Input::Press, t.at(0));
+            assert_eq!(
+                s.handle(Input::Chord, t.at(80)),
+                Some(Action::Discard),
+                "{mode:?}"
+            );
+            assert_eq!(s.handle(Input::Release, t.at(150)), None);
+            assert_eq!(s.phase(), Phase::Idle);
+        }
+    }
+
+    #[test]
+    fn a_chord_after_a_stopping_press_keeps_the_dictation() {
+        let (mut s, t) = session(ActivationMode::HoldOrToggle);
+        s.handle(Input::Press, t.at(0));
+        s.handle(Input::Release, t.at(50));
+        assert_eq!(s.handle(Input::Press, t.at(5_000)), Some(Action::Finish));
+        assert_eq!(s.handle(Input::Chord, t.at(5_080)), None);
+        assert_eq!(s.phase(), Phase::Finalizing);
+        s.finished();
+        assert_eq!(s.handle(Input::Release, t.at(5_200)), None);
+        assert_eq!(
+            s.handle(Input::Press, t.at(6_000)),
+            Some(Action::Start { latched: false })
+        );
+    }
+
+    #[test]
+    fn a_chord_without_a_held_key_is_ignored() {
+        let (mut s, t) = session(ActivationMode::HoldOrToggle);
+        assert_eq!(s.handle(Input::Chord, t.at(0)), None);
+        s.handle(Input::Press, t.at(10));
+        s.handle(Input::Release, t.at(20));
+        assert_eq!(s.handle(Input::Chord, t.at(30)), None);
+        assert!(matches!(s.phase(), Phase::Recording { latched: true, .. }));
     }
 
     #[test]

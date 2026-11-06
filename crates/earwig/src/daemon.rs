@@ -4,7 +4,6 @@
 //! every dictation hears it from the start, in real time, then silence. The
 //! VM tests use it to drive real transcriptions without a sound card.
 
-use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -103,7 +102,9 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
         handle.send(Command::Quit);
     }
     while events.recv().is_ok() {}
-    let _ = fs::remove_file(&socket);
+    // A pipe goes away with its last handle; a socket file stays behind.
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 

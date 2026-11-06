@@ -9,17 +9,24 @@ settings window, transcribe.cpp for speech. NixOS first.
 - `crates/earwig-core`: everything but pixels (config, controller, audio,
   models, insertion, hotkeys, control socket). No GPUI, so tests are fast.
 - `crates/earwig-transcribe`: the transcribe.cpp `EngineFactory` (GGUF,
-  Vulkan + CPU).
+  CPU plus Vulkan, or Metal on macOS).
 - `crates/earwig`: the binary: CLI, daemon wiring, GPUI overlay, settings
   window, tray.
 - `crates/earwig-core/models.toml`: the curated model catalog.
 - `nix/`: package, NixOS module, model fetchers, dev shell, treefmt, VM tests.
 - `tests/fixtures/`: speech clips for engine and VM tests.
+- `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on macOS
+  and Windows; Linux is the flake's checks.
 
-Contracts every front end depends on: `earwig-core/src/{events,engine,config,
-desktop}.rs`, `models/mod.rs`, `insert/mod.rs`, `hotkey/mod.rs`. Change them
-deliberately. `events.rs` is also the control-socket wire format that
-`earwig status`/`earwig events` print.
+Per-OS code lives in `linux`, `macos` and `windows` modules behind one
+signature each: `desktop/`, `hotkey/`, `insert/` and `paths/` in
+earwig-core, `ui/platform/` in earwig; `ipc/` and `hooks/` split `unix`
+from `windows`.
+
+Contracts every front end depends on: `earwig-core/src/{events,engine,
+config}.rs`, `desktop/mod.rs`, `models/mod.rs`, `insert/mod.rs`,
+`hotkey/mod.rs`. Change them deliberately. `events.rs` is also the
+control-socket wire format that `earwig status`/`earwig events` print.
 
 ## Commands
 

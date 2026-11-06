@@ -1,6 +1,6 @@
 [package]
 name = "earwig"
-description = "Local, instant dictation for Linux desktops"
+description = "Local, instant dictation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,23 +9,36 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-ashpd.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 earwig-core.workspace = true
 earwig-transcribe.workspace = true
 env_logger.workspace = true
 flume.workspace = true
-futures-lite.workspace = true
 gpui-kit.workspace = true
-ksni.workspace = true
 log.workspace = true
-raw-window-handle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd.workspace = true
+futures-lite.workspace = true
+ksni.workspace = true
+raw-window-handle.workspace = true
 wayland-client.workspace = true
 wayland-protocols-wlr.workspace = true
 x11rb.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle.workspace = true
+tray-icon.workspace = true
+windows-sys.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
 
 [lints]
 workspace = true

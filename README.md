@@ -1,8 +1,8 @@
 # earwig
 
-Local dictation for Linux. Hold a key and talk, or tap it to keep listening.
-You see the words as you speak, and when you stop they land wherever you're
-typing, all at once.
+Local dictation for Linux and Windows. Hold a key and talk, or tap it to keep
+listening. You see the words as you speak, and when you stop they land wherever
+you're typing, all at once.
 
 ![The overlay while dictating, in the dark theme and in the light one](docs/overlay.webp)
 
@@ -22,7 +22,13 @@ services.earwig.enable = true;
 Elsewhere, `nix profile install github:adeci/earwig` and start `earwig daemon`
 with your session.
 
+On Windows 10 or 11, run `earwig-<version>-windows-x64-setup.exe` from the
+[releases](https://github.com/adeci/earwig/releases) (or unzip the portable
+zip) and start earwig from the Start menu.
+
 ## Hotkey
+
+On Windows, hold or tap Right Ctrl; pick another key in the settings.
 
 On GNOME and KDE, earwig asks to register Ctrl+Space when it first starts.
 

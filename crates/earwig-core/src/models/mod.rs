@@ -90,7 +90,7 @@ impl FromStr for ModelSpec {
                 revision: revision.to_owned(),
             });
         }
-        if s.starts_with('/') {
+        if std::path::Path::new(s).is_absolute() {
             return Ok(Self::Path { path: s.into() });
         }
         if s.is_empty() || s.contains(['/', ' ', ':']) {
@@ -242,7 +242,11 @@ mod tests {
             "parakeet-unified-en-0.6b",
             "hf:owner/repo/model-Q8_0.gguf@0123456789abcdef0123456789abcdef01234567",
             "hf:owner/repo/sub/dir/model.gguf@main",
-            "/nix/store/abc-model/model.gguf",
+            if cfg!(windows) {
+                r"C:\models\model.gguf"
+            } else {
+                "/nix/store/abc-model/model.gguf"
+            },
         ] {
             let spec: ModelSpec = s.parse().unwrap();
             assert_eq!(spec.to_string(), s);

@@ -1,5 +1,6 @@
 //! earwig's speech engine: [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
-//! with GGUF models, Vulkan and CPU compiled in.
+//! with GGUF models, the CPU and one GPU backend compiled in (Metal on macOS,
+//! Vulkan elsewhere).
 //!
 //! Streaming models decode while you speak and `finish` only decodes the
 //! tail; if the stream fails or comes up empty, the whole recording is
@@ -84,7 +85,11 @@ fn backend_request(backend: Backend) -> anyhow::Result<tc::Backend> {
         ]
         .into_iter()
         .find(|b| tc::backend_available(*b))
-        .context("no GPU backend is available (is a Vulkan driver installed?)")?,
+        .context(if cfg!(target_os = "macos") {
+            "no GPU backend is available (Metal found no device)"
+        } else {
+            "no GPU backend is available (is a Vulkan driver installed?)"
+        })?,
     })
 }
 
@@ -163,13 +168,24 @@ struct TranscribeModel {
 impl TranscribeModel {
     fn load(path: &Path, options: &EngineOptions) -> anyhow::Result<Self> {
         let backend = backend_request(options.backend)?;
-        let model = tc::Model::load_with(
-            path,
-            &tc::ModelOptions {
-                backend,
-                ..tc::ModelOptions::default()
-            },
-        )
+        let load = |backend| {
+            tc::Model::load_with(
+                path,
+                &tc::ModelOptions {
+                    backend,
+                    ..tc::ModelOptions::default()
+                },
+            )
+        };
+        let model = match load(backend) {
+            // Automatic: a GPU that fails (driver trouble, too little
+            // memory) leaves the CPU, which every build has.
+            Err(e) if backend == tc::Backend::Auto => {
+                log::warn!("loading on the GPU failed ({e}); using the CPU");
+                load(tc::Backend::Cpu)
+            }
+            loaded => loaded,
+        }
         .with_context(|| format!("loading {}", path.display()))?;
         let caps = model
             .capabilities()
@@ -196,12 +212,20 @@ impl TranscribeModel {
             .unwrap_or(0)
             .saturating_mul(earwig_core::SAMPLE_RATE as usize / 1000);
         let mut session = model.session().context("creating a session")?;
-        let cancel = tc::CancelToken::new();
-        session.set_cancel_token(&cancel);
         let run = tc::RunOptions {
             language,
             ..tc::RunOptions::default()
         };
+        // A first decode builds the GPU's pipelines, which can take many
+        // seconds the first time a driver sees them; better now than in the
+        // first dictation.
+        let warm = Instant::now();
+        match session.run(&vec![0.; earwig_core::SAMPLE_RATE as usize], &run) {
+            Ok(_) => log::debug!("warm-up decode took {:?}", warm.elapsed()),
+            Err(e) => log::debug!("warm-up decode: {e}"),
+        }
+        let cancel = tc::CancelToken::new();
+        session.set_cancel_token(&cancel);
         let (jobs, jobs_rx) = flume::unbounded();
         let (replies_tx, replies) = flume::unbounded();
         let worker_cancel = cancel.clone();

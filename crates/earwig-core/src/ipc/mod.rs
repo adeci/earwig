@@ -1,4 +1,6 @@
-//! The control socket, `$XDG_RUNTIME_DIR/earwig.sock` (mode 0600).
+//! The control socket: a Unix socket (mode 0600), e.g.
+//! `$XDG_RUNTIME_DIR/earwig.sock`, or on Windows a named pipe only the user
+//! may open (see [`crate::paths::socket`]).
 //!
 //! Newline-delimited JSON: each client line is one [`Command`]; replies are
 //! [`Event`] lines.
@@ -10,11 +12,26 @@
 //!
 //! The daemon closes a connection when the client closes its write side, so
 //! a client may send several commands, shut down writing, and read to EOF.
+//! A pipe has no half-close; there the client sends an empty message instead.
+//!
+//! Each OS module provides the transport: `Listener::{bind, accept}`, a
+//! connection that reads and writes through `&Conn`, `connect` and
+//! `shutdown_write`.
 
-use std::fs;
+#[cfg(unix)]
+mod unix;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(unix)]
+use unix as os;
+#[cfg(windows)]
+use windows as os;
+
+#[cfg(windows)]
+pub(crate) use windows::user_sid;
+
 use std::io::{self, BufRead as _, BufReader, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -43,7 +60,7 @@ pub fn subscribe() -> anyhow::Result<impl Iterator<Item = anyhow::Result<Event>>
 /// daemon refuse to start twice before it opens the microphone or loads a
 /// model.
 pub struct Server {
-    listener: UnixListener,
+    listener: os::Listener,
     path: PathBuf,
 }
 
@@ -51,27 +68,8 @@ impl Server {
     /// Fails if another daemon answers at `path`; a stale socket file left by
     /// a crash is replaced.
     pub fn bind(path: &Path) -> anyhow::Result<Self> {
-        if path.exists() {
-            match UnixStream::connect(path) {
-                Ok(_) => anyhow::bail!("earwig is already running (socket {})", path.display()),
-                Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-                    log::info!("removing stale socket {}", path.display());
-                    fs::remove_file(path)
-                        .with_context(|| format!("removing stale socket {}", path.display()))?;
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("probing {}", path.display()));
-                }
-            }
-        }
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let listener =
-            UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         Ok(Self {
-            listener,
+            listener: os::Listener::bind(path)?,
             path: path.to_owned(),
         })
     }
@@ -82,16 +80,13 @@ impl Server {
 
     /// Accept connections on a background thread, one thread per client.
     pub fn serve(self, handle: Handle) -> anyhow::Result<()> {
+        let mut listener = self.listener;
         thread::Builder::new()
             .name("earwig-ipc".into())
             .spawn(move || {
-                for conn in self.listener.incoming() {
-                    match conn {
+                loop {
+                    match listener.accept() {
                         Ok(conn) => {
-                            if let Err(e) = conn.set_write_timeout(Some(WRITE_TIMEOUT)) {
-                                log::warn!("control socket: {e}");
-                                continue;
-                            }
                             let handle = handle.clone();
                             let spawned = thread::Builder::new()
                                 .name("earwig-ipc-client".into())
@@ -112,7 +107,7 @@ impl Server {
     }
 }
 
-fn serve_client(conn: &UnixStream, handle: &Handle) -> io::Result<()> {
+fn serve_client(conn: &os::Conn, handle: &Handle) -> io::Result<()> {
     let mut out = conn;
     for line in BufReader::new(conn).lines() {
         let line = line?;
@@ -150,12 +145,12 @@ fn write_event(out: &mut impl io::Write, event: &Event) -> io::Result<()> {
     out.write_all(line.as_bytes())
 }
 
-fn connect(path: &Path) -> anyhow::Result<UnixStream> {
-    UnixStream::connect(path)
+fn connect(path: &Path) -> anyhow::Result<os::Conn> {
+    os::connect(path)
         .with_context(|| format!("earwig is not running (no daemon at {})", path.display()))
 }
 
-fn send_line(mut conn: &UnixStream, cmd: &Command) -> anyhow::Result<()> {
+fn send_line(mut conn: &os::Conn, cmd: &Command) -> anyhow::Result<()> {
     let mut line = serde_json::to_string(cmd)?;
     line.push('\n');
     conn.write_all(line.as_bytes())?;
@@ -166,7 +161,7 @@ fn send_line(mut conn: &UnixStream, cmd: &Command) -> anyhow::Result<()> {
 pub fn request_at(path: &Path, cmd: &Command) -> anyhow::Result<Option<Event>> {
     let conn = connect(path)?;
     send_line(&conn, cmd)?;
-    conn.shutdown(std::net::Shutdown::Write)?;
+    os::shutdown_write(&conn)?;
     let mut reply = None;
     for line in BufReader::new(&conn).lines() {
         let line = line?;
@@ -248,14 +243,32 @@ mod tests {
         (Handle::new(shared.clone()), shared, rx)
     }
 
+    /// A fresh address for a test server: a socket in `dir`, or a pipe named
+    /// after it.
+    fn address(dir: &Path) -> PathBuf {
+        #[cfg(unix)]
+        {
+            dir.join("earwig.sock")
+        }
+        #[cfg(windows)]
+        {
+            let name = dir.file_name().unwrap().to_string_lossy();
+            PathBuf::from(format!(r"\\.\pipe\earwig-test-{name}"))
+        }
+    }
+
     #[test]
     fn commands_status_and_subscriptions_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, shared, commands) = handle(dir.path());
-        let path = dir.path().join("earwig.sock");
+        let path = address(dir.path());
         Server::bind(&path).unwrap().serve(handle.clone()).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
 
         assert_eq!(request_at(&path, &Command::Press).unwrap(), None);
         assert_eq!(
@@ -277,9 +290,9 @@ mod tests {
         shared.bus.publish(&Event::Level { level: 0.5 });
         assert_eq!(events.next().unwrap().unwrap(), Event::Level { level: 0.5 });
 
-        let mut raw = UnixStream::connect(&path).unwrap();
-        raw.write_all(b"{\"cmd\":\"dance\"}\n").unwrap();
-        raw.shutdown(std::net::Shutdown::Write).unwrap();
+        let raw = os::connect(&path).unwrap();
+        (&raw).write_all(b"{\"cmd\":\"dance\"}\n").unwrap();
+        os::shutdown_write(&raw).unwrap();
         let line = BufReader::new(&raw).lines().next().unwrap().unwrap();
         assert!(matches!(
             serde_json::from_str(&line).unwrap(),
@@ -288,16 +301,27 @@ mod tests {
     }
 
     #[test]
-    fn stale_socket_is_replaced_and_live_one_kept() {
+    fn a_live_daemon_keeps_its_address_until_it_is_gone() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("earwig.sock");
-        drop(UnixListener::bind(&path).unwrap());
-        assert!(path.exists());
-        let _server = Server::bind(&path).unwrap();
+        let path = address(dir.path());
+        let server = Server::bind(&path).unwrap();
         assert!(Server::bind(&path).is_err());
         assert!(
-            UnixStream::connect(&path).is_ok(),
-            "live socket was removed"
+            os::connect(&path).is_ok(),
+            "the live daemon lost its address"
         );
+        drop(server);
+        Server::bind(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_socket_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = address(dir.path());
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        let _server = Server::bind(&path).unwrap();
+        assert!(os::connect(&path).is_ok());
     }
 }
