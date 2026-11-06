@@ -88,8 +88,9 @@ pub(crate) struct Popup {
 
 impl Popup {
     pub(crate) fn new(window: &Window) -> anyhow::Result<Self> {
-        let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window)?.as_raw()
-        else {
+        let handle = HasWindowHandle::window_handle(window)
+            .map_err(|e| anyhow::anyhow!("no window handle: {e}"))?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
             anyhow::bail!("the overlay is not an AppKit window");
         };
         let region = Region::default();
