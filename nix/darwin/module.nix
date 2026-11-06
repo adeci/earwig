@@ -26,8 +26,8 @@ in
       earwig, local dictation.
 
       This installs earwig.app and a launchd user agent that starts it at
-      login. On first start earwig asks for Microphone, Accessibility and
-      Input Monitoring access, which System Settings grants'';
+      login. On first start earwig asks for Microphone and Accessibility
+      access, which System Settings grants'';
 
     package = lib.mkOption {
       type = lib.types.package;

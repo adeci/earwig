@@ -100,10 +100,17 @@ impl Popup {
             let view = handle.ns_view.as_ptr().cast::<AnyObject>();
             let panel: Option<Retained<AnyObject>> = msg_send![view, window];
             let panel = panel.ok_or_else(|| anyhow::anyhow!("the overlay has no NSWindow"))?;
-            let mask: usize = msg_send![&*panel, styleMask];
             // Borderless, but still a non-activating panel: clicking it
-            // leaves the app being typed in active.
-            let () = msg_send![&*panel, setStyleMask: mask & !TITLED];
+            // leaves the app being typed in active. Restyling resizes the
+            // window at once, which GPUI cannot take while it is still
+            // building it, so it waits for the next turn of the run loop.
+            let restyled = panel.clone();
+            let borderless = block2::RcBlock::new(move || {
+                let mask: usize = msg_send![&*restyled, styleMask];
+                let () = msg_send![&*restyled, setStyleMask: mask & !TITLED];
+            });
+            let main: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+            let () = msg_send![main, addOperationWithBlock: &*borderless];
             let () = msg_send![&*panel, setBecomesKeyOnlyIfNeeded: Bool::YES];
             let () = msg_send![&*panel, setHidesOnDeactivate: Bool::NO];
             // The pill draws its own shadow.

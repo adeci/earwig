@@ -1,6 +1,7 @@
 //! Privacy permissions the user grants the OS by hand. On macOS those are
-//! Microphone (to hear you), Accessibility (to paste) and Input Monitoring
-//! (to see the hotkey); other systems ask for none.
+//! Microphone (to hear you) and Accessibility (to see the hotkey and paste;
+//! an app trusted with Accessibility needs no Input Monitoring for its event
+//! tap); other systems ask for none.
 
 use std::fs;
 use std::path::Path;
@@ -12,7 +13,6 @@ use serde::{Deserialize, Serialize};
 pub enum Permission {
     Microphone,
     Accessibility,
-    InputMonitoring,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +36,6 @@ impl Permission {
         match self {
             Self::Microphone => "Microphone",
             Self::Accessibility => "Accessibility",
-            Self::InputMonitoring => "Input Monitoring",
         }
     }
 
@@ -44,8 +43,7 @@ impl Permission {
     pub fn purpose(self) -> &'static str {
         match self {
             Self::Microphone => "hear you",
-            Self::Accessibility => "paste the text where you are typing",
-            Self::InputMonitoring => "see the dictation key",
+            Self::Accessibility => "see the dictation key and paste the text where you are typing",
         }
     }
 }
@@ -73,10 +71,6 @@ pub fn check() -> Vec<PermissionStatus> {
                 } else {
                     Access::Denied
                 },
-            },
-            PermissionStatus {
-                permission: Permission::InputMonitoring,
-                access: answered(macos::input_monitoring_allowed()),
             },
         ]
     }
@@ -115,7 +109,6 @@ pub fn request(permission: Permission) {
         match permission {
             Permission::Microphone => macos::request_microphone(),
             Permission::Accessibility => macos::request_accessibility(),
-            Permission::InputMonitoring => macos::request_input_monitoring(),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -129,7 +122,6 @@ pub fn open_settings(permission: Permission) {
         let anchor = match permission {
             Permission::Microphone => "Privacy_Microphone",
             Permission::Accessibility => "Privacy_Accessibility",
-            Permission::InputMonitoring => "Privacy_ListenEvent",
         };
         let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
         if let Err(e) = std::process::Command::new("/usr/bin/open")

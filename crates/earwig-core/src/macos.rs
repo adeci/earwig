@@ -1,6 +1,6 @@
 //! The C and Objective-C entry points earwig needs on macOS: event taps and
 //! synthetic keys (CoreGraphics), run loops (CoreFoundation), privacy
-//! checks (ApplicationServices, IOKit, AVFoundation) and the pasteboard.
+//! checks (ApplicationServices, AVFoundation) and the pasteboard.
 
 use std::ffi::c_void;
 
@@ -37,6 +37,11 @@ pub const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 pub const FIELD_AUTOREPEAT: u32 = 8;
 /// `kCGKeyboardEventKeycode`
 pub const FIELD_KEYCODE: u32 = 9;
+/// `kCGEventSourceUserData`
+pub const FIELD_SOURCE_USER_DATA: u32 = 42;
+/// What earwig writes into [`FIELD_SOURCE_USER_DATA`] of the keys it
+/// presses, so its own hotkey tap can tell them from the keyboard's.
+pub const EARWIG_EVENT: i64 = 0x6561_7277;
 
 /// `kCGEventFlagMaskCommand`
 pub const FLAG_COMMAND: u64 = 0x0010_0000;
@@ -44,11 +49,6 @@ pub const FLAG_COMMAND: u64 = 0x0010_0000;
 const KEYCODE_V: u16 = 9;
 /// `kCGEventSourceStateHIDSystemState`
 const SOURCE_HID: i32 = 1;
-/// `kIOHIDRequestTypeListenEvent`
-const LISTEN_EVENT: u32 = 1;
-/// `kIOHIDAccessTypeGranted`, `kIOHIDAccessTypeDenied`
-const HID_GRANTED: u32 = 0;
-const HID_DENIED: u32 = 1;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -66,9 +66,8 @@ unsafe extern "C" {
     fn CGEventSourceCreate(state: i32) -> *mut c_void;
     fn CGEventCreateKeyboardEvent(source: *mut c_void, key: u16, down: bool) -> CGEventRef;
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
+    fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
     fn CGEventPost(tap: u32, event: CGEventRef);
-    safe fn CGPreflightListenEventAccess() -> bool;
-    safe fn CGRequestListenEventAccess() -> bool;
     safe fn CGPreflightPostEventAccess() -> bool;
     safe fn CGRequestPostEventAccess() -> bool;
 }
@@ -92,11 +91,6 @@ unsafe extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     safe fn AXIsProcessTrusted() -> bool;
-}
-
-#[link(name = "IOKit", kind = "framework")]
-unsafe extern "C" {
-    safe fn IOHIDCheckAccess(request: u32) -> u32;
 }
 
 // `AVCaptureDevice`, looked up by name.
@@ -136,7 +130,8 @@ pub fn request_microphone() {
     });
 }
 
-/// Accessibility: needed to press Cmd+V in other apps.
+/// Accessibility: needed to see the hotkey and to press Cmd+V in other
+/// apps.
 pub fn accessibility_allowed() -> bool {
     AXIsProcessTrusted() || CGPreflightPostEventAccess()
 }
@@ -144,24 +139,6 @@ pub fn accessibility_allowed() -> bool {
 /// Show the system's Accessibility prompt.
 pub fn request_accessibility() {
     CGRequestPostEventAccess();
-}
-
-/// Input Monitoring: needed to see the hotkey. Some answer, or "not asked
-/// yet" (`None`).
-pub fn input_monitoring_allowed() -> Option<bool> {
-    if CGPreflightListenEventAccess() {
-        return Some(true);
-    }
-    match IOHIDCheckAccess(LISTEN_EVENT) {
-        HID_GRANTED => Some(true),
-        HID_DENIED => Some(false),
-        _ => None,
-    }
-}
-
-/// Show the system's Input Monitoring prompt.
-pub fn request_input_monitoring() {
-    CGRequestListenEventAccess();
 }
 
 /// Replace the general pasteboard's contents with `text`.
@@ -189,6 +166,7 @@ pub fn press_paste() {
                 continue;
             }
             CGEventSetFlags(event, FLAG_COMMAND);
+            CGEventSetIntegerValueField(event, FIELD_SOURCE_USER_DATA, EARWIG_EVENT);
             CGEventPost(TAP_HID, event);
             CFRelease(event.cast_const());
         }

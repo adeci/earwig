@@ -1,13 +1,14 @@
 //! macOS: a `CGEventTap` watches for [`HotkeyConfig::key`], Right Command
-//! by default. Seeing keys needs Input Monitoring access; until the user
-//! grants it the tap cannot be made, and the source keeps trying. The
-//! control socket works as well (`earwig press` etc.).
+//! by default. Seeing keys needs Accessibility access (which spares asking
+//! for Input Monitoring); until the user grants it the tap cannot be made,
+//! and the source keeps trying. The control socket works as well (`earwig
+//! press` etc.).
 //!
 //! A lone modifier passes through to the apps (the tap only listens); if
 //! another key goes down while it is held, the user meant a shortcut (Right
 //! Command+C) and the source sends [`Command::Chord`]. A chord's key
-//! (Ctrl+Space) is swallowed so the focused app never sees it, which needs a
-//! filtering tap and so Accessibility access too.
+//! (Ctrl+Space) is swallowed so the focused app never sees it, with a
+//! filtering tap.
 
 use std::ffi::c_void;
 use std::sync::{Mutex, PoisonError};
@@ -129,12 +130,10 @@ impl HotkeySource for EventTap {
                 // SAFETY: never handed to a tap.
                 drop(unsafe { Box::from_raw(context) });
                 if !std::mem::replace(&mut waiting, true) {
-                    let needed = if filters {
-                        Permission::Accessibility
-                    } else {
-                        Permission::InputMonitoring
-                    };
-                    log::warn!("hotkey: {}", permissions::missing_message(needed));
+                    log::warn!(
+                        "hotkey: {}",
+                        permissions::missing_message(Permission::Accessibility)
+                    );
                 }
                 thread::sleep(RETRY);
                 continue;
@@ -181,18 +180,16 @@ unsafe extern "C" fn callback(
         return event;
     }
     // SAFETY: a live event of a kind the tap asked for.
-    let (code, flags, repeat) = unsafe {
+    let (code, flags, repeat, source) = unsafe {
         (
             macos::CGEventGetIntegerValueField(event, macos::FIELD_KEYCODE),
             macos::CGEventGetFlags(event),
             macos::CGEventGetIntegerValueField(event, macos::FIELD_AUTOREPEAT) != 0,
+            macos::CGEventGetIntegerValueField(event, macos::FIELD_SOURCE_USER_DATA),
         )
     };
-    let edge = match kind {
-        macos::KEY_DOWN if repeat => Edge::Repeat,
-        macos::KEY_DOWN => Edge::Down,
-        macos::KEY_UP => Edge::Up,
-        _ => Edge::Flags,
+    let Some(edge) = edge(kind, repeat, source) else {
+        return event;
     };
     let action = WATCH
         .lock()
@@ -212,6 +209,21 @@ unsafe extern "C" fn callback(
     } else {
         event
     }
+}
+
+/// The edge a tap event is, or `None` for the keys earwig presses itself
+/// (the paste chord, which goes out while a latched dictation's stopping
+/// press still holds the trigger).
+fn edge(kind: u32, repeat: bool, source: i64) -> Option<Edge> {
+    if source == macos::EARWIG_EVENT {
+        return None;
+    }
+    Some(match kind {
+        macos::KEY_DOWN if repeat => Edge::Repeat,
+        macos::KEY_DOWN => Edge::Down,
+        macos::KEY_UP => Edge::Up,
+        _ => Edge::Flags,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -500,6 +512,7 @@ mod tests {
     const LEFT_CMD: u16 = 55;
     const LEFT_SHIFT: u16 = 56;
     const C: u16 = 8;
+    const V: u16 = 9;
     const SPACE: u16 = 49;
     const CMD: u64 = 0x10_0000;
     const CTRL: u64 = 0x4_0000;
@@ -592,6 +605,34 @@ mod tests {
         let release = m.event(Edge::Up, SPACE, 0);
         assert_eq!(release.command, Some(Command::Release));
         assert!(release.swallow);
+    }
+
+    #[test]
+    fn the_paste_earwig_presses_while_the_trigger_is_held_is_no_chord() {
+        let mut m = matcher("RightCmd");
+        let mut feed = |kind, code, flags, source| {
+            edge(kind, false, source).and_then(|edge| m.event(edge, code, flags).command)
+        };
+        let ours = macos::EARWIG_EVENT;
+        let commands: Vec<Command> = [
+            feed(macos::FLAGS_CHANGED, RIGHT_CMD, CMD | 0x10, 0),
+            feed(macos::KEY_DOWN, V, CMD, ours),
+            feed(macos::KEY_UP, V, CMD, ours),
+            feed(macos::FLAGS_CHANGED, RIGHT_CMD, 0, 0),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        assert_eq!(commands, [Command::Press, Command::Release]);
+        // The same keys from the keyboard are a shortcut.
+        assert_eq!(
+            feed(macos::FLAGS_CHANGED, RIGHT_CMD, CMD | 0x10, 0),
+            Some(Command::Press)
+        );
+        assert_eq!(
+            feed(macos::KEY_DOWN, V, CMD | 0x10, 0),
+            Some(Command::Chord)
+        );
     }
 
     #[test]

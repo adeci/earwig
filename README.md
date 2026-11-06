@@ -28,7 +28,7 @@ services.earwig.enable = true;
 ```
 
 When it first starts, allow earwig in System Settings → Privacy & Security
-under Microphone, Accessibility and Input Monitoring.
+under Microphone and Accessibility.
 
 Elsewhere, `nix profile install github:adeci/earwig` and start `earwig daemon`
 with your session.

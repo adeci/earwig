@@ -456,7 +456,7 @@ fn startup() -> SettingGroup {
     ))
 }
 
-/// Microphone, Accessibility and Input Monitoring, each granted or with a
+/// Microphone and Accessibility, each granted or with a
 /// way to System Settings.
 #[cfg(target_os = "macos")]
 fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) -> SettingGroup {
@@ -516,7 +516,7 @@ fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
         (
             "Hold the key to talk, or tap it to keep listening until the next tap. \
              With another key it is still a shortcut (Right Command+C copies). \
-             earwig sees the key with Input Monitoring access."
+             earwig sees the key with Accessibility access."
                 .into(),
             None,
         )

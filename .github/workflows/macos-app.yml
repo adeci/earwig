@@ -46,8 +46,10 @@ jobs:
           for _ in $(seq 60); do result/bin/earwig status 2>/dev/null | grep -q '"state":"ready"' && break; sleep 2; done
           result/bin/earwig status | tee shots/status.json
           result/bin/earwig toggle
-          sleep 10
-          screencapture -x shots/overlay.png
+          for shot in 1 2 3; do
+            sleep 3
+            screencapture -x shots/overlay-$shot.png
+          done
           result/bin/earwig toggle
           sleep 3
           pbpaste > shots/clipboard.txt
