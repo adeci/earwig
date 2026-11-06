@@ -1,4 +1,4 @@
-//! What the running desktop offers, probed once at startup.
+//! Linux: XDG desktop name, Wayland globals, X11 and the XDG portals.
 
 use std::time::Duration;
 
@@ -12,28 +12,7 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboar
 use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_manager_v1::ZwlrDataControlManagerV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
-#[derive(Clone, Debug, Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent capability flags"
-)]
-pub struct DesktopCaps {
-    /// `XDG_CURRENT_DESKTOP`, lowercased, e.g. `niri`, `gnome`, `kde`.
-    pub desktop: String,
-    pub wayland: bool,
-    pub x11: bool,
-    /// `zwlr_layer_shell_v1`: the overlay can float above windows without
-    /// taking focus.
-    pub layer_shell: bool,
-    /// `zwp_input_method_manager_v2`.
-    pub input_method: bool,
-    /// `zwp_virtual_keyboard_manager_v1`.
-    pub virtual_keyboard: bool,
-    /// `ext_data_control_manager_v1` or `zwlr_data_control_manager_v1`.
-    pub data_control: bool,
-    pub portal_global_shortcuts: bool,
-    pub portal_remote_desktop: bool,
-}
+use super::DesktopCaps;
 
 /// Longest wait for the portal frontend, which D-Bus may have to start. At
 /// login it answers only once its backends are up (about 5 s for
@@ -43,7 +22,7 @@ pub struct DesktopCaps {
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Never fails: whatever cannot be reached counts as absent.
-pub fn probe() -> DesktopCaps {
+pub(super) fn probe() -> DesktopCaps {
     let mut caps = DesktopCaps {
         desktop: std::env::var("XDG_CURRENT_DESKTOP")
             .unwrap_or_default()

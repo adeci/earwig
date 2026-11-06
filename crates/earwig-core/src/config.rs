@@ -1,6 +1,7 @@
 //! Settings in three layers, later wins: built-in defaults, the user file
-//! `$XDG_CONFIG_HOME/earwig/config.toml` (written by the settings window), and
-//! `earwig/config.toml` under `$XDG_CONFIG_DIRS` (written by the NixOS module).
+//! (`$XDG_CONFIG_HOME/earwig/config.toml` on Linux, written by the settings
+//! window), and the machine-wide files (`earwig/config.toml` under
+//! `$XDG_CONFIG_DIRS`, written by the NixOS module); see [`crate::paths`].
 //! Keys set in a system file are locked: never written to the user file.
 
 use std::collections::BTreeSet;
@@ -44,10 +45,24 @@ pub struct HotkeyConfig {
     pub mode: ActivationMode,
     /// A release this soon after the press counts as a tap.
     pub hold_threshold_ms: u64,
+    /// The key earwig watches for itself on macOS and Windows, in the syntax
+    /// of [`crate::hotkey::trigger`]: a lone modifier (`RightCtrl`) or a
+    /// chord (`Ctrl+Space`).
+    pub key: String,
     /// Register with the GlobalShortcuts portal when the desktop offers it.
     pub portal: bool,
     /// Trigger suggested to the portal, in XDG shortcut syntax.
     pub portal_trigger: String,
+}
+
+impl HotkeyConfig {
+    /// Right Ctrl on Windows: alone it does nothing in Windows or in common
+    /// apps, and a one-key hold is easy to do without looking.
+    #[cfg(not(target_os = "macos"))]
+    pub const DEFAULT_KEY: &str = "RightCtrl";
+    /// Right Command: alone it does nothing in macOS or in common apps.
+    #[cfg(target_os = "macos")]
+    pub const DEFAULT_KEY: &str = "RightCmd";
 }
 
 impl Default for HotkeyConfig {
@@ -55,6 +70,7 @@ impl Default for HotkeyConfig {
         Self {
             mode: ActivationMode::HoldOrToggle,
             hold_threshold_ms: 300,
+            key: Self::DEFAULT_KEY.into(),
             portal: true,
             portal_trigger: "CTRL+space".into(),
         }

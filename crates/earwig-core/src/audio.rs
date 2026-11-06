@@ -451,6 +451,13 @@ impl Worker {
 }
 
 fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
+    // Without Microphone access macOS hands out silence, not an error.
+    #[cfg(target_os = "macos")]
+    if crate::macos::microphone_allowed() == Some(false) {
+        anyhow::bail!(crate::permissions::missing_message(
+            crate::permissions::Permission::Microphone
+        ));
+    }
     let host = cpal::default_host();
     let device = match name {
         None => host

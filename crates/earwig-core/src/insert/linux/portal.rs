@@ -33,13 +33,10 @@ use xkbcommon::xkb;
 
 use self::focus::FocusWatch;
 use super::{InsertError, Inserter, MIME_TYPES};
+use crate::APP_ID;
 use crate::events::InsertMethod;
 
 mod focus;
-
-/// The id portals know earwig by. A desktop file with this basename must be
-/// installed: GNOME rejects portal requests from host apps without one.
-pub const APP_ID: &str = "io.github.adeci.earwig";
 
 const TOKEN_FILE: &str = "remote-desktop.token";
 

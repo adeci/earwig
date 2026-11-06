@@ -14,9 +14,9 @@ use anyhow::bail;
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use futures_lite::{StreamExt as _, future, pin};
 
-use super::HotkeySource;
 use crate::events::Command;
-use crate::insert::portal::{bounded, register_app_id};
+use crate::hotkey::HotkeySource;
+use crate::insert::linux::portal::{bounded, register_app_id};
 
 const DICTATE: &str = "dictate";
 const CANCEL: &str = "cancel";

@@ -1,0 +1,18 @@
+[package]
+name = "earwigw"
+description = "Runs earwig without a console window (Windows autostart and Start menu)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+dirs.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
+
+[lints]
+workspace = true

@@ -1,15 +1,16 @@
 //! macOS: the overlay is GPUI's pop-up panel made into a borderless,
 //! non-activating overlay on every Space; earwig runs as a menu-bar app (no
-//! Dock icon) and follows the system accent colour.
+//! Dock icon, the tray icon in the menu bar) and follows the system accent
+//! colour.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use earwig_core::desktop::DesktopCaps;
 use gpui_kit::{
-    App, Application, Bounds, Hsla, Pixels, Point, Rgba, Window, WindowId, WindowingRequest,
-    point, px,
+    App, Application, Bounds, DisplayId, Hsla, Pixels, PlatformDisplay, Point, Rgba, Window,
+    WindowId, WindowingRequest, point, px,
 };
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool};
@@ -18,6 +19,8 @@ use objc2_foundation::{NSPoint, NSRect, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::ui::OverlaySurface;
+
+pub(crate) use super::tray_icon::{TrayHandle, spawn as spawn_tray};
 
 /// `NSWindowStyleMaskTitled`
 const TITLED: usize = 1;
@@ -37,19 +40,39 @@ pub(crate) fn application(_surface: OverlaySurface, _caps: &DesktopCaps) -> Appl
     gpui_kit::application().with_windowing(WindowingRequest::Headless)
 }
 
-thread_local! {
-    /// The part of each popup that takes the pointer, in window coordinates.
-    static INPUT_REGIONS: RefCell<HashMap<WindowId, Rc<RefCell<Option<Vec<Bounds<Pixels>>>>>>> =
-        RefCell::default();
+/// The display with the key window, where the user is looking.
+pub(crate) fn home_display(cx: &App) -> Option<Rc<dyn PlatformDisplay>> {
+    let id: Option<u32> = unsafe {
+        let screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
+        if screen.is_null() {
+            None
+        } else {
+            let description: *mut AnyObject = msg_send![screen, deviceDescription];
+            let key = NSString::from_str("NSScreenNumber");
+            let number: *mut AnyObject = msg_send![description, objectForKey: &*key];
+            (!number.is_null()).then(|| msg_send![number, unsignedIntValue])
+        }
+    };
+    id.and_then(|id| cx.find_display(DisplayId::new(u64::from(id))))
+        .or_else(|| cx.primary_display())
 }
 
-/// Like [`Window::set_input_region`], which GPUI leaves to the platform and
-/// does nothing on macOS: the overlay's [`Popup`] applies it instead.
-pub(crate) fn set_input_region(window: &mut Window, region: Option<&[Bounds<Pixels>]>) {
+type Region = Rc<Cell<Option<Bounds<Pixels>>>>;
+
+thread_local! {
+    /// The part of each popup that takes the pointer, in window coordinates.
+    static INPUT_REGIONS: RefCell<HashMap<WindowId, Region>> = RefCell::default();
+}
+
+/// Only `area` of the overlay's window takes the pointer (none of it for
+/// `None`); clicks anywhere else reach the windows below. GPUI leaves
+/// [`Window::set_input_region`] to the platform and does nothing on macOS,
+/// so the window's [`Popup`] applies it.
+pub(crate) fn set_input_region(window: &Window, area: Option<Bounds<Pixels>>) {
     let id = window.window_handle().window_id();
     INPUT_REGIONS.with_borrow(|regions| {
-        if let Some(shared) = regions.get(&id) {
-            *shared.borrow_mut() = region.map(<[_]>::to_vec);
+        if let Some(region) = regions.get(&id) {
+            region.set(area);
         }
     });
 }
@@ -69,7 +92,7 @@ impl Popup {
         else {
             anyhow::bail!("the overlay is not an AppKit window");
         };
-        let region = Rc::new(RefCell::new(None));
+        let region = Region::default();
         let id = window.window_handle().window_id();
         INPUT_REGIONS.with_borrow_mut(|regions| regions.insert(id, region.clone()));
         unsafe {
@@ -140,11 +163,8 @@ impl Drop for Popup {
 
 /// Let clicks through the panel unless the pointer is on its input region.
 /// Left alone while a button is down, so a drag keeps its window.
-fn poll_pointer(
-    panel: Retained<AnyObject>,
-    region: Rc<RefCell<Option<Vec<Bounds<Pixels>>>>>,
-) -> Retained<AnyObject> {
-    let ignoring = std::cell::Cell::new(true);
+fn poll_pointer(panel: Retained<AnyObject>, region: Region) -> Retained<AnyObject> {
+    let ignoring = Cell::new(true);
     let tick = block2::RcBlock::new(move |_timer: *mut AnyObject| unsafe {
         let buttons: usize = msg_send![class!(NSEvent), pressedMouseButtons];
         if buttons != 0 {
@@ -157,10 +177,7 @@ fn poll_pointer(
             px((mouse.x - frame.origin.x) as f32),
             px((frame.origin.y + frame.size.height - mouse.y) as f32),
         );
-        let inside = region
-            .borrow()
-            .as_ref()
-            .is_none_or(|rects| rects.iter().any(|rect| rect.contains(&local)));
+        let inside = region.get().is_some_and(|area| area.contains(&local));
         if ignoring.get() == inside {
             ignoring.set(!inside);
             let () = msg_send![&*panel, setIgnoresMouseEvents: Bool::new(!inside)];

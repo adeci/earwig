@@ -4,7 +4,6 @@
 //! every dictation hears it from the start, in real time, then silence. The
 //! VM tests use it to drive real transcriptions without a sound card.
 
-use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,7 +19,7 @@ use earwig_core::events::{Command, Event, InsertMethod};
 use earwig_core::history::History;
 use earwig_core::insert::{self, InsertError, Inserter};
 use earwig_core::models::{ModelManager, ModelSpec};
-use earwig_core::{SAMPLE_RATE, desktop, hotkey, ipc, paths};
+use earwig_core::{SAMPLE_RATE, desktop, hotkey, ipc, paths, permissions};
 use earwig_transcribe::TranscribeEngine;
 
 /// Open the settings window of the running daemon, or start the daemon with
@@ -92,8 +91,14 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     server.serve(handle.clone())?;
     log::info!("listening on {}", socket.display());
 
+    // Privacy permissions (macOS): the system asks for what is missing
+    // once; until it is all granted, the settings window says what is.
+    let missing = permissions::ask_once(&paths::state_dir());
+    for permission in &missing {
+        log::warn!("{}", permissions::missing_message(*permission));
+    }
     if !headless {
-        crate::ui::run(handle.clone(), caps, open_settings);
+        crate::ui::run(handle.clone(), caps, open_settings || !missing.is_empty());
     }
     // Headless: wait for a Quit command. Either way, return only once the
     // controller has freed the model; GPU backends crash at process exit
@@ -103,7 +108,9 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
         handle.send(Command::Quit);
     }
     while events.recv().is_ok() {}
-    let _ = fs::remove_file(&socket);
+    // A pipe goes away with its last handle; a socket file stays behind.
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 

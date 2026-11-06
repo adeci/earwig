@@ -20,7 +20,7 @@ pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         window_min_size: Some(size(px(600.), px(420.))),
-        app_id: Some(earwig_core::insert::portal::APP_ID.into()),
+        app_id: Some(earwig_core::APP_ID.into()),
         focus: true,
         ..TitleBar::window_options()
     };

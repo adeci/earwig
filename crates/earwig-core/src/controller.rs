@@ -127,11 +127,15 @@ impl Handle {
     }
 
     pub fn status(&self) -> Status {
-        self.shared
+        let mut status = self
+            .shared
             .status
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .clone();
+        // The user grants these in System Settings, not through earwig.
+        status.permissions = crate::permissions::check();
+        status
     }
 
     /// Settings. Edit through [`ConfigStore::update`], then send
@@ -176,6 +180,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
             },
             insert_methods: inserter.methods(),
             hotkey_sources,
+            permissions: Vec::new(),
         }),
         config: Arc::new(RwLock::new(config)),
         models,
@@ -896,6 +901,9 @@ impl Controller {
         let config = self.config();
         self.session
             .configure(config.hotkey.mode, config.hotkey.hold_threshold_ms);
+        if let Err(e) = crate::hotkey::configure(&config.hotkey) {
+            self.error(format!("hotkey: {e}"));
+        }
         if config.audio != self.audio_config {
             if let Some(capture) = &self.capture {
                 capture.configure(config.audio.clone());
@@ -1048,7 +1056,7 @@ mod tests {
             fs::write(
                 &system,
                 format!(
-                    "[hotkey]\nhold_threshold_ms = 150\n[model]\nmodel = \"{}\"\n",
+                    "[hotkey]\nhold_threshold_ms = 150\n[model]\nmodel = '{}'\n",
                     model.display()
                 ),
             )
@@ -1233,7 +1241,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = dir.path().join("fake.gguf");
         fs::write(&model, b"").unwrap();
-        let user = format!("[model]\nmodel = \"{}\"\n", model.display());
+        let user = format!("[model]\nmodel = '{}'\n", model.display());
         fs::write(dir.path().join("user.toml"), user).unwrap();
         let gone = dir.path().join("gone.gguf");
         let d = Daemon::spawn(dir, Vec::new(), false);

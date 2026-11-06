@@ -8,13 +8,12 @@
 
 mod accent;
 mod drag;
-mod layer_area;
+mod icon;
 mod overlay;
 mod pill;
+mod platform;
 mod settings;
-mod tray;
 mod water;
-mod x11_popup;
 
 use std::sync::PoisonError;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,7 +23,7 @@ use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
-use gpui_kit::{AnyWindowHandle, App, Entity, Global, QuitMode, WindowingModes};
+use gpui_kit::{AnyWindowHandle, App, Entity, Global, QuitMode};
 
 use overlay::{Outcome, OverlayView};
 
@@ -38,28 +37,20 @@ enum Local {
     ShowSettings,
 }
 
-/// How the overlay can float above other windows without taking focus.
+/// How the overlay can float above other windows without taking focus;
+/// [`platform::overlay_surface`] picks one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlaySurface {
     /// `zwlr_layer_shell_v1` (niri, sway, Hyprland, KDE, COSMIC).
+    #[cfg(target_os = "linux")]
     LayerShell,
-    /// Override-redirect X11 window, through XWayland on GNOME.
-    X11Popup,
+    /// A borderless popup window that [`platform::Popup`] moves: an
+    /// override-redirect X11 window, through XWayland on GNOME; a
+    /// non-activating topmost tool window on Windows.
+    Popup,
     /// Nothing suitable; showing a normal window would steal focus from the
     /// app the text is meant for, so no overlay.
     None,
-}
-
-impl OverlaySurface {
-    fn for_desktop(caps: &DesktopCaps) -> Self {
-        if caps.layer_shell {
-            Self::LayerShell
-        } else if caps.x11 {
-            Self::X11Popup
-        } else {
-            Self::None
-        }
-    }
 }
 
 /// Run the GPUI application on the main thread until the daemon quits.
@@ -67,25 +58,20 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
     let events = handle.subscribe();
     let voice = handle.spectrum();
     let (local_tx, local_rx) = flume::unbounded();
-    let tray = tray::spawn(handle.clone(), local_tx);
-    let surface = OverlaySurface::for_desktop(&caps);
-    let app = if surface == OverlaySurface::X11Popup && caps.wayland {
-        // No layer-shell (GNOME): run on XWayland, where an override-redirect
-        // popup floats above other windows without taking focus. A Wayland
-        // toplevel would be centred by the compositor and steal focus.
-        gpui_kit::platform::linux(WindowingModes::X11)
-    } else {
-        gpui_kit::application()
-    };
+    let surface = platform::overlay_surface(&caps);
 
-    app.with_assets(gpui_kit::assets::Assets)
+    platform::application(surface, &caps)
+        .with_assets(gpui_kit::assets::Assets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            // Inside the application: some trays need its run loop.
+            let tray = platform::spawn_tray(handle.clone(), local_tx);
             accent::watch(cx);
             if surface == OverlaySurface::None {
                 log::warn!(
-                    "this desktop offers neither layer-shell nor X11; the overlay stays hidden"
+                    "this desktop offers no way to float the overlay without taking focus; \
+                     the overlay stays hidden"
                 );
             }
             cx.set_global(UiState {
@@ -152,7 +138,7 @@ pub(crate) struct UiState {
     caps: DesktopCaps,
     surface: OverlaySurface,
     status: Status,
-    tray: Option<tray::TrayHandle>,
+    tray: Option<platform::TrayHandle>,
     overlay: Option<Entity<OverlayView>>,
     settings: Option<AnyWindowHandle>,
     /// Bumped whenever a scheduled overlay close becomes stale.
@@ -312,12 +298,12 @@ fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
 fn open_overlay(cx: &mut App) {
     let state = cx.global::<UiState>();
     let overlay_config = config(&state.handle).overlay;
-    let (caps, surface, voice) = (state.caps.clone(), state.surface, state.handle.spectrum());
+    let (surface, voice) = (state.surface, state.handle.spectrum());
     if !overlay_config.enabled || surface == OverlaySurface::None {
         return;
     }
     apply_theme(cx);
-    match overlay::open(&overlay_config, &caps, surface, voice, cx) {
+    match overlay::open(&overlay_config, surface, voice, cx) {
         Ok(view) => cx.global_mut::<UiState>().overlay = Some(view),
         Err(e) => log::error!("opening the overlay: {e:#}"),
     }
@@ -356,6 +342,10 @@ fn schedule_overlay_close(after: Duration, cx: &mut App) {
 fn show_settings(cx: &mut App) {
     refresh_input_devices(cx);
     apply_theme(cx);
+    // A menu-bar app's window comes to the front, with the keyboard, only
+    // once the app is active.
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
     if let Some(window) = cx.global::<UiState>().settings
         && window
             .update(cx, |_, window, _| window.activate_window())
