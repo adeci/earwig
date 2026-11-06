@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 use gpui_kit::{
     App, AppContext as _, Bounds, Context, FocusHandle, Global, Hsla, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, MouseMoveEvent, ParentElement as _, PathBuilder,
-    Pixels, Point, QuitMode, Render, StatefulInteractiveElement as _, Styled as _, Window,
+    Pixels, QuitMode, Render, StatefulInteractiveElement as _, Styled as _, Window,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions,
     WindowingRequest, canvas, div, hsla, point, px, rgb, size,
 };
 use objc2::runtime::{AnyObject, Bool};
 use objc2::{class, msg_send};
 use objc2_foundation::{NSPoint, NSRect};
-use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -252,7 +252,7 @@ fn open_overlay(cx: &mut App) {
 }
 
 fn ns_window(window: &Window) -> *mut AnyObject {
-    match window.window_handle().map(|h| h.as_raw()) {
+    match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
         Ok(RawWindowHandle::AppKit(h)) => unsafe {
             let view = h.ns_view.as_ptr().cast::<AnyObject>();
             msg_send![view, window]

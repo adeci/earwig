@@ -26,11 +26,19 @@
       ];
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       treefmt = forAllSystems (pkgs: treefmt-nix.lib.evalModule pkgs ./nix/treefmt.nix);
+      # On macOS the package is earwig.app (bin/earwig links into it); the
+      # cargo build alone is its `unwrapped`.
       earwigFor =
         pkgs:
-        pkgs.callPackage ./nix/package.nix {
-          craneLib = crane.mkLib pkgs;
-        };
+        let
+          earwig = pkgs.callPackage ./nix/package.nix {
+            craneLib = crane.mkLib pkgs;
+          };
+        in
+        if pkgs.stdenv.hostPlatform.isDarwin then
+          pkgs.callPackage ./nix/darwin/app.nix { inherit earwig; }
+        else
+          earwig;
     in
     {
       packages = forAllSystems (
@@ -55,13 +63,18 @@
       };
 
       nixosModules.default = import ./nix/module.nix self;
+      darwinModules.default = import ./nix/darwin/module.nix self;
 
       formatter = forAllSystems (pkgs: treefmt.${pkgs.stdenv.hostPlatform.system}.config.build.wrapper);
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.callPackage ./nix/devshell.nix {
           craneLib = crane.mkLib pkgs;
-          earwig = self.packages.${pkgs.stdenv.hostPlatform.system}.earwig;
+          earwig =
+            let
+              earwig = self.packages.${pkgs.stdenv.hostPlatform.system}.earwig;
+            in
+            earwig.unwrapped or earwig;
         };
       });
 
