@@ -73,10 +73,10 @@ const TAPER: (f32, f32) = (0.7, 1.);
 const REST: f32 = 0.01;
 /// How unevenly kicks land around the ring: a smooth gain within 1 ± this
 /// that drifts at random, so no two syllables or dictations ripple alike.
-const VARIETY: f32 = 0.35;
+const VARIETY: f32 = 0.6;
 /// The gain's waves: times each goes around the ring, and radians per
 /// second it drifts, either way.
-const VARIETY_WAVES: [(f32, f32); 3] = [(1., 0.9), (2., 1.3), (3., 2.1)];
+const VARIETY_WAVES: [(f32, f32); 4] = [(1., 1.5), (2., 2.3), (3., 3.4), (5., 4.7)];
 
 /// Heights in units where 1 is a full wave: the ring and its momentum.
 #[derive(Clone)]
