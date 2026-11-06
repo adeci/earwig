@@ -56,7 +56,10 @@ pub(super) fn configure(config: &HotkeyConfig) -> Result<(), ParseError> {
     let mut watch = WATCH.lock().unwrap_or_else(PoisonError::into_inner);
     let result = match parsed {
         Ok(binding) => {
-            if watch.as_ref().is_none_or(|matcher| matcher.binding != binding) {
+            if watch
+                .as_ref()
+                .is_none_or(|matcher| matcher.binding != binding)
+            {
                 log::info!("hotkey: {}", config.key);
                 *watch = Some(Matcher::new(binding));
             }
@@ -104,7 +107,8 @@ impl HotkeySource for EventTap {
                 commands: commands.clone(),
                 port: std::ptr::null_mut(),
             }));
-            let events = (1 << macos::KEY_DOWN) | (1 << macos::KEY_UP) | (1 << macos::FLAGS_CHANGED);
+            let events =
+                (1 << macos::KEY_DOWN) | (1 << macos::KEY_UP) | (1 << macos::FLAGS_CHANGED);
             // SAFETY: `context` outlives the tap: it is freed only after the
             // tap is invalidated below.
             let port = unsafe {
@@ -259,7 +263,12 @@ const fn family(modifier: Modifier) -> Family {
 
 /// Families that must not be held unless the trigger names them. Fn is
 /// left out: macOS sets it on arrow and function keys by itself.
-const FAMILIES: [Modifier; 4] = [Modifier::Ctrl, Modifier::Shift, Modifier::Alt, Modifier::Super];
+const FAMILIES: [Modifier; 4] = [
+    Modifier::Ctrl,
+    Modifier::Shift,
+    Modifier::Alt,
+    Modifier::Super,
+];
 
 /// One modifier of a trigger: either side, or just one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,8 +366,8 @@ impl Binding {
 /// `kVK_*` codes, as on an ANSI keyboard.
 fn key_code(key: Key) -> Result<u16, ParseError> {
     const LETTERS: [u16; 26] = [
-        0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7,
-        16, 6,
+        0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16,
+        6,
     ];
     const DIGITS: [u16; 10] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25];
     const FUNCTION: [u16; 20] = [
@@ -527,7 +536,10 @@ mod tests {
     #[test]
     fn the_left_command_key_is_not_the_right_one() {
         let mut m = matcher("RightCmd");
-        let events = [(Edge::Flags, LEFT_CMD, CMD | 0x8), (Edge::Flags, LEFT_CMD, 0)];
+        let events = [
+            (Edge::Flags, LEFT_CMD, CMD | 0x8),
+            (Edge::Flags, LEFT_CMD, 0),
+        ];
         assert_eq!(commands(&mut m, &events), []);
     }
 
@@ -584,7 +596,9 @@ mod tests {
 
     #[test]
     fn every_parsable_key_has_a_mac_key_code() {
-        for key in ["A", "Z", "0", "9", "F1", "F20", "Space", "Tab", "Escape", "Return"] {
+        for key in [
+            "A", "Z", "0", "9", "F1", "F20", "Space", "Tab", "Escape", "Return",
+        ] {
             assert!(Binding::new(&key.parse().unwrap()).is_ok(), "{key}");
         }
         assert!(Binding::new(&"F24".parse().unwrap()).is_err());

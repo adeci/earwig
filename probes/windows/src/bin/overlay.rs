@@ -65,7 +65,10 @@ impl Pill {
     fn window_origin(&self) -> POINT {
         let mut r = unsafe { std::mem::zeroed() };
         unsafe { GetWindowRect(self.hwnd, &mut r) };
-        POINT { x: r.left, y: r.top }
+        POINT {
+            x: r.left,
+            y: r.top,
+        }
     }
 }
 
@@ -93,7 +96,14 @@ impl Render for Pill {
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(div().flex().gap(px(3.)).items_center().h(px(22.)).children(bars))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(3.))
+                        .items_center()
+                        .h(px(22.))
+                        .children(bars),
+                )
                 .child(format!(
                     "Listening… scale {scale} fg={} t={t:.1}",
                     foreground()
@@ -171,7 +181,10 @@ impl Render for Pill {
 }
 
 fn main() {
-    let secs: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(60);
+    let secs: u64 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
     log(format!("start, foreground={}", foreground()));
     gpui_kit::application().run(move |cx: &mut App| {
         let display = cx.primary_display();

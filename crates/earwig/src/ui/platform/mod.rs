@@ -32,12 +32,12 @@ use macos as os;
 #[cfg(windows)]
 use windows as os;
 
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) use os::set_input_region;
 #[cfg(target_os = "linux")]
 pub(crate) use os::usable_area;
 pub(crate) use os::{
     Popup, TrayHandle, application, follow_accent, home_display, overlay_surface, spawn_tray,
 };
-#[cfg(any(windows, target_os = "macos"))]
-pub(crate) use os::set_input_region;
 #[cfg(windows)]
 pub(crate) use os::{autostart, set_autostart};

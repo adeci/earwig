@@ -132,7 +132,10 @@ pub fn open_settings(permission: Permission) {
             Permission::InputMonitoring => "Privacy_ListenEvent",
         };
         let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
-        if let Err(e) = std::process::Command::new("/usr/bin/open").arg(&url).spawn() {
+        if let Err(e) = std::process::Command::new("/usr/bin/open")
+            .arg(&url)
+            .spawn()
+        {
             log::warn!("opening {url}: {e}");
         }
     }

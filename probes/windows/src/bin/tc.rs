@@ -37,7 +37,12 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    println!("loaded {} on {} in {:?}", model.arch(), model.backend(), t.elapsed());
+    println!(
+        "loaded {} on {} in {:?}",
+        model.arch(),
+        model.backend(),
+        t.elapsed()
+    );
     let mut session = model.session()?;
     let t = Instant::now();
     let result = session.run(&pcm, &RunOptions::default())?;

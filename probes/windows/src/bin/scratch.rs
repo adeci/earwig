@@ -87,7 +87,10 @@ fn main() {
             0,
             edit_class.as_ptr(),
             null(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32,
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_VSCROLL
+                | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32,
             0,
             0,
             900,
@@ -98,7 +101,22 @@ fn main() {
             null(),
         );
         let face = wide("Segoe UI");
-        let font = CreateFontW(-28, 0, 0, 0, FW_NORMAL as i32, 0, 0, 0, 0, 0, 0, 0, 0, face.as_ptr());
+        let font = CreateFontW(
+            -28,
+            0,
+            0,
+            0,
+            FW_NORMAL as i32,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            face.as_ptr(),
+        );
         SendMessageW(EDIT, WM_SETFONT, font as usize, 1);
         SetForegroundWindow(hwnd);
         SetFocus(EDIT);

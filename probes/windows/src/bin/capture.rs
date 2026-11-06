@@ -4,22 +4,34 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 fn main() -> anyhow::Result<()> {
-    let secs: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(3);
+    let secs: u64 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
     let host = cpal::default_host();
     println!("host {:?}", host.id());
     for device in host.input_devices()? {
-        println!("input {:?} id={:?}", device.description().map(|d| d.name().to_owned()), device.id());
+        println!(
+            "input {:?} id={:?}",
+            device.description().map(|d| d.name().to_owned()),
+            device.id()
+        );
     }
     let device = host.default_input_device().expect("no default input");
     let config = device.default_input_config()?;
-    println!("default {:?} {config:?}", device.description().map(|d| d.name().to_owned()));
+    println!(
+        "default {:?} {config:?}",
+        device.description().map(|d| d.name().to_owned())
+    );
     let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
     let sink = samples.clone();
     let channels = config.channels() as usize;
     let stream = device.build_input_stream(
         config.config(),
         move |data: &[f32], _| {
-            sink.lock().unwrap().extend(data.chunks(channels).map(|f| f[0]));
+            sink.lock()
+                .unwrap()
+                .extend(data.chunks(channels).map(|f| f[0]));
         },
         |e| eprintln!("stream error {e}"),
         None,

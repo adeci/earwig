@@ -175,10 +175,7 @@ fn main() {
                 let hwnd = find(&command[1]).expect("no such window");
                 let mut rect = RECT::default();
                 unsafe { GetWindowRect(hwnd, &mut rect) };
-                println!(
-                    "{} {} {} {}",
-                    rect.left, rect.top, rect.right, rect.bottom
-                );
+                println!("{} {} {} {}", rect.left, rect.top, rect.right, rect.bottom);
             }
             "sleep" => sleep(int(1) as u64),
             "close" => {

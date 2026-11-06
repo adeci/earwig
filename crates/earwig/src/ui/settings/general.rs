@@ -426,8 +426,8 @@ fn key_dropdown(cx: &App) -> SettingField<SharedString> {
     ];
     let mut options: Vec<(SharedString, SharedString)> = keys
         .into_iter()
-    .map(|(key, label)| (key.into(), label.into()))
-    .collect();
+        .map(|(key, label)| (key.into(), label.into()))
+        .collect();
     let key = config(UiState::handle(cx)).hotkey.key;
     if !options.iter().any(|(id, _)| id.as_ref() == key) {
         options.push((key.clone().into(), key.into()));
@@ -464,18 +464,14 @@ fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) ->
     use gpui_kit::IntoElement as _;
     use gpui_kit::component::Sizable as _;
     use gpui_kit::component::button::{Button, ButtonVariants as _};
-    let group = SettingGroup::new()
-        .title("Permissions")
-        .description("macOS lets earwig hear you, see the hotkey and paste only once you allow it.");
+    let group = SettingGroup::new().title("Permissions").description(
+        "macOS lets earwig hear you, see the hotkey and paste only once you allow it.",
+    );
     statuses.iter().fold(group, |group, status| {
         let permission = status.permission;
         let granted = status.access == Access::Granted;
         group.item(SettingItem::render(move |_, _, cx| {
-            let state = if granted {
-                "Allowed"
-            } else {
-                "Not allowed"
-            };
+            let state = if granted { "Allowed" } else { "Not allowed" };
             h_flex()
                 .w_full()
                 .justify_between()

@@ -155,7 +155,7 @@ impl fmt::Display for Trigger {
             if !std::mem::take(&mut first) {
                 f.write_str("+")?;
             }
-            Ok(())
+            Ok::<(), fmt::Error>(())
         };
         for (modifier, side) in &self.modifiers {
             sep(f)?;

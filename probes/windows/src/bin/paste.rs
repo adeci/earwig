@@ -75,7 +75,10 @@ fn main() {
     let fg = unsafe { GetForegroundWindow() };
     let mut buf = [0u16; 256];
     let n = unsafe { GetWindowTextW(fg, buf.as_mut_ptr(), 256) };
-    println!("foreground: {}", String::from_utf16_lossy(&buf[..n as usize]));
+    println!(
+        "foreground: {}",
+        String::from_utf16_lossy(&buf[..n as usize])
+    );
     let sent = unsafe { SendInput(keys.len() as u32, keys.as_ptr(), size_of::<INPUT>() as i32) };
     println!("sent {sent}/{}", keys.len());
     std::thread::sleep(std::time::Duration::from_millis(300));
