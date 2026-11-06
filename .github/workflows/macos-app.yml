@@ -54,7 +54,7 @@ jobs:
             screencapture -x shots/overlay-$shot.png
           done
           result/bin/earwig toggle
-          sleep 3
+          for _ in $(seq 30); do sleep 1; result/bin/earwig status | grep -q '"state": "idle"' && break; done
           pbpaste > shots/clipboard.txt
           cat shots/clipboard.txt
           result/bin/earwig quit || kill %1
