@@ -2,9 +2,13 @@
 //! around the pill, each with a height (outward from the pill at rest) and
 //! a velocity, under a damped wave equation. The voice's onsets kick the
 //! long top and bottom runs, mirrored from the centre with low bands in the
-//! middle; the ripples travel around the ring and ring down once the voice
-//! stops, until the ring is exactly at rest. Loudness swells it gently.
+//! middle but a little stronger here and weaker there (see [`VARIETY`]);
+//! the ripples travel around the ring and ring down once the voice stops,
+//! until the ring is exactly at rest. Loudness swells it gently.
 
+use std::collections::hash_map::RandomState;
+use std::f32::consts::TAU;
+use std::hash::BuildHasher;
 use std::sync::LazyLock;
 
 use earwig_core::spectrum::BANDS;
@@ -67,6 +71,12 @@ const TAPER: (f32, f32) = (0.7, 1.);
 /// With nothing pushing, a ring lower and slower than this is at rest: a
 /// fifth of a pixel at the widest motion.
 const REST: f32 = 0.01;
+/// How unevenly kicks land around the ring: a smooth gain within 1 ± this
+/// that drifts at random, so no two syllables or dictations ripple alike.
+const VARIETY: f32 = 0.35;
+/// The gain's waves: times each goes around the ring, and radians per
+/// second it drifts, either way.
+const VARIETY_WAVES: [(f32, f32); 3] = [(1., 0.9), (2., 1.3), (3., 2.1)];
 
 /// Heights in units where 1 is a full wave: the ring and its momentum.
 #[derive(Clone)]
@@ -77,30 +87,40 @@ pub struct Ring {
     swell: f32,
     /// Seconds not yet simulated.
     pending: f32,
+    variety: Variety,
 }
 
 impl Default for Ring {
     fn default() -> Self {
+        Self::with(Variety::random())
+    }
+}
+
+impl Ring {
+    fn with(variety: Variety) -> Self {
         Self {
             height: [0.; NODES],
             velocity: [0.; NODES],
             swell: 0.,
             pending: 0.,
+            variety,
         }
     }
-}
 
-impl Ring {
     /// Advance by `dt` seconds while the bands stand at `levels` (0..1),
     /// having risen by `rises` since the last frame.
     #[allow(clippy::cast_precision_loss)]
     pub fn advance(&mut self, dt: f32, levels: &[f32; BANDS], rises: &[f32; BANDS]) {
         if rises.iter().any(|&rise| rise > 0.) {
-            let kicks = high_pass(&spread(rises));
-            for (velocity, kick) in self.velocity.iter_mut().zip(kicks) {
+            let mut field = spread(rises);
+            for (i, kick) in field.iter_mut().enumerate() {
+                *kick *= self.variety.gain(i);
+            }
+            for (velocity, kick) in self.velocity.iter_mut().zip(high_pass(&field)) {
                 *velocity += KICK * kick;
             }
         }
+        self.variety.drift(dt);
         let loud = SWELL * levels.iter().sum::<f32>() / BANDS as f32;
         let response = if loud > self.swell {
             SWELL_ATTACK
@@ -122,7 +142,7 @@ impl Ring {
             && calm(&self.height, REST)
             && calm(&self.velocity, REST * SWING)
         {
-            *self = Ring::default();
+            *self = Ring::with(self.variety);
         }
     }
 
@@ -159,6 +179,55 @@ impl Ring {
     pub fn amplitude(&self) -> f32 {
         let furthest = |values: &[f32; NODES]| values.iter().fold(0_f32, |m, x| m.max(x.abs()));
         self.swell + furthest(&self.height) + furthest(&self.velocity) / SWING
+    }
+}
+
+/// Where kicks land stronger and weaker around the ring.
+#[derive(Clone, Copy)]
+struct Variety {
+    /// Each of [`VARIETY_WAVES`]' phase and drift, radians and radians per
+    /// second.
+    waves: [(f32, f32); VARIETY_WAVES.len()],
+}
+
+impl Variety {
+    fn random() -> Self {
+        Self::seeded(RandomState::new().hash_one(()))
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn seeded(mut seed: u64) -> Self {
+        // SplitMix64.
+        let mut next = || {
+            seed = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let z = (seed ^ (seed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        Self {
+            waves: VARIETY_WAVES.map(|(_, speed)| {
+                let draw = next();
+                let phase = TAU * (draw >> 40) as f32 / (1_u64 << 24) as f32;
+                (phase, if draw & 1 == 0 { speed } else { -speed })
+            }),
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn gain(&self, i: usize) -> f32 {
+        let at = TAU * i as f32 / NODES as f32;
+        let waves: f32 = VARIETY_WAVES
+            .iter()
+            .zip(&self.waves)
+            .map(|((cycles, _), (phase, _))| (cycles * at + phase).sin())
+            .sum();
+        1. + VARIETY * waves / VARIETY_WAVES.len() as f32
+    }
+
+    fn drift(&mut self, dt: f32) {
+        for (phase, speed) in &mut self.waves {
+            *phase = (*phase + *speed * dt).rem_euclid(TAU);
+        }
     }
 }
 
@@ -262,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_syllable_rings_on_then_comes_exactly_to_rest() {
-        let mut ring = Ring::default();
+        let mut ring = Ring::with(Variety::seeded(1));
         let voice = syllable();
         ring.advance(1. / 60., &voice, &voice);
         for _ in 0..12 {
@@ -296,27 +365,31 @@ mod tests {
 
     #[test]
     #[allow(clippy::cast_precision_loss)]
-    fn pushes_mirror_left_right_and_top_bottom() {
-        let mut ring = Ring::default();
+    fn no_two_dictations_ripple_alike_yet_kicks_stay_centred() {
         let voice: [f32; BANDS] = std::array::from_fn(|band| 1. - band as f32 / BANDS as f32);
-        ring.advance(1. / 60., &voice, &voice);
-        for _ in 0..3 {
-            ring.advance(1. / 60., &voice, &QUIET);
+        let surface = |seed| {
+            let mut ring = Ring::with(Variety::seeded(seed));
+            ring.advance(1. / 60., &voice, &voice);
+            for _ in 0..3 {
+                ring.advance(1. / 60., &voice, &QUIET);
+            }
+            ring.surface()
+        };
+        let (a, b) = (surface(1), surface(2));
+        let peak = a.iter().fold(0_f32, |m, h| m.max(h.abs()));
+        let apart = a.iter().zip(&b).fold(0_f32, |m, (x, y)| m.max((x - y).abs()));
+        assert!(apart > 0.1 * peak, "{apart} apart, peak {peak}");
+        for h in [a, b] {
+            for run in [0, HALF] {
+                // Low bands, the loudest here, kick the middle of each run
+                // most; the corners have yet to feel it.
+                let middle = h[run + RUN / 2];
+                assert!(
+                    middle > h[run + RUN / 4] && middle > 2. * h[run + RUN + CORNER],
+                    "{h:?}"
+                );
+            }
         }
-        let h = ring.surface();
-        for i in 0..NODES {
-            let left_right = h[(RUN + NODES - i) % NODES];
-            let top_bottom = h[(RUN + HALF + NODES - i) % NODES];
-            assert!((h[i] - left_right).abs() < 1e-5, "node {i}");
-            assert!((left_right - top_bottom).abs() < 1e-5, "node {i}");
-        }
-        // Low bands, the loudest here, kick the middle of the runs most;
-        // the corners have yet to feel it.
-        let middle = h[RUN / 2];
-        assert!(
-            middle > h[RUN / 4] && middle > 2. * h[RUN + CORNER],
-            "{h:?}"
-        );
     }
 
     /// Talking: syllables at 4 Hz, as heights and rises per frame.
@@ -329,7 +402,7 @@ mod tests {
     /// The ring's furthest height each tenth of a second over three seconds
     /// of talking and two of silence, at frames of `frame(n)` seconds.
     fn run(frame: impl Fn(usize) -> f32) -> Vec<f32> {
-        let mut ring = Ring::default();
+        let mut ring = Ring::with(Variety::seeded(7));
         let (mut t, mut last, mut n) = (0., QUIET, 0);
         let mut furthest = vec![0_f32; 50];
         while t < 5. {
