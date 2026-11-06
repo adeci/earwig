@@ -81,7 +81,8 @@ impl Drag {
         self.grab().is_some()
     }
 
-    /// The drag surface shows the held pill.
+    /// The drag surface shows the held pill (layer-shell only).
+    #[cfg(any(target_os = "linux", test))]
     pub fn cover(&mut self) {
         self.covered = self.is_held();
     }

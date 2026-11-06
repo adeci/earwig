@@ -17,10 +17,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use earwig_core::config::{OverlayConfig, OverlayPosition, OverlayStyle};
-use earwig_core::desktop::DesktopCaps;
 use earwig_core::spectrum::Feed;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme};
-use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
@@ -32,10 +30,12 @@ use gpui_kit::{
 };
 
 use crate::ui::drag::{Drag, Grab, Pointer};
-use crate::ui::layer_area;
 use crate::ui::pill::{self, Clock, Look, Motion, Shape};
-use crate::ui::x11_popup::X11Popup;
+use crate::ui::platform::Popup;
 use crate::ui::{OverlaySurface, accent, now_ms};
+
+#[cfg(target_os = "linux")]
+mod layer_shell;
 
 /// Width of the pill.
 const WIDTH: f32 = 560.;
@@ -62,6 +62,7 @@ const STILL_FRAME: Duration = Duration::from_millis(250);
 const SOFTWARE_DRAG_FRAME: Duration = Duration::from_millis(100);
 /// How long the drag surface waits, after a drop, for the pill's window to
 /// show it before closing anyway.
+#[cfg(target_os = "linux")]
 const LANDING_TIMEOUT: Duration = Duration::from_millis(500);
 /// Group name of the pill, whose hover shows the discard button.
 const PILL: &str = "pill";
@@ -76,12 +77,12 @@ const GAP: f32 = 8.;
 /// Open the overlay's window at home.
 pub fn open(
     config: &OverlayConfig,
-    caps: &DesktopCaps,
     surface: OverlaySurface,
     voice: Feed,
     cx: &mut App,
 ) -> anyhow::Result<Entity<OverlayView>> {
-    let options = home_window_options(caps, config, cx.primary_display().as_deref());
+    let display = crate::ui::platform::home_display(cx);
+    let options = home_window_options(surface, config, display.as_deref());
     // No Base root: it paints an opaque background, and the overlay has no
     // inputs or popovers that need one.
     let mut view = None;
@@ -98,29 +99,28 @@ pub fn open(
 }
 
 /// Window options for the overlay at home, the one place the platform
-/// choice is made.
-///
-/// With layer-shell the pill floats on the Overlay layer of the output the
-/// compositor picks (the focused one), never takes keyboard focus, and
-/// reserves no space. Elsewhere it is a borderless popup centred on the
-/// primary display.
+/// choice is made: a layer surface (see `layer_shell.rs`), or else a
+/// borderless popup centred on the display the platform picks.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        unused_variables,
+        reason = "only Linux has a surface besides the popup"
+    )
+)]
 fn home_window_options(
-    caps: &DesktopCaps,
+    surface: OverlaySurface,
     config: &OverlayConfig,
     display: Option<&dyn PlatformDisplay>,
 ) -> WindowOptions {
     let window_size = window_size(config.max_lines);
-    if caps.layer_shell {
-        // One edge only: layer-shell centres the surface along it.
-        return layer_options(
-            edge_anchor(config.position),
-            margins(config.position, px(WINDOW_MARGIN), px(0.)),
-            window_size,
-        );
+    #[cfg(target_os = "linux")]
+    if surface == OverlaySurface::LayerShell {
+        return layer_shell::home_window_options(config.position, window_size);
     }
     let origin = display.map_or(point(px(0.), px(0.)), |display| {
         popup_origin(
-            home_spot(display.bounds(), config.position),
+            home_spot(display.visible_bounds(), config.position),
             window_size,
             config.position,
         )
@@ -152,89 +152,6 @@ fn base_options() -> WindowOptions {
         // to 33 ms. The overlay paces itself.
         inactive_frame_interval: None,
         ..WindowOptions::default()
-    }
-}
-
-/// A transparent Overlay-layer surface that never takes keyboard focus.
-fn layer_options(
-    anchor: Anchor,
-    margin: (Pixels, Pixels, Pixels, Pixels),
-    size: Size<Pixels>,
-) -> WindowOptions {
-    WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: point(px(0.), px(0.)),
-            size,
-        })),
-        kind: WindowKind::LayerShell(LayerShellOptions {
-            namespace: "earwig".into(),
-            layer: Layer::Overlay,
-            anchor,
-            exclusive_zone: None,
-            exclusive_edge: None,
-            margin: Some(margin),
-            keyboard_interactivity: KeyboardInteractivity::None,
-        }),
-        ..base_options()
-    }
-}
-
-fn edge_anchor(position: OverlayPosition) -> Anchor {
-    match position {
-        OverlayPosition::Bottom => Anchor::BOTTOM,
-        OverlayPosition::Top => Anchor::TOP,
-    }
-}
-
-/// Layer-shell margins (top, right, bottom, left): `edge` from the edge at
-/// `position`, `left` from the left one.
-fn margins(
-    position: OverlayPosition,
-    edge: Pixels,
-    left: Pixels,
-) -> (Pixels, Pixels, Pixels, Pixels) {
-    match position {
-        OverlayPosition::Bottom => (px(0.), px(0.), edge, left),
-        OverlayPosition::Top => (edge, px(0.), px(0.), left),
-    }
-}
-
-/// The window at `origin` on the usable `area` (layer-shell), where a pill
-/// was dropped.
-fn moved_window_options(
-    position: OverlayPosition,
-    origin: Point<Pixels>,
-    window: Size<Pixels>,
-    area: Size<Pixels>,
-) -> WindowOptions {
-    let edge = match position {
-        OverlayPosition::Bottom => area.height - origin.y - window.height,
-        OverlayPosition::Top => origin.y,
-    };
-    layer_options(
-        edge_anchor(position) | Anchor::LEFT,
-        margins(position, edge, origin.x),
-        window,
-    )
-}
-
-/// The surface over the whole usable `area` that shows the pill during a
-/// drag (layer-shell); it takes no input.
-fn drag_window_options(position: OverlayPosition, area: Size<Pixels>) -> WindowOptions {
-    // Anchored like the home window, so the two share the area's frame:
-    // centred along the edge, the surface fills the area's width.
-    let options = layer_options(
-        edge_anchor(position),
-        margins(position, px(0.), px(0.)),
-        area,
-    );
-    // The pill follows the pointer at display rate: the surface never has
-    // focus or input of its own, which GPUI would otherwise hold to 30 fps
-    // (and to 30 fps in power-saver mode). Drawn with quads only, its
-    // frames are cheap.
-    WindowOptions {
-        low_power_frame_interval: None,
-        ..options
     }
 }
 
@@ -406,9 +323,10 @@ pub struct OverlayView {
     /// The pill's colours as they fade toward the current phase's.
     look: Option<Look>,
     tabular_numbers: FontFeatures,
-    surface: OverlaySurface,
-    /// The X11 popup, when it can be moved.
-    x11: Option<X11Popup>,
+    /// The pill sits on a layer surface, which cannot move once mapped.
+    layer_shell: bool,
+    /// The popup, when it can be moved.
+    popup: Option<Popup>,
     /// The output's usable area (layer-shell), once known; until then the
     /// pill stays put.
     usable: Option<Size<Pixels>>,
@@ -441,10 +359,15 @@ enum Role {
     /// The pill at rest: animated, takes the pointer.
     Rest,
     /// The pill on the drag surface: static quads, no input.
+    #[cfg(target_os = "linux")]
     Drag,
 }
 
 impl OverlayView {
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(unused_variables, reason = "only layer-shell probes its area")
+    )]
     pub fn new(
         config: &OverlayConfig,
         surface: OverlaySurface,
@@ -452,17 +375,23 @@ impl OverlayView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let x11 = match surface {
-            OverlaySurface::X11Popup => X11Popup::new(window)
+        let popup = if surface == OverlaySurface::Popup {
+            Popup::new(window)
                 .inspect_err(|e| log::warn!("the overlay stays where it is: {e:#}"))
-                .ok(),
-            _ => None,
+                .ok()
+        } else {
+            None
         };
-        if surface == OverlaySurface::LayerShell {
+        #[cfg(target_os = "linux")]
+        let layer_shell = surface == OverlaySurface::LayerShell;
+        #[cfg(not(target_os = "linux"))]
+        let layer_shell = false;
+        #[cfg(target_os = "linux")]
+        if layer_shell {
             cx.spawn(async move |this, cx| {
                 let area = cx
                     .background_executor()
-                    .spawn(async { layer_area::usable_area() })
+                    .spawn(async { crate::ui::platform::usable_area() })
                     .await;
                 match area {
                     #[allow(clippy::cast_precision_loss)]
@@ -495,8 +424,8 @@ impl OverlayView {
             frame_pending: false,
             look: None,
             tabular_numbers: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-            surface,
-            x11,
+            layer_shell,
+            popup,
             usable: None,
             window: None,
             origin: None,
@@ -626,15 +555,15 @@ impl OverlayView {
     }
 
     fn movable(&self) -> bool {
-        self.surface == OverlaySurface::LayerShell || self.x11.is_some()
+        self.layer_shell || self.popup.is_some()
     }
 
     /// The area the pill moves on: the output's usable area for layer-shell
-    /// (the frame of every overlay surface there), the X screen for the
-    /// popup.
+    /// (the frame of every overlay surface there), the screen less its
+    /// panels for the popup.
     fn area(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
-        if self.x11.is_some() {
-            window.display(cx).map(|display| display.bounds())
+        if self.popup.is_some() {
+            window.display(cx).map(|display| display.visible_bounds())
         } else {
             self.usable.map(|area| Bounds::new(Point::default(), area))
         }
@@ -644,7 +573,7 @@ impl OverlayView {
     fn origin(&self, area: Bounds<Pixels>) -> Point<Pixels> {
         let window = window_size(self.max_lines);
         self.origin.unwrap_or_else(|| {
-            if self.x11.is_some() {
+            if self.popup.is_some() {
                 popup_origin(home_spot(area, self.position), window, self.position)
             } else {
                 layer_home_origin(area.size, window, self.position)
@@ -673,7 +602,7 @@ impl OverlayView {
         area: Bounds<Pixels>,
         window: &Window,
     ) -> Option<Point<Pixels>> {
-        match &self.x11 {
+        match &self.popup {
             Some(popup) => popup.pointer(window.scale_factor()),
             None => Some(local + self.origin(area)),
         }
@@ -694,14 +623,16 @@ impl OverlayView {
         if !self.drag.hold(grab) {
             return;
         }
-        if self.x11.is_none() {
+        #[cfg(target_os = "linux")]
+        if self.popup.is_none() {
             self.open_drag_window(area.size, cx);
         }
         cx.notify();
     }
 
+    #[cfg(target_os = "linux")]
     fn open_drag_window(&mut self, area: Size<Pixels>, cx: &mut Context<Self>) {
-        let options = drag_window_options(self.position, area);
+        let options = layer_shell::drag_window_options(self.position, area);
         let overlay = cx.entity();
         // Opening renders the window, which reads this view: not while it
         // is being updated.
@@ -742,7 +673,7 @@ impl OverlayView {
         }
         // On software rendering each frame of the drag surface costs real
         // CPU: follow the pointer at a calm rate.
-        if self.x11.is_none()
+        if self.popup.is_none()
             && pill::software_rendered(window)
             && self
                 .moved_at
@@ -774,19 +705,26 @@ impl OverlayView {
     /// it was dropped (or let the old one show it again, when it did not
     /// move); the drag surface shows it until that window does.
     fn end_drag(&mut self, cx: &mut Context<Self>) {
-        let Some((grab, landing)) = self.drag.let_go() else {
+        let Some(released) = self.drag.let_go() else {
             return;
         };
         cx.notify();
-        // The X11 popup already followed the pointer.
-        let Some(area) = self
-            .usable
-            .filter(|_| self.x11.is_none())
-            .map(|area| Bounds::new(Point::default(), area))
-        else {
-            self.land(landing, cx);
+        // The popup already followed the pointer.
+        #[cfg(target_os = "linux")]
+        if let Some(area) = self.usable.filter(|_| self.popup.is_none()) {
+            self.reopen_where_dropped(Bounds::new(Point::default(), area), released, cx);
             return;
-        };
+        }
+        self.land(released.1, cx);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reopen_where_dropped(
+        &mut self,
+        area: Bounds<Pixels>,
+        (grab, landing): (Grab, u32),
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LANDING_TIMEOUT).await;
             let _ = this.update(cx, |view, cx| view.land(landing, cx));
@@ -801,7 +739,7 @@ impl OverlayView {
         let origin = window_origin(spot, window, area, self.position);
         let previous_origin = self.origin.replace(origin);
         self.left_behind = self.window.take();
-        let options = moved_window_options(self.position, origin, window, area.size);
+        let options = layer_shell::moved_window_options(self.position, origin, window, area.size);
         let overlay = cx.entity();
         cx.defer(move |cx| {
             let opened = cx.open_window(options, |window, _| {
@@ -838,9 +776,9 @@ impl OverlayView {
         }
     }
 
-    /// Move the X11 popup to the pill's spot once it was dragged.
+    /// Move the popup to the pill's spot once it was dragged.
     fn place_popup(&mut self, area: Bounds<Pixels>, window: &Window) {
-        if self.x11.is_none() || self.spot.is_none() {
+        if self.popup.is_none() || self.spot.is_none() {
             return;
         }
         let origin = window_origin(
@@ -850,7 +788,7 @@ impl OverlayView {
             self.position,
         );
         self.origin = Some(origin);
-        if let Some(popup) = &mut self.x11 {
+        if let Some(popup) = &mut self.popup {
             popup.move_to(origin, window.scale_factor());
         }
     }
@@ -919,6 +857,13 @@ impl OverlayView {
                             // Only the pill takes the pointer; everywhere
                             // else clicks reach whatever is below.
                             window.set_input_region(Some(&[bounds]));
+                            // With room for the shadow and the water, which
+                            // the region clips on Windows.
+                            #[cfg(windows)]
+                            crate::ui::platform::set_input_region(
+                                window,
+                                Some(bounds.dilate(px(INSET))),
+                            );
                             if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
                                 window.refresh();
@@ -1020,7 +965,7 @@ impl Render for OverlayView {
         let spot = self.current_spot(area, origin);
         let follow = self.drag.is_held().then(|| {
             let view = cx.entity().downgrade();
-            let exits = self.x11.is_none();
+            let exits = self.popup.is_none();
             canvas(
                 |_, _, _| {},
                 move |_, (), window, _| follow_drag(view, exits, window),
@@ -1136,10 +1081,12 @@ fn after_present<V: 'static>(
 
 /// Root of the drag surface: the pill at its spot on the usable area, drawn
 /// from the resting window's state (GPUI redraws it whenever that changes).
+#[cfg(target_os = "linux")]
 struct DragView {
     overlay: Entity<OverlayView>,
 }
 
+#[cfg(target_os = "linux")]
 impl Render for DragView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
@@ -1341,6 +1288,7 @@ mod tests {
         Bounds::new(point(placement.left, top), size(px(WIDTH), height))
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_dropped_pill_fits_its_window_and_the_screen_as_the_text_grows() {
         let area = Bounds::new(Point::default(), screen().size);
@@ -1354,14 +1302,17 @@ mod tests {
                     let pill = size(px(WIDTH), px(dropped));
                     let spot = clamp_spot(home + delta, pill, area, position);
                     let origin = window_origin(spot, window, area, position);
-                    let (edge, left) =
-                        match moved_window_options(position, origin, window, area.size).kind {
-                            WindowKind::LayerShell(options) => {
-                                let margin = options.margin.unwrap();
-                                (margin.0.max(margin.2), margin.3)
-                            }
-                            _ => unreachable!(),
-                        };
+                    let (edge, left) = match layer_shell::moved_window_options(
+                        position, origin, window, area.size,
+                    )
+                    .kind
+                    {
+                        WindowKind::LayerShell(options) => {
+                            let margin = options.margin.unwrap();
+                            (margin.0.max(margin.2), margin.3)
+                        }
+                        _ => unreachable!(),
+                    };
                     assert!(edge >= px(0.) && left >= px(0.), "{position:?} {delta:?}");
                     for height in [dropped, grown] {
                         let spot =

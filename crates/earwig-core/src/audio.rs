@@ -28,8 +28,9 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a clip recording delivers audio, like a capture buffer.
 const CLIP_TICK: Duration = Duration::from_millis(10);
 
-/// Names of the input devices, for `[audio] device`. These are cpal device
-/// ids (ALSA PCM names such as `default` or `pipewire`), stable across runs.
+/// Names of the input devices, for `[audio] device`, stable across runs:
+/// cpal device ids (ALSA PCM names such as `default` or `pipewire`), and on
+/// Windows the names the Sound settings show (its ids are opaque GUIDs).
 pub fn input_devices() -> anyhow::Result<Vec<String>> {
     let host = cpal::default_host();
     Ok(host
@@ -43,8 +44,14 @@ pub fn default_input_device() -> Option<String> {
     device_name(&cpal::default_host().default_input_device()?)
 }
 
+#[cfg(not(windows))]
 fn device_name(device: &cpal::Device) -> Option<String> {
     device.id().ok().map(|id| id.id().to_owned())
+}
+
+#[cfg(windows)]
+fn device_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_owned())
 }
 
 /// Read a WAV file as 16 kHz mono `f32`, whatever its rate, channel count or

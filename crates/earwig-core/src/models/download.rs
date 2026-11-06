@@ -6,7 +6,7 @@
 //! (200) restarts it. Only a file whose SHA-256 matches is renamed into
 //! place, so a path in the store is always a verified file.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -57,8 +57,12 @@ pub(crate) fn fetch(
         .truncate(false)
         .open(&part_path)?;
     // One writer per part, across processes (settings window and CLI).
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| io::Error::other(format!("{} is already being downloaded", dest.display())))?;
+    file.try_lock().map_err(|e| match e {
+        TryLockError::WouldBlock => {
+            io::Error::other(format!("{} is already being downloaded", dest.display()))
+        }
+        TryLockError::Error(e) => e,
+    })?;
 
     let mut part = Part {
         file,

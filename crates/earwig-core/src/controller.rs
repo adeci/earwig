@@ -624,6 +624,7 @@ impl Controller {
             Command::Release => self.input(Input::Release),
             Command::Toggle => self.input(Input::Toggle),
             Command::Cancel => self.input(Input::Cancel),
+            Command::Chord => self.input(Input::Chord),
             Command::ShowSettings => self.publish(&Event::ShowSettings),
             Command::ReloadConfig => self.reload_config(),
             Command::UseModel { model } => self.use_model(&model),
@@ -895,6 +896,9 @@ impl Controller {
         let config = self.config();
         self.session
             .configure(config.hotkey.mode, config.hotkey.hold_threshold_ms);
+        if let Err(e) = crate::hotkey::configure(&config.hotkey) {
+            self.error(format!("hotkey: {e}"));
+        }
         if config.audio != self.audio_config {
             if let Some(capture) = &self.capture {
                 capture.configure(config.audio.clone());
@@ -1047,7 +1051,7 @@ mod tests {
             fs::write(
                 &system,
                 format!(
-                    "[hotkey]\nhold_threshold_ms = 150\n[model]\nmodel = \"{}\"\n",
+                    "[hotkey]\nhold_threshold_ms = 150\n[model]\nmodel = '{}'\n",
                     model.display()
                 ),
             )
@@ -1232,7 +1236,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = dir.path().join("fake.gguf");
         fs::write(&model, b"").unwrap();
-        let user = format!("[model]\nmodel = \"{}\"\n", model.display());
+        let user = format!("[model]\nmodel = '{}'\n", model.display());
         fs::write(dir.path().join("user.toml"), user).unwrap();
         let gone = dir.path().join("gone.gguf");
         let d = Daemon::spawn(dir, Vec::new(), false);
