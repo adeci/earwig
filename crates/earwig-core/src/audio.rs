@@ -1,6 +1,7 @@
 //! Microphone capture as 16 kHz mono `f32`. The cpal callback only downmixes;
-//! a worker thread resamples, keeps the pre-roll, meters the level, and
-//! reopens a failed input until it works again.
+//! a worker thread analyses the raw input for the overlay (see
+//! [`crate::spectrum`]), resamples, keeps the pre-roll, and reopens a failed
+//! input until it works again.
 //!
 //! Linux goes through ALSA: on PipeWire systems the ALSA `default` device is
 //! PipeWire's plugin, so routing and device switching work without cpal's
@@ -19,12 +20,13 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 
 use crate::SAMPLE_RATE;
 use crate::config::AudioConfig;
+use crate::spectrum::{Analyzer, Feed, Spectrum};
 
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
 /// An open input that delivers nothing for this long counts as failed.
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
-const LEVEL_HZ: usize = 20;
-const CLIP_TICK: Duration = Duration::from_millis(20);
+/// How often a clip recording delivers audio, like a capture buffer.
+const CLIP_TICK: Duration = Duration::from_millis(10);
 
 /// Names of the input devices, for `[audio] device`. These are cpal device
 /// ids (ALSA PCM names such as `default` or `pipewire`), stable across runs.
@@ -109,7 +111,7 @@ pub enum AudioEvent {
     /// Audio of recording `recording`, in order. The first chunk after
     /// [`Capture::start`] is the pre-roll.
     Samples { recording: u64, pcm: Vec<f32> },
-    /// Input level of the recording, 0.0 to 1.0, about 20 times a second.
+    /// Input level of the recording, 0.0 to 1.0, 20 times a second.
     Level { recording: u64, level: f32 },
     /// Every sample of `recording` has been delivered.
     Stopped { recording: u64 },
@@ -130,15 +132,18 @@ pub struct Capture {
 }
 
 impl Capture {
+    /// Capture from `source`; `events` gets the audio and `feed` the
+    /// overlay's live spectrum of each recording.
     pub fn spawn(
         source: Source,
         config: AudioConfig,
         events: flume::Sender<AudioEvent>,
+        feed: Feed,
     ) -> anyhow::Result<Self> {
         let (control, control_rx) = flume::unbounded();
         let worker = thread::Builder::new()
             .name("earwig-audio".into())
-            .spawn(move || Worker::new(source, config, events).run(&control_rx))?;
+            .spawn(move || Worker::new(source, config, events, feed).run(&control_rx))?;
         Ok(Self {
             control: Some(control),
             worker: Some(worker),
@@ -183,6 +188,7 @@ enum Raw {
 struct Input {
     _stream: cpal::Stream,
     rx: flume::Receiver<Raw>,
+    rate: u32,
     resampler: StreamResampler,
     last_data: Instant,
     name: String,
@@ -190,7 +196,8 @@ struct Input {
 
 struct Recording {
     id: u64,
-    meter: LevelMeter,
+    /// For the rate of the audio being analysed; made on first use.
+    analyzer: Option<Analyzer>,
     started: Instant,
     clip_sent: usize,
 }
@@ -199,6 +206,7 @@ struct Worker {
     source: Source,
     config: AudioConfig,
     events: flume::Sender<AudioEvent>,
+    feed: Feed,
     input: Option<Input>,
     /// When to try opening the input next.
     reopen_at: Instant,
@@ -215,11 +223,17 @@ enum Wake {
 }
 
 impl Worker {
-    fn new(source: Source, config: AudioConfig, events: flume::Sender<AudioEvent>) -> Self {
+    fn new(
+        source: Source,
+        config: AudioConfig,
+        events: flume::Sender<AudioEvent>,
+        feed: Feed,
+    ) -> Self {
         Self {
             source,
             config,
             events,
+            feed,
             input: None,
             reopen_at: Instant::now(),
             failing: false,
@@ -286,7 +300,6 @@ impl Worker {
         }
         match open_input(self.config.device.as_deref()) {
             Ok(input) => {
-                log::info!("audio input: {}", input.name);
                 self.failing = false;
                 self.input = Some(input);
             }
@@ -324,10 +337,11 @@ impl Worker {
         self.preroll.clear();
         self.recording = Some(Recording {
             id,
-            meter: LevelMeter::default(),
+            analyzer: None,
             started: Instant::now(),
             clip_sent: 0,
         });
+        self.feed.publish(Spectrum::default());
         if self.input.is_none() {
             self.reopen_at = Instant::now();
         }
@@ -352,6 +366,7 @@ impl Worker {
             }
             self.play_clip();
             self.recording = None;
+            self.feed.publish(Spectrum::default());
         }
         let _ = self.events.send(AudioEvent::Stopped { recording: id });
     }
@@ -361,6 +376,13 @@ impl Worker {
             return;
         };
         input.last_data = Instant::now();
+        let rate = input.rate;
+        // The overlay hears the voice before the resampler waits for a
+        // full chunk.
+        self.analyze(rate, raw);
+        let Some(input) = &mut self.input else {
+            return;
+        };
         let pcm = input.resampler.process(raw);
         if self.recording.is_some() {
             self.deliver(&pcm);
@@ -368,6 +390,26 @@ impl Worker {
             self.preroll.extend(pcm);
             self.trim_preroll();
         }
+    }
+
+    /// Feed `pcm`, audio at `rate` just heard by the recording, to its
+    /// analyzer: levels go to the controller, the spectrum to the overlay.
+    fn analyze(&mut self, rate: u32, pcm: &[f32]) {
+        let Some(recording) = &mut self.recording else {
+            return;
+        };
+        let analyzer = match &mut recording.analyzer {
+            Some(analyzer) if analyzer.rate() == rate => analyzer,
+            slot => slot.insert(Analyzer::new(rate)),
+        };
+        let id = recording.id;
+        analyzer.push(pcm, |level| {
+            let _ = self.events.send(AudioEvent::Level {
+                recording: id,
+                level,
+            });
+        });
+        self.feed.publish(analyzer.spectrum());
     }
 
     fn trim_preroll(&mut self) {
@@ -392,23 +434,17 @@ impl Worker {
             .map(|i| clip.get(i).copied().unwrap_or(0.0))
             .collect();
         recording.clip_sent = due;
+        self.analyze(SAMPLE_RATE, &pcm);
         self.deliver(&pcm);
     }
 
-    fn deliver(&mut self, pcm: &[f32]) {
+    fn deliver(&self, pcm: &[f32]) {
         // The resampler returns nothing until it has a full chunk.
-        let (Some(recording), false) = (&mut self.recording, pcm.is_empty()) else {
+        let (Some(recording), false) = (&self.recording, pcm.is_empty()) else {
             return;
         };
-        let id = recording.id;
-        for level in recording.meter.push(pcm) {
-            let _ = self.events.send(AudioEvent::Level {
-                recording: id,
-                level,
-            });
-        }
         let _ = self.events.send(AudioEvent::Samples {
-            recording: id,
+            recording: recording.id,
             pcm: pcm.to_vec(),
         });
     }
@@ -431,6 +467,10 @@ fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
     let rate = supported.sample_rate();
     let config = supported.config();
     let (tx, rx) = flume::unbounded();
+    // The device's own period, never a fixed one: cpal rings only two
+    // periods, and when PipeWire's graph runs another quantum (512 frames
+    // against 480 asked for) the difference is lost every cycle, chopping
+    // the voice the engine hears.
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, tx),
         cpal::SampleFormat::F64 => build::<f64>(&device, config, channels, tx),
@@ -443,10 +483,20 @@ fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
     }
     .with_context(|| format!("opening {name}"))?;
     stream.play().with_context(|| format!("starting {name}"))?;
-    log::debug!("{name}: {rate} Hz, {channels} channel(s)");
+    let buffer = stream.buffer_size().map_or_else(
+        |_| "unknown".to_owned(),
+        |frames| {
+            format!(
+                "{frames} frames ({:.1} ms)",
+                1000. * to_f32(frames as usize) / to_f32(rate as usize)
+            )
+        },
+    );
+    log::info!("audio input {name}: {rate} Hz, {channels} channel(s), buffer {buffer}");
     Ok(Input {
         _stream: stream,
         rx,
+        rate,
         resampler: StreamResampler::new(rate)?,
         last_data: Instant::now(),
         name,
@@ -559,33 +609,6 @@ impl StreamResampler {
     }
 }
 
-/// RMS level over short windows, mapped from -60..0 dBFS to 0..1.
-#[derive(Default)]
-struct LevelMeter {
-    sum: f32,
-    count: usize,
-}
-
-impl LevelMeter {
-    const WINDOW: usize = SAMPLE_RATE as usize / LEVEL_HZ;
-
-    fn push(&mut self, pcm: &[f32]) -> Vec<f32> {
-        let mut levels = Vec::new();
-        for &s in pcm {
-            self.sum += s * s;
-            self.count += 1;
-            if self.count == Self::WINDOW {
-                let rms = (self.sum / to_f32(Self::WINDOW)).sqrt();
-                let db = 20.0 * rms.max(1e-6).log10();
-                levels.push(((db + 60.0) / 60.0).clamp(0.0, 1.0));
-                self.sum = 0.0;
-                self.count = 0;
-            }
-        }
-        levels
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,17 +630,6 @@ mod tests {
         }
         // Up to one 20 ms chunk stays buffered.
         assert!((15_600..=16_000).contains(&out.len()), "{}", out.len());
-    }
-
-    #[test]
-    fn level_tracks_loudness() {
-        let mut meter = LevelMeter::default();
-        let silent = meter.push(&vec![0.0; LevelMeter::WINDOW]);
-        let loud = meter.push(&tone(SAMPLE_RATE, 800, 0.9));
-        let quiet = meter.push(&tone(SAMPLE_RATE, 800, 0.01));
-        assert_eq!(silent, [0.0]);
-        assert!(loud[0] > 0.9, "{loud:?}");
-        assert!(quiet[0] > 0.2 && quiet[0] < 0.5, "{quiet:?}");
     }
 
     #[test]
@@ -653,8 +665,15 @@ mod tests {
     fn clip_plays_per_recording_then_stops() {
         let clip: Arc<[f32]> = vec![0.5; 1_600].into();
         let (tx, rx) = flume::unbounded();
-        let capture = Capture::spawn(Source::Clip(clip), AudioConfig::default(), tx).unwrap();
+        let feed = Feed::default();
+        let wakes = feed.wakes();
+        let capture =
+            Capture::spawn(Source::Clip(clip), AudioConfig::default(), tx, feed.clone()).unwrap();
         capture.start(1);
+        assert!(
+            wakes.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the overlay hears it"
+        );
         thread::sleep(Duration::from_millis(250));
         capture.stop(1);
         let mut samples = Vec::new();
@@ -671,6 +690,7 @@ mod tests {
         assert!(samples[..1_600].iter().all(|&s| s == 0.5));
         assert!(samples[1_600..].iter().all(|&s| s == 0.0));
         assert!(levels >= 4, "{levels}");
+        assert_eq!(feed.latest(), Spectrum::default(), "cleared once stopped");
         // Nothing arrives between recordings.
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
     }

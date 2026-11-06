@@ -20,6 +20,7 @@ pub struct Config {
     pub audio: AudioConfig,
     pub model: ModelConfig,
     pub insert: InsertConfig,
+    pub appearance: AppearanceConfig,
     pub overlay: OverlayConfig,
     pub history: HistoryConfig,
     pub hooks: HooksConfig,
@@ -121,12 +122,40 @@ pub struct InsertConfig {
     pub terminals: Vec<String>,
 }
 
+/// The colours of earwig's own windows (the settings window and the
+/// overlay), whatever the desktop's light or dark preference.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeSetting {
+    #[default]
+    Dark,
+    Light,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppearanceConfig {
+    pub theme: ThemeSetting,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayPosition {
     Top,
     #[default]
     Bottom,
+}
+
+/// How the overlay pill shows the voice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayStyle {
+    /// The pill's outline behaves like water the voice disturbs: speech
+    /// sends ripples around it that ring on and settle after it.
+    #[default]
+    Wave,
+    /// Sound bars above and below a still pill, one pair per speech band.
+    Bars,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -136,14 +165,20 @@ pub struct OverlayConfig {
     pub position: OverlayPosition,
     /// Lines of live text shown before older lines scroll away.
     pub max_lines: u32,
-    /// How much the pill's edge swells and ripples with the voice: 0 is
-    /// still, 1 the default, up to [`OverlayConfig::MAX_MOTION`].
+    pub style: OverlayStyle,
+    /// How far the voice moves the pill (bar height or wave amplitude): 0
+    /// is still, up to [`OverlayConfig::MAX_MOTION`].
     #[serde(serialize_with = "short_float")]
     pub motion: f32,
     /// Opacity of the pill's fill (and the depth of its shadow), from
-    /// [`OverlayConfig::MIN_OPACITY`] to 1; text and border stay opaque.
+    /// [`OverlayConfig::MIN_OPACITY`] to 1; text, bars and border stay
+    /// opaque.
     #[serde(serialize_with = "short_float")]
     pub opacity: f32,
+    /// Width of the pill's accent border in pixels, 0 (none, the default)
+    /// to [`OverlayConfig::MAX_BORDER`].
+    #[serde(serialize_with = "short_float")]
+    pub border: f32,
 }
 
 /// TOML floats are `f64`; widening through the shortest decimal writes 0.7
@@ -155,13 +190,15 @@ fn short_float<S: serde::Serializer>(value: &f32, serializer: S) -> Result<S::Ok
 
 impl OverlayConfig {
     pub const MAX_MOTION: f32 = 2.;
+    pub const DEFAULT_MOTION: f32 = 0.8;
     pub const DEFAULT_OPACITY: f32 = 0.97;
     pub const MIN_OPACITY: f32 = 0.3;
+    pub const MAX_BORDER: f32 = 3.;
 
     /// `motion` within its range; an unreadable value means the default.
     pub fn motion(&self) -> f32 {
         if self.motion.is_nan() {
-            1.
+            Self::DEFAULT_MOTION
         } else {
             self.motion.clamp(0., Self::MAX_MOTION)
         }
@@ -175,6 +212,15 @@ impl OverlayConfig {
             self.opacity.clamp(Self::MIN_OPACITY, 1.)
         }
     }
+
+    /// `border` within its range; an unreadable value means none.
+    pub fn border(&self) -> f32 {
+        if self.border.is_nan() {
+            0.
+        } else {
+            self.border.clamp(0., Self::MAX_BORDER)
+        }
+    }
 }
 
 impl Default for OverlayConfig {
@@ -183,8 +229,10 @@ impl Default for OverlayConfig {
             enabled: true,
             position: OverlayPosition::Bottom,
             max_lines: 3,
-            motion: 1.,
+            style: OverlayStyle::default(),
+            motion: Self::DEFAULT_MOTION,
             opacity: Self::DEFAULT_OPACITY,
+            border: 0.,
         }
     }
 }
@@ -474,36 +522,72 @@ mod tests {
     }
 
     #[test]
-    fn overlay_motion_and_opacity_default_round_trip_and_clamp() {
+    fn overlay_looks_default_round_trip_and_clamp() {
         let (_dir, mut store) = store("", "");
         let overlay = &store.config().overlay;
-        assert!((overlay.motion() - 1.).abs() < f32::EPSILON);
+        assert_eq!(overlay.style, OverlayStyle::Wave);
+        assert!((overlay.motion() - OverlayConfig::DEFAULT_MOTION).abs() < f32::EPSILON);
         assert!((overlay.opacity() - 0.97).abs() < f32::EPSILON);
+        assert!(overlay.border().abs() < f32::EPSILON, "borderless");
         store
             .update(|c| {
+                c.overlay.style = OverlayStyle::Bars;
                 c.overlay.motion = 1.5;
                 c.overlay.opacity = 0.7;
+                c.overlay.border = 1.5;
             })
             .unwrap();
         let written = fs::read_to_string(&store.paths().user).unwrap();
-        assert_eq!(written.trim(), "[overlay]\nmotion = 1.5\nopacity = 0.7");
+        assert_eq!(
+            written.trim(),
+            "[overlay]\nborder = 1.5\nmotion = 1.5\nopacity = 0.7\nstyle = \"bars\""
+        );
         let (_dir, reloaded) = self::store(&written, "");
-        assert!((reloaded.config().overlay.motion() - 1.5).abs() < f32::EPSILON);
-        assert!((reloaded.config().overlay.opacity() - 0.7).abs() < f32::EPSILON);
+        let overlay = &reloaded.config().overlay;
+        assert_eq!(overlay.style, OverlayStyle::Bars);
+        assert!((overlay.motion() - 1.5).abs() < f32::EPSILON);
+        assert!((overlay.opacity() - 0.7).abs() < f32::EPSILON);
+        assert!((overlay.border() - 1.5).abs() < f32::EPSILON);
 
         let over = OverlayConfig {
             motion: 7.,
             opacity: 3.,
+            border: 10.,
             ..OverlayConfig::default()
         };
         assert!((over.motion() - OverlayConfig::MAX_MOTION).abs() < f32::EPSILON);
         assert!((over.opacity() - 1.).abs() < f32::EPSILON);
+        assert!((over.border() - OverlayConfig::MAX_BORDER).abs() < f32::EPSILON);
         let under = OverlayConfig {
             motion: -1.,
             opacity: 0.,
+            border: -2.,
             ..OverlayConfig::default()
         };
         assert!(under.motion().abs() < f32::EPSILON);
         assert!((under.opacity() - OverlayConfig::MIN_OPACITY).abs() < f32::EPSILON);
+        assert!(under.border().abs() < f32::EPSILON);
+        let unreadable = OverlayConfig {
+            border: f32::NAN,
+            ..OverlayConfig::default()
+        };
+        assert!(unreadable.border().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn theme_defaults_to_dark_round_trips_and_rejects_unknown() {
+        let (_dir, mut store) = store("", "");
+        assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
+        store
+            .update(|c| c.appearance.theme = ThemeSetting::Light)
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[appearance]\ntheme = \"light\"");
+        let (_dir, reloaded) = self::store(&written, "");
+        assert_eq!(reloaded.config().appearance.theme, ThemeSetting::Light);
+
+        let (_dir, store) = self::store("[appearance]\ntheme = \"system\"\n", "");
+        assert!(store.user_error().is_some());
+        assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
     }
 }

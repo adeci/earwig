@@ -204,6 +204,7 @@ mod tests {
     use crate::events::{DictationState, ModelStatus, Status};
     use crate::history::History;
     use crate::models::{ModelManager, ModelSpec};
+    use crate::spectrum::Feed;
 
     struct NoEngine;
 
@@ -237,6 +238,7 @@ mod tests {
         let shared = Arc::new(Shared {
             commands: tx,
             bus: Bus::default(),
+            spectrum: Feed::default(),
             status: RwLock::new(status),
             config: Arc::new(RwLock::new(config)),
             models: Arc::new(ModelManager::new(dir.join("models"))),

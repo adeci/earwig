@@ -1,5 +1,6 @@
 //! The control socket's wire format (one JSON object per line) and the
-//! in-process feed the UI renders from.
+//! in-process feed the UI renders from. The overlay's sound bars come from
+//! [`crate::spectrum::Feed`] instead, which is not sent over the socket.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +40,8 @@ pub enum Event {
     State {
         state: DictationState,
     },
-    /// Microphone level while recording, 0.0 (silence) to 1.0 (loud).
+    /// Microphone level while recording, 0.0 (silence) to 1.0 (loud), 20
+    /// times a second.
     Level {
         level: f32,
     },

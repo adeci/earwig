@@ -28,6 +28,7 @@ use crate::hooks;
 use crate::insert::Inserter;
 use crate::models::{ModelError, ModelManager, ModelSpec};
 use crate::session::{Action, Input, Phase, Session};
+use crate::spectrum::Feed;
 
 pub struct Parts {
     pub config: ConfigStore,
@@ -88,6 +89,8 @@ pub struct Handle {
 pub(crate) struct Shared {
     pub commands: flume::Sender<Command>,
     pub bus: Bus,
+    /// The live spectrum of the current recording, for the overlay.
+    pub spectrum: Feed,
     /// Written before the matching event is published.
     pub status: RwLock<Status>,
     pub config: Arc<RwLock<ConfigStore>>,
@@ -115,6 +118,12 @@ impl Handle {
         self.shared.bus.subscribe(|| Event::Status {
             status: self.status(),
         })
+    }
+
+    /// The voice of the current recording as it is heard, far more often
+    /// than [`Event::Level`].
+    pub fn spectrum(&self) -> Feed {
+        self.shared.spectrum.clone()
     }
 
     pub fn status(&self) -> Status {
@@ -159,6 +168,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     let shared = Arc::new(Shared {
         commands: commands_tx,
         bus: Bus::default(),
+        spectrum: Feed::default(),
         status: RwLock::new(Status {
             state: DictationState::Idle,
             model: ModelStatus::Missing {
@@ -174,7 +184,12 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     });
 
     let (audio_tx, audio) = flume::unbounded();
-    let capture = Capture::spawn(source, settings.audio.clone(), audio_tx)?;
+    let capture = Capture::spawn(
+        source,
+        settings.audio.clone(),
+        audio_tx,
+        shared.spectrum.clone(),
+    )?;
     let (engine_tx, engine_jobs) = flume::unbounded();
     let (engine_events_tx, engine_events) = flume::unbounded();
     let engine_worker = thread::Builder::new()
