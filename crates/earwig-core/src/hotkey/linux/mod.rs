@@ -17,3 +17,9 @@ pub(super) fn sources(config: &HotkeyConfig, caps: &DesktopCaps) -> Vec<Box<dyn 
         Vec::new()
     }
 }
+
+/// The portal's binding lives in the desktop's settings, not in earwig's.
+#[expect(clippy::unnecessary_wraps, reason = "the same signature on every OS")]
+pub(super) fn configure(_config: &HotkeyConfig) -> Result<(), super::trigger::ParseError> {
+    Ok(())
+}

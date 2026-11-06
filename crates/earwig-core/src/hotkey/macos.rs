@@ -9,3 +9,8 @@ use crate::desktop::DesktopCaps;
 pub(super) fn sources(_config: &HotkeyConfig, _caps: &DesktopCaps) -> Vec<Box<dyn HotkeySource>> {
     Vec::new()
 }
+
+#[expect(clippy::unnecessary_wraps, reason = "the same signature on every OS")]
+pub(super) fn configure(_config: &HotkeyConfig) -> Result<(), super::trigger::ParseError> {
+    Ok(())
+}

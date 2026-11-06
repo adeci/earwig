@@ -1,12 +1,13 @@
 //! macOS: not ported yet. No overlay (a normal window would take focus from
-//! the app the text is meant for), no tray icon, no accent colour.
+//! the app the text is meant for), no accent colour; the menu-bar icon
+//! (`tray-icon`).
 
-use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
-use earwig_core::events::DictationState;
-use gpui_kit::{App, Application, Hsla, Pixels, Point, Window};
+use gpui_kit::{App, Application, Hsla, Pixels, PlatformDisplay, Point, Window};
 
-use crate::ui::{Local, OverlaySurface};
+use crate::ui::OverlaySurface;
+
+pub(crate) use super::tray_icon::{TrayHandle, spawn as spawn_tray};
 
 pub(crate) fn overlay_surface(_caps: &DesktopCaps) -> OverlaySurface {
     OverlaySurface::None
@@ -33,19 +34,9 @@ impl Popup {
     }
 }
 
-/// There is no tray icon on macOS yet.
-pub(crate) enum TrayHandle {}
-
-impl TrayHandle {
-    pub(crate) fn set_state(&self, _state: DictationState) {
-        match *self {}
-    }
-}
-
-pub(crate) fn spawn_tray(_handle: Handle, _local: flume::Sender<Local>) -> Option<TrayHandle> {
-    log::info!("no tray icon on macOS yet");
-    None
-}
-
 /// No accent colour on macOS yet: the feed ends at once.
 pub(crate) fn follow_accent(_tx: &flume::Sender<Option<Hsla>>, _cx: &App) {}
+
+pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>> {
+    cx.primary_display()
+}

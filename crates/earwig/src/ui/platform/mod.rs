@@ -6,7 +6,9 @@
 //! - `Popup`: moves the overlay's [`OverlaySurface::Popup`](super::OverlaySurface)
 //!   window during a drag and reports the pointer in screen coordinates
 //!   (`new`, `pointer`, `move_to`).
-//! - `spawn_tray(handle, local)` and `TrayHandle::set_state`.
+//! - `home_display(cx)`: the display the overlay opens on.
+//! - `spawn_tray(handle, local)` (called inside the GPUI application) and
+//!   `TrayHandle::set_state`.
 //! - `follow_accent(tx, cx)`: sends the desktop's accent colour, and every
 //!   change of it, to `tx`.
 
@@ -14,6 +16,8 @@
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod tray_icon;
 #[cfg(windows)]
 mod windows;
 
@@ -26,4 +30,6 @@ use windows as os;
 
 #[cfg(target_os = "linux")]
 pub(crate) use os::usable_area;
-pub(crate) use os::{Popup, TrayHandle, application, follow_accent, overlay_surface, spawn_tray};
+pub(crate) use os::{
+    Popup, TrayHandle, application, follow_accent, home_display, overlay_surface, spawn_tray,
+};

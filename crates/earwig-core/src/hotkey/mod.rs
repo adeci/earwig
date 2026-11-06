@@ -10,9 +10,11 @@
 //! - Linux: the XDG GlobalShortcuts portal (GNOME 48+, KDE).
 //!   `Activated`/`Deactivated` map to press/release.
 //! - macOS, Windows: no global hotkey of their own yet; the socket is the
-//!   only source.
+//!   only source. They will watch [`HotkeyConfig::key`].
 //!
-//! Each OS module provides `sources(config, caps)`.
+//! Each OS module provides `sources(config, caps)` and `configure(config)`.
+
+pub mod trigger;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -44,4 +46,11 @@ pub trait HotkeySource: Send {
 /// Sources to start besides the always-on socket.
 pub fn sources(config: &HotkeyConfig, caps: &DesktopCaps) -> Vec<Box<dyn HotkeySource>> {
     os::sources(config, caps)
+}
+
+/// Apply a changed [`HotkeyConfig`] to the running sources. Only
+/// [`HotkeyConfig::key`] changes while they run; a key that does not parse
+/// turns the OS's own hotkey off until it does.
+pub fn configure(config: &HotkeyConfig) -> Result<(), trigger::ParseError> {
+    os::configure(config)
 }

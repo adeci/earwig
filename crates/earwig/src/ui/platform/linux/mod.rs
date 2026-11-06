@@ -8,7 +8,7 @@ mod tray;
 mod x11_popup;
 
 use earwig_core::desktop::DesktopCaps;
-use gpui_kit::{Application, WindowingModes};
+use gpui_kit::{App, Application, PlatformDisplay, WindowingModes};
 
 use crate::ui::OverlaySurface;
 
@@ -36,4 +36,10 @@ pub(crate) fn application(surface: OverlaySurface, caps: &DesktopCaps) -> Applic
     } else {
         gpui_kit::application()
     }
+}
+
+/// The primary display: the X11 popup opens there (layer-shell surfaces go
+/// to the output the compositor picks).
+pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>> {
+    cx.primary_display()
 }
