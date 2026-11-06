@@ -22,6 +22,7 @@
   libxi,
   libxrandr,
   apple-sdk_15,
+  llvmPackages,
 }:
 let
   inherit (stdenv.hostPlatform) isLinux;
@@ -78,6 +79,12 @@ let
     # transcribe.cpp is built through the `cmake` crate, not by a cmake
     # configure phase.
     dontUseCmakeConfigure = true;
+  }
+  // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
+    # ggml's Metal backend checks the OS version at run time (`@available`)
+    # because the deployment target is older than the APIs it uses; rustc
+    # links without clang's runtime library, which holds that check.
+    NIX_LDFLAGS = "${llvmPackages.compiler-rt}/lib/darwin/libclang_rt.osx.a";
   };
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
