@@ -46,7 +46,7 @@ jobs:
           echo 'overlay.max_lines = 2' > "$HOME/Library/Application Support/earwig/config.toml"
           EARWIG_AUDIO_FILE=tests/fixtures/dictation-sentences.wav RUST_LOG=info \
             result/Applications/earwig.app/Contents/MacOS/earwig daemon 2> shots/daemon.log &
-          for _ in $(seq 60); do result/bin/earwig status 2>/dev/null | grep -q '"state":"ready"' && break; sleep 2; done
+          for _ in $(seq 60); do result/bin/earwig status 2>/dev/null | grep -q '"state": "ready"' && break; sleep 2; done
           result/bin/earwig status | tee shots/status.json
           result/bin/earwig toggle
           for shot in 1 2 3; do
