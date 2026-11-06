@@ -31,6 +31,8 @@ use macos as os;
 #[cfg(windows)]
 use windows as os;
 
+#[cfg(target_os = "macos")]
+pub(crate) use os::set_input_region;
 #[cfg(target_os = "linux")]
 pub(crate) use os::usable_area;
 pub(crate) use os::{

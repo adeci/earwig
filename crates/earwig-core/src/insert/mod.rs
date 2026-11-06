@@ -2,8 +2,9 @@
 //!
 //! Each OS module provides `backends(config, caps)`: the inserters for this
 //! session, best first, which [`auto`] chains. Linux has three (see
-//! `linux/mod.rs`); macOS and Windows have none yet, so the daemon keeps
-//! every dictation in history and says no insertion method exists.
+//! `linux/mod.rs`), macOS pastes (`macos.rs`); Windows has none yet, so the
+//! daemon keeps every dictation in history and says no insertion method
+//! exists.
 //!
 //! [`Inserter::insert`] returns [`InsertError::NotApplicable`] when a backend
 //! cannot handle the current focus, so the chain moves on; any other error is

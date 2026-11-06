@@ -864,6 +864,8 @@ impl OverlayView {
                                 window,
                                 Some(bounds.dilate(px(INSET))),
                             );
+                            #[cfg(target_os = "macos")]
+                            crate::ui::platform::set_input_region(window, Some(bounds));
                             if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
                                 window.refresh();

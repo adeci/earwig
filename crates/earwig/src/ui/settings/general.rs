@@ -36,6 +36,16 @@ pub fn page(pill: &Entity<PillPreview>, cx: &App) -> SettingPage {
                 })),
         );
     }
+    #[cfg(target_os = "macos")]
+    let permissions = earwig_core::permissions::check();
+    #[cfg(target_os = "macos")]
+    let missing = permissions
+        .iter()
+        .any(|status| status.access != earwig_core::permissions::Access::Granted);
+    #[cfg(target_os = "macos")]
+    if missing {
+        groups.push(permissions_group(&permissions));
+    }
     groups.extend([
         activation(cx),
         audio(cx),
@@ -47,6 +57,10 @@ pub fn page(pill: &Entity<PillPreview>, cx: &App) -> SettingPage {
     ]);
     #[cfg(windows)]
     groups.push(startup());
+    #[cfg(target_os = "macos")]
+    if !missing {
+        groups.push(permissions_group(&permissions));
+    }
     SettingPage::new("General")
         .icon(IconName::Settings2)
         .default_open(true)
@@ -330,14 +344,14 @@ fn history(cx: &App) -> SettingGroup {
 
 /// How the hotkey is bound on this desktop. earwig cannot bind keys itself
 /// on Wayland; the compositor (or the portal) sends it press and release.
-/// On Windows earwig watches the key itself.
+/// On macOS and Windows earwig watches the key itself.
 #[cfg_attr(
-    not(windows),
-    expect(unused_variables, reason = "only Windows picks the key here")
+    target_os = "linux",
+    expect(unused_variables, reason = "only macOS and Windows pick the key here")
 )]
 fn hotkeys(cx: &App) -> SettingGroup {
     let group = SettingGroup::new().title("Hotkey");
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let group = group.item(item(
         cx,
         "hotkey.key",
@@ -390,20 +404,30 @@ fn hotkeys(cx: &App) -> SettingGroup {
     }))
 }
 
-/// A few keys that do nothing on their own in Windows, and whatever key is
-/// configured besides.
-#[cfg(windows)]
+/// A few keys that do nothing on their own in Windows or macOS, and
+/// whatever key is configured besides.
+#[cfg(any(windows, target_os = "macos"))]
 fn key_dropdown(cx: &App) -> SettingField<SharedString> {
-    let mut options: Vec<(SharedString, SharedString)> = [
+    #[cfg(windows)]
+    let keys = [
         ("RightCtrl", "Right Ctrl"),
         ("RightAlt", "Right Alt"),
         ("RightShift", "Right Shift"),
         ("Ctrl+Space", "Ctrl+Space"),
         ("Ctrl+Alt+Space", "Ctrl+Alt+Space"),
-    ]
-    .into_iter()
-    .map(|(key, label)| (key.into(), label.into()))
-    .collect();
+    ];
+    #[cfg(target_os = "macos")]
+    let keys = [
+        ("RightCmd", "Right Command"),
+        ("RightAlt", "Right Option"),
+        ("RightShift", "Right Shift"),
+        ("RightCtrl", "Right Control"),
+        ("Ctrl+Space", "Control+Space"),
+    ];
+    let mut options: Vec<(SharedString, SharedString)> = keys
+        .into_iter()
+        .map(|(key, label)| (key.into(), label.into()))
+        .collect();
     let key = config(UiState::handle(cx)).hotkey.key;
     if !options.iter().any(|(id, _)| id.as_ref() == key) {
         options.push((key.clone().into(), key.into()));
@@ -432,10 +456,71 @@ fn startup() -> SettingGroup {
     ))
 }
 
+/// Microphone, Accessibility and Input Monitoring, each granted or with a
+/// way to System Settings.
+#[cfg(target_os = "macos")]
+fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) -> SettingGroup {
+    use earwig_core::permissions::{self, Access};
+    use gpui_kit::IntoElement as _;
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    let group = SettingGroup::new().title("Permissions").description(
+        "macOS lets earwig hear you, see the hotkey and paste only once you allow it.",
+    );
+    statuses.iter().fold(group, |group, status| {
+        let permission = status.permission;
+        let granted = status.access == Access::Granted;
+        group.item(SettingItem::render(move |_, _, cx| {
+            let state = if granted { "Allowed" } else { "Not allowed" };
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_4()
+                .child(
+                    v_flex()
+                        .child(div().text_sm().child(permission.label()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("To {}.", permission.purpose())),
+                        ),
+                )
+                .child(if granted {
+                    div().text_sm().child(state).into_any_element()
+                } else {
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(div().text_sm().text_color(cx.theme().danger).child(state))
+                        .child(
+                            Button::new(SharedString::from(format!("allow-{permission:?}")))
+                                .primary()
+                                .small()
+                                .label("Open System Settings")
+                                .on_click(move |_, _, _| {
+                                    permissions::request(permission);
+                                    permissions::open_settings(permission);
+                                }),
+                        )
+                        .into_any_element()
+                })
+        }))
+    })
+}
+
 fn hotkey_help(desktop: &str, trigger: &str) -> (String, Option<String>) {
     let desktops: Vec<&str> = desktop.split(':').collect();
     let is = |name: &str| desktops.iter().any(|d| d.eq_ignore_ascii_case(name));
-    if is("windows") {
+    if is("macos") {
+        (
+            "Hold the key to talk, or tap it to keep listening until the next tap. \
+             With another key it is still a shortcut (Right Command+C copies). \
+             earwig sees the key with Input Monitoring access."
+                .into(),
+            None,
+        )
+    } else if is("windows") {
         (
             "Hold the key to talk, or tap it to keep listening until the next tap. \
              With another key it is still a shortcut (Right Ctrl+C copies)."

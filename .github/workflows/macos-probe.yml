@@ -1,0 +1,38 @@
+# Temporary: builds and smoke-runs the macOS port probes (probes/macos).
+name: macos-probe
+on:
+  push:
+    branches: [macos]
+    paths: [probes/**, nix/**, flake.*, .github/workflows/macos-probe.yml]
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Build the probe in the dev shell
+        run: nix develop -c cargo build --release --manifest-path probes/macos/Cargo.toml
+      - name: Bundle
+        run: probes/macos/bundle.sh "$RUNNER_TEMP"
+      - name: Permissions as the runner sees them
+        run: '"$RUNNER_TEMP/EarwigProbe.app/Contents/MacOS/earwig-macos-probe" perms'
+      - name: Overlay screenshot
+        run: |
+          mkdir -p shots
+          "$RUNNER_TEMP/EarwigProbe.app/Contents/MacOS/earwig-macos-probe" overlay-show 12 2>&1 | tee shots/overlay.log &
+          sleep 8
+          screencapture -x shots/screen.png || true
+          wait
+      - name: transcribe.cpp on Metal and CPU
+        run: |
+          curl -sSL -o model.gguf https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf
+          for b in metal cpu; do
+            "$RUNNER_TEMP/EarwigProbe.app/Contents/MacOS/earwig-macos-probe" transcribe model.gguf tests/fixtures/quick-brown-fox.wav $b 2>&1 | grep -v '^ggml\|^llama' | tail -20 || true
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-shots
+          path: shots

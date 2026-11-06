@@ -342,6 +342,10 @@ fn schedule_overlay_close(after: Duration, cx: &mut App) {
 fn show_settings(cx: &mut App) {
     refresh_input_devices(cx);
     apply_theme(cx);
+    // A menu-bar app's window comes to the front, with the keyboard, only
+    // once the app is active.
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
     if let Some(window) = cx.global::<UiState>().settings
         && window
             .update(cx, |_, window, _| window.activate_window())

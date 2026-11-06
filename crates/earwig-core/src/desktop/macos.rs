@@ -1,4 +1,5 @@
-//! macOS: nothing is probed yet.
+//! macOS: nothing to probe; privacy permissions change while earwig runs,
+//! so [`crate::permissions`] checks them when asked.
 
 use super::DesktopCaps;
 
