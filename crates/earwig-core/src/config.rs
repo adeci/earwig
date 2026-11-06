@@ -1,6 +1,7 @@
 //! Settings in three layers, later wins: built-in defaults, the user file
-//! `$XDG_CONFIG_HOME/earwig/config.toml` (written by the settings window), and
-//! `earwig/config.toml` under `$XDG_CONFIG_DIRS` (written by the NixOS module).
+//! (`$XDG_CONFIG_HOME/earwig/config.toml` on Linux, written by the settings
+//! window), and the machine-wide files (`earwig/config.toml` under
+//! `$XDG_CONFIG_DIRS`, written by the NixOS module); see [`crate::paths`].
 //! Keys set in a system file are locked: never written to the user file.
 
 use std::collections::BTreeSet;

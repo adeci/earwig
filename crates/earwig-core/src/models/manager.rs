@@ -522,6 +522,7 @@ mod tests {
         assert!(!installed[0].system);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_system_stores_are_listed() {
         let dir = tempfile::tempdir().unwrap();

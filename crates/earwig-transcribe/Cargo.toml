@@ -1,6 +1,6 @@
 [package]
 name = "earwig-transcribe"
-description = "earwig speech engine backed by transcribe.cpp (GGUF, Vulkan/CPU)"
+description = "earwig speech engine backed by transcribe.cpp (GGUF; Vulkan, Metal or CPU)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,13 @@ anyhow.workspace = true
 earwig-core.workspace = true
 flume.workspace = true
 log.workspace = true
-transcribe-cpp.workspace = true
+
+# Every build also has the CPU backend.
+[target.'cfg(target_os = "macos")'.dependencies]
+transcribe-cpp = { workspace = true, features = ["metal"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+transcribe-cpp = { workspace = true, features = ["vulkan"] }
 
 [lints]
 workspace = true
