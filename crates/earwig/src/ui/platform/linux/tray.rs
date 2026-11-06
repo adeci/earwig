@@ -5,7 +5,7 @@ use earwig_core::events::{Command, DictationState};
 use ksni::blocking::TrayMethods as _;
 use ksni::menu::{MenuItem, StandardItem};
 
-use super::Local;
+use crate::ui::Local;
 
 /// Updates the tray from the UI thread.
 pub struct TrayHandle(ksni::blocking::Handle<Tray>);

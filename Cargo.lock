@@ -1686,6 +1686,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
+ "windows-sys 0.61.2",
  "xkbcommon 0.9.0",
 ]
 

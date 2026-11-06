@@ -1,5 +1,6 @@
 //! earwig's speech engine: [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
-//! with GGUF models, Vulkan and CPU compiled in.
+//! with GGUF models, the CPU and one GPU backend compiled in (Metal on macOS,
+//! Vulkan elsewhere).
 //!
 //! Streaming models decode while you speak and `finish` only decodes the
 //! tail; if the stream fails or comes up empty, the whole recording is
@@ -84,7 +85,11 @@ fn backend_request(backend: Backend) -> anyhow::Result<tc::Backend> {
         ]
         .into_iter()
         .find(|b| tc::backend_available(*b))
-        .context("no GPU backend is available (is a Vulkan driver installed?)")?,
+        .context(if cfg!(target_os = "macos") {
+            "no GPU backend is available (Metal found no device)"
+        } else {
+            "no GPU backend is available (is a Vulkan driver installed?)"
+        })?,
     })
 }
 
