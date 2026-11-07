@@ -92,6 +92,8 @@ ksni = { version = "0.3", default-features = false, features = [
   "async-io",
   "blocking",
 ] }
+# Draws the tray icon from its SVG; the version GPUI renders SVGs with.
+resvg = { version = "0.46", default-features = false }
 # The tray on Windows (and macOS): the notification area, `NSStatusItem`.
 tray-icon = { version = "0.26", default-features = false }
 

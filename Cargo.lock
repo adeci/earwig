@@ -1666,6 +1666,7 @@ dependencies = [
  "ksni",
  "log",
  "raw-window-handle",
+ "resvg 0.46.0",
  "serde",
  "serde_json",
  "tray-icon",

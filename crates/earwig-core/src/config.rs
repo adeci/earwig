@@ -174,6 +174,21 @@ pub enum OverlayStyle {
     Bars,
 }
 
+/// How the overlay pill comes and goes. Either way the final text and its
+/// insertion carry on unseen once a dictation is finished, and a pill that
+/// holds still (reduced motion, software rendering) comes and goes at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayAnimation {
+    /// Like an old CRT screen: it powers on, springing open from a
+    /// squashed bar, and switches off, squeezing to a line that shrinks to
+    /// a dot.
+    #[default]
+    Crt,
+    /// It appears and is gone at once.
+    Instant,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OverlayConfig {
@@ -195,6 +210,7 @@ pub struct OverlayConfig {
     /// to [`OverlayConfig::MAX_BORDER`].
     #[serde(serialize_with = "short_float")]
     pub border: f32,
+    pub animation: OverlayAnimation,
 }
 
 /// TOML floats are `f64`; widening through the shortest decimal writes 0.7
@@ -249,6 +265,7 @@ impl Default for OverlayConfig {
             motion: Self::DEFAULT_MOTION,
             opacity: Self::DEFAULT_OPACITY,
             border: 0.,
+            animation: OverlayAnimation::default(),
         }
     }
 }
@@ -588,6 +605,32 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert!(unreadable.border().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn overlay_animation_defaults_to_crt_round_trips_and_rejects_unknown() {
+        let (_dir, mut store) = store("", "");
+        assert_eq!(store.config().overlay.animation, OverlayAnimation::Crt);
+        store
+            .update(|c| c.overlay.animation = OverlayAnimation::Instant)
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[overlay]\nanimation = \"instant\"");
+        let (_dir, reloaded) = self::store(&written, "");
+        assert_eq!(
+            reloaded.config().overlay.animation,
+            OverlayAnimation::Instant
+        );
+        // Back to the default leaves nothing behind.
+        let (_dir, mut store) = self::store(&written, "");
+        store
+            .update(|c| c.overlay.animation = OverlayAnimation::Crt)
+            .unwrap();
+        assert_eq!(fs::read_to_string(&store.paths().user).unwrap().trim(), "");
+
+        let (_dir, store) = self::store("[overlay]\nanimation = \"fade\"\n", "");
+        assert!(store.user_error().is_some());
+        assert_eq!(store.config().overlay.animation, OverlayAnimation::Crt);
     }
 
     #[test]

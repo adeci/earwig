@@ -98,7 +98,8 @@ def tap() -> None:
 def dictate_by_key(target_cls: str, shot: str) -> str:
     """Tap to latch, speak the clip, tap again to stop once the overlay shows
     live text. Checks the overlay (a non-focusable layer-shell surface while
-    `target_cls` keeps focus) and the insertion; returns the method used."""
+    `target_cls` keeps focus, gone once the text has landed) and the
+    insertion; returns the method used."""
     events = watch_events()
     tap()
     wait_status(lambda s: s["state"]["state"] == "recording" and s["state"]["latched"], "a latched recording", timeout=20)
@@ -115,7 +116,13 @@ def dictate_by_key(target_cls: str, shot: str) -> str:
     assert focus and focus["cls"] == target_cls, f"the overlay took focus: {focus}"
 
     tap()
-    return wait_insertion(events)["method"]
+    method = wait_insertion(events)["method"]
+    deadline = time.monotonic() + 30
+    while left := [w for w in windows() if w["pid"] == pid]:
+        if time.monotonic() > deadline:
+            raise Exception(f"the overlay stayed up after the insertion: {left}")
+        time.sleep(1)
+    return method
 
 
 start_all()

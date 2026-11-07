@@ -7,8 +7,10 @@
 //! [`Command`] or a config edit.
 
 mod accent;
+mod crt;
 mod drag;
 mod icon;
+mod lifecycle;
 mod overlay;
 mod pill;
 mod platform;
@@ -16,21 +18,16 @@ mod settings;
 mod water;
 
 use std::sync::PoisonError;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use earwig_core::config::{Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
-use gpui_kit::{AnyWindowHandle, App, Entity, Global, QuitMode};
+use gpui_kit::{AnyWindowHandle, App, Context, Entity, Global, QuitMode};
 
-use overlay::{Outcome, OverlayView};
-
-/// How long the final text stays up after it was inserted.
-const SUCCESS_FLASH: Duration = Duration::from_millis(350);
-/// The failure flash carries a sentence to read, so it stays a little longer.
-const FAILURE_FLASH: Duration = Duration::from_millis(1800);
+use overlay::OverlayView;
 
 /// Requests that do not come from the daemon (tray clicks).
 enum Local {
@@ -82,7 +79,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
                 tray,
                 overlay: None,
                 settings: None,
-                close_generation: 0,
+                overlay_wake: None,
                 input_devices: Vec::new(),
             });
             apply_theme(cx);
@@ -141,8 +138,9 @@ pub(crate) struct UiState {
     tray: Option<platform::TrayHandle>,
     overlay: Option<Entity<OverlayView>>,
     settings: Option<AnyWindowHandle>,
-    /// Bumped whenever a scheduled overlay close becomes stale.
-    close_generation: u64,
+    /// When the overlay is woken next to move on by itself (see
+    /// [`follow_overlay`]).
+    overlay_wake: Option<Instant>,
     input_devices: Vec<String>,
 }
 
@@ -223,19 +221,15 @@ fn apply(event: Event, cx: &mut App) {
             cx.global_mut::<UiState>().status.state = state;
             set_state(state, cx);
         }
-        // For socket clients; the overlay follows the faster spectrum feed.
-        Event::Level { .. } => {}
+        // For socket clients: the overlay follows the faster spectrum feed,
+        // and the pill switched off when the recording stopped.
+        Event::Level { .. } | Event::Inserted { .. } => {}
         Event::Transcript {
             committed,
             tentative,
-        } => update_overlay(cx, |o| o.set_text(committed, tentative)),
-        Event::Inserted { .. } => {
-            update_overlay(cx, |o| o.finish(Outcome::Inserted));
-            schedule_overlay_close(SUCCESS_FLASH, cx);
-        }
+        } => update_overlay(cx, |o, _| o.set_text(committed, tentative)),
         Event::InsertFailed { on_clipboard, .. } => {
-            update_overlay(cx, |o| o.finish(Outcome::Failed { on_clipboard }));
-            schedule_overlay_close(FAILURE_FLASH, cx);
+            update_overlay(cx, |o, _| o.failed(on_clipboard, Instant::now()));
         }
         Event::Model { model } => {
             cx.global_mut::<UiState>().status.model = model;
@@ -252,10 +246,9 @@ fn set_state(state: DictationState, cx: &mut App) {
     }
     match state {
         DictationState::Recording { started_at_ms, .. } => {
-            // A new recording supersedes any pending close; the window of a
-            // previous flash is reused unless the pill was dragged: a new
-            // dictation starts at home.
-            cx.global_mut::<UiState>().close_generation += 1;
+            // The window of a pill still switching off or saying a failure
+            // is reused, unless the pill was dragged: a new dictation
+            // starts at home.
             if let Some(view) = cx.global::<UiState>().overlay.clone()
                 && view.read(cx).moved_before(started_at_ms)
             {
@@ -264,35 +257,55 @@ fn set_state(state: DictationState, cx: &mut App) {
             if cx.global::<UiState>().overlay.is_none() {
                 open_overlay(cx);
             }
-            update_overlay(cx, |o| o.recording(started_at_ms));
+            update_overlay(cx, |o, _| o.recording(started_at_ms));
         }
-        DictationState::Finalizing => update_overlay(cx, OverlayView::finalizing),
-        DictationState::Idle => {
-            let Some(view) = cx.global::<UiState>().overlay.clone() else {
-                return;
-            };
-            let (recording, outcome) = {
-                let view = view.read(cx);
-                (view.is_recording(), view.has_outcome())
-            };
-            if recording {
-                // Cancelled: nothing is coming, get out of the way.
-                close_overlay(cx);
-            } else if !outcome {
-                // Finalized without a result event yet; give it a moment.
-                schedule_overlay_close(SUCCESS_FLASH, cx);
-            }
-        }
+        DictationState::Finalizing => update_overlay(cx, |o, cx| o.finish(Instant::now(), cx)),
+        DictationState::Idle => update_overlay(cx, |o, _| o.idle()),
     }
 }
 
-fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView)) {
+fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView, &mut Context<OverlayView>)) {
     if let Some(view) = cx.global::<UiState>().overlay.clone() {
         view.update(cx, |view, cx| {
-            f(view);
+            f(view, cx);
             cx.notify();
         });
+        follow_overlay(cx);
     }
+}
+
+/// Close the overlay once it is done, or wake it when it next moves on by
+/// itself (a switch-off or a failure notice ending).
+fn follow_overlay(cx: &mut App) {
+    let Some(view) = cx.global::<UiState>().overlay.clone() else {
+        return;
+    };
+    let (closed, deadline) = {
+        let view = view.read(cx);
+        (view.is_closed(), view.deadline())
+    };
+    if closed {
+        close_overlay(cx);
+        return;
+    }
+    let state = cx.global_mut::<UiState>();
+    let Some(at) = deadline.filter(|&at| state.overlay_wake != Some(at)) else {
+        return;
+    };
+    state.overlay_wake = Some(at);
+    cx.spawn(async move |cx| {
+        let wait = at.saturating_duration_since(Instant::now());
+        cx.background_executor().timer(wait).await;
+        cx.update(|cx| {
+            let state = cx.global_mut::<UiState>();
+            if state.overlay_wake == Some(at) {
+                state.overlay_wake = None;
+            }
+            // A wake-up meant for an earlier pill finds nothing due.
+            update_overlay(cx, |o, _| o.advance(Instant::now()));
+        });
+    })
+    .detach();
 }
 
 fn open_overlay(cx: &mut App) {
@@ -322,21 +335,6 @@ fn close_overlay(cx: &mut App) {
 pub(crate) fn discard(cx: &mut App) {
     UiState::handle(cx).send(Command::Cancel);
     close_overlay(cx);
-}
-
-fn schedule_overlay_close(after: Duration, cx: &mut App) {
-    let state = cx.global_mut::<UiState>();
-    state.close_generation += 1;
-    let generation = state.close_generation;
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(after).await;
-        cx.update(|cx| {
-            if cx.global::<UiState>().close_generation == generation {
-                close_overlay(cx);
-            }
-        });
-    })
-    .detach();
 }
 
 fn show_settings(cx: &mut App) {

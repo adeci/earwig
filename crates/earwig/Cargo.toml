@@ -17,6 +17,7 @@ env_logger.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true
 log.workspace = true
+resvg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

@@ -1,6 +1,9 @@
 //! The small on-screen pill shown while dictating. The user can drag it out
 //! of the way for the rest of the dictation; the next one starts at home.
-//! Hovering it shows a × that throws the dictation away.
+//! Its × throws the dictation away. Once the dictation is finished the pill
+//! switches off where it is (see [`crt`](crate::ui::crt)) and its window
+//! waits, empty and click-through, until the text has landed (see
+//! [`lifecycle`](crate::ui::lifecycle)).
 //!
 //! The pill's window is just big enough for it: GPUI's path rendering costs
 //! in proportion to the window's area, which makes an output-sized overlay
@@ -16,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use earwig_core::config::{OverlayConfig, OverlayPosition, OverlayStyle};
+use earwig_core::config::{OverlayAnimation, OverlayConfig, OverlayPosition, OverlayStyle};
 use earwig_core::spectrum::Feed;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -24,15 +27,16 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
     Entity, FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, PlatformDisplay, Point, Render, Size, StatefulInteractiveElement as _, Styled as _,
-    StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
+    Pixels, PlatformDisplay, Point, Render, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
 use crate::ui::drag::{Drag, Grab, Pointer};
+use crate::ui::lifecycle::{Lifecycle, Stage};
 use crate::ui::pill::{self, Clock, Look, Motion, Shape};
 use crate::ui::platform::Popup;
-use crate::ui::{OverlaySurface, accent, now_ms};
+use crate::ui::{OverlaySurface, accent, crt, now_ms};
 
 #[cfg(target_os = "linux")]
 mod layer_shell;
@@ -64,8 +68,6 @@ const SOFTWARE_DRAG_FRAME: Duration = Duration::from_millis(100);
 /// show it before closing anyway.
 #[cfg(target_os = "linux")]
 const LANDING_TIMEOUT: Duration = Duration::from_millis(500);
-/// Group name of the pill, whose hover shows the discard button.
-const PILL: &str = "pill";
 const DISCARD_SIZE: f32 = 24.;
 /// Pixels the voice must move the pill by to be worth every frame.
 const SPEAKING_REACH: f32 = 0.35;
@@ -285,24 +287,10 @@ fn placement(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Outcome {
-    Inserted,
-    Failed { on_clipboard: bool },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
-    Recording,
-    /// Recording stopped at `stopped_at_ms`; final text on its way.
-    Finalizing,
-    Done(Outcome),
-}
-
 pub struct OverlayView {
     max_lines: u32,
     position: OverlayPosition,
-    phase: Phase,
+    life: Lifecycle,
     started_at_ms: u64,
     stopped_at_ms: Option<u64>,
     committed: String,
@@ -316,11 +304,15 @@ pub struct OverlayView {
     shape: Shape,
     /// The pill holds still (reduced motion, software rendering).
     still: bool,
+    /// How the pill comes and goes.
+    animation: OverlayAnimation,
+    /// Where the power-on of a new dictation's pill stands.
+    power_on: PowerOn,
     /// Fill opacity and border width settings.
     opacity: f32,
     border: f32,
     frame_pending: bool,
-    /// The pill's colours as they fade toward the current phase's.
+    /// The pill's colours as they fade toward the theme's and the accent's.
     look: Option<Look>,
     tabular_numbers: FontFeatures,
     /// The pill sits on a layer surface, which cannot move once mapped.
@@ -352,6 +344,17 @@ pub struct OverlayView {
 /// The pill's bounds as last painted in a resting window, and which one:
 /// each new window needs its input region set.
 type Painted = Rc<Cell<Option<(WindowId, Bounds<Pixels>)>>>;
+
+/// A new dictation's pill powers on from its first frame (see
+/// [`crt::opening`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PowerOn {
+    /// On the next frame.
+    Due,
+    Since(Instant),
+    /// Done, or not animated.
+    Done,
+}
 
 /// What a window draws the pill for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -408,7 +411,7 @@ impl OverlayView {
         Self {
             max_lines: config.max_lines.max(1),
             position: config.position,
-            phase: Phase::Recording,
+            life: Lifecycle::default(),
             started_at_ms: now_ms(),
             stopped_at_ms: None,
             committed: String::new(),
@@ -419,6 +422,8 @@ impl OverlayView {
             motion: Motion::new(config.style, config.motion()),
             shape: Shape::still(config.style),
             still: false,
+            animation: config.animation,
+            power_on: PowerOn::Due,
             opacity: config.opacity(),
             border: config.border(),
             frame_pending: false,
@@ -446,27 +451,83 @@ impl OverlayView {
             self.tentative.clear();
             self.stopped_at_ms = None;
             self.started_at_ms = started_at_ms;
+            self.power_on = PowerOn::Due;
         }
-        self.phase = Phase::Recording;
+        self.life.recording();
     }
 
-    pub fn finalizing(&mut self) {
-        self.phase = Phase::Finalizing;
+    /// The recording was finished: switch the pill off at once, where it
+    /// is (a pill held mid-drag is let go there). The final text and its
+    /// insertion carry on unseen.
+    pub fn finish(&mut self, now: Instant, cx: &mut Context<Self>) {
         self.stopped_at_ms.get_or_insert_with(now_ms);
+        self.end_drag(cx);
+        self.life.finish(now, self.switch_off());
     }
 
-    pub fn finish(&mut self, outcome: Outcome) {
-        self.stopped_at_ms.get_or_insert_with(now_ms);
-        self.phase = Phase::Done(outcome);
+    /// The final text could not be inserted: say so.
+    pub fn failed(&mut self, on_clipboard: bool, now: Instant) {
+        self.life.failed(on_clipboard, now);
+    }
+
+    /// The daemon is done with the dictation.
+    pub fn idle(&mut self) {
+        self.life.idle();
+    }
+
+    /// Catch up with the clock (see [`OverlayView::deadline`]).
+    pub fn advance(&mut self, now: Instant) {
+        self.life.advance(now, self.switch_off());
+    }
+
+    /// When the pill next moves on by itself: a switch-off or a failure
+    /// notice ending.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.life.deadline()
+    }
+
+    /// Whether the overlay is done and its windows should close.
+    pub fn is_closed(&self) -> bool {
+        self.life.stage() == Stage::Closed
+    }
+
+    /// How long switching off takes: none when the pill holds still, which
+    /// spares a CPU-drawn window the frames, or when the setting says so.
+    fn switch_off(&self) -> Duration {
+        if self.still || self.animation == OverlayAnimation::Instant {
+            Duration::ZERO
+        } else {
+            crt::DURATION
+        }
+    }
+
+    /// Seconds into powering on, while the pill does.
+    fn powering_on(&self, now: Instant) -> Option<f32> {
+        match self.power_on {
+            PowerOn::Since(since) => Some(now.duration_since(since).as_secs_f32())
+                .filter(|&t| t < crt::OPEN.as_secs_f32()),
+            PowerOn::Due | PowerOn::Done => None,
+        }
+    }
+
+    /// Seconds into switching off, while the pill does.
+    fn switching_off(&self, now: Instant) -> Option<f32> {
+        match self.life.stage() {
+            Stage::SwitchingOff { since, .. } => Some(now.duration_since(since).as_secs_f32()),
+            _ => None,
+        }
     }
 
     pub fn set_text(&mut self, committed: String, tentative: String) {
-        self.committed = committed;
-        self.tentative = tentative;
+        // A finished pill keeps the text it had, so it switches off as it was.
+        if self.is_recording() {
+            self.committed = committed;
+            self.tentative = tentative;
+        }
     }
 
     pub fn is_recording(&self) -> bool {
-        matches!(self.phase, Phase::Recording)
+        self.life.stage() == Stage::Live
     }
 
     /// Whether a new reading of the voice should be drawn right away.
@@ -474,8 +535,23 @@ impl OverlayView {
         self.is_recording() && !self.still
     }
 
-    pub fn has_outcome(&self) -> bool {
-        matches!(self.phase, Phase::Done(_))
+    /// Whether the pill takes the pointer: while recording, or saying the
+    /// insertion failed; not while it switches off.
+    fn takes_pointer(&self) -> bool {
+        matches!(self.life.stage(), Stage::Live | Stage::Failed { .. })
+    }
+
+    /// The failure the pill says, or switches off saying: whether the text
+    /// was left on the clipboard.
+    fn failure(&self) -> Option<bool> {
+        match self.life.stage() {
+            Stage::Failed { on_clipboard, .. }
+            | Stage::SwitchingOff {
+                failure: Some(on_clipboard),
+                ..
+            } => Some(on_clipboard),
+            _ => None,
+        }
     }
 
     /// Whether the pill was dragged and recording `started_at_ms` is a new
@@ -500,10 +576,7 @@ impl OverlayView {
     }
 
     fn header(&self, theme: &Theme) -> Div {
-        let status = match self.phase {
-            Phase::Done(Outcome::Failed { .. }) => Some("Not inserted"),
-            _ => None,
-        };
+        let status = self.failure().map(|_| "Not inserted");
         let dot = theme.danger;
         let words = word_count(&self.committed) + word_count(&self.tentative);
         div()
@@ -531,22 +604,16 @@ impl OverlayView {
     }
 
     fn body(&self, theme: &Theme) -> Div {
-        match self.phase {
-            Phase::Done(Outcome::Failed { on_clipboard }) => {
-                div().text_color(theme.foreground).child(if on_clipboard {
-                    "Couldn't type into the app. The text is on the clipboard."
-                } else {
-                    "Couldn't insert the text. It is saved in History."
-                })
+        match self.failure() {
+            Some(on_clipboard) => div().text_color(theme.foreground).child(if on_clipboard {
+                "Couldn't type into the app. The text is on the clipboard."
+            } else {
+                "Couldn't insert the text. It is saved in History."
+            }),
+            None if self.committed.is_empty() && self.tentative.is_empty() => {
+                div().text_color(theme.muted_foreground).child("Listening…")
             }
-            _ if self.committed.is_empty() && self.tentative.is_empty() => div()
-                .text_color(theme.muted_foreground)
-                .child(if self.is_recording() {
-                    "Listening…"
-                } else {
-                    ""
-                }),
-            _ => div().text_color(theme.foreground).child(live_text(
+            None => div().text_color(theme.foreground).child(live_text(
                 &self.committed,
                 &self.tentative,
                 theme.muted_foreground,
@@ -796,15 +863,27 @@ impl OverlayView {
     /// Advance the clock, the pill's motion and the colours, and schedule
     /// the next frame.
     fn tick(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let dt = self.clock.tick(Instant::now());
+        let now = Instant::now();
+        let dt = self.clock.tick(now);
         let voice = self.is_recording().then(|| self.voice.latest());
         let shape = self.motion.step(dt, voice.as_ref());
         self.still = pill::holds_still(window, cx);
+        if self.power_on == PowerOn::Due {
+            // From this, its first frame: nothing waits for it.
+            self.power_on = if self.switch_off() > Duration::ZERO {
+                PowerOn::Since(now)
+            } else {
+                PowerOn::Done
+            };
+        }
         self.shape = if self.still {
             self.schedule_frame(STILL_FRAME, cx);
             Shape::still(self.style)
         } else {
-            if shape.reach() > SPEAKING_REACH {
+            if shape.reach() > SPEAKING_REACH
+                || self.switching_off(now).is_some()
+                || self.powering_on(now).is_some()
+            {
                 window.request_animation_frame();
             } else {
                 self.schedule_frame(QUIET_FRAME, cx);
@@ -822,8 +901,9 @@ impl OverlayView {
         self.look = Some(self.look.map_or(target, |look| look.fade_to(target, dt)));
     }
 
-    /// The pill: outline, header and text. Only the resting window's pill
-    /// takes the pointer and offers to discard the dictation.
+    /// The pill: outline, header and text, or as far switched off as it
+    /// is. Only the resting window's pill takes the pointer and offers to
+    /// discard the dictation.
     fn pill(&self, theme: &Theme, role: Role) -> Div {
         let rests = role == Role::Rest;
         let shape = if rests {
@@ -835,8 +915,16 @@ impl OverlayView {
         };
         let look = self.look;
         let painted = self.painted.clone();
+        let now = Instant::now();
+        let off = self.switching_off(now);
+        let on = self.powering_on(now).filter(|_| off.is_none());
+        let content = match (off, on) {
+            (Some(t), _) => crt::content(t),
+            (None, Some(t)) => crt::opening_content(t),
+            (None, None) => 1.,
+        };
+        let takes_pointer = rests && self.takes_pointer();
         div()
-            .group(PILL)
             .w(px(WIDTH))
             .flex_shrink_0()
             .flex()
@@ -848,22 +936,32 @@ impl OverlayView {
                 canvas(
                     |_, _, _| {},
                     move |bounds, (), window, _| {
-                        if let Some(look) = look {
-                            pill::paint(bounds, &shape, look, 1., window);
+                        match (look, off) {
+                            (Some(look), None) => {
+                                let size = bounds.size.map(f32::from);
+                                match on.and_then(|t| crt::opening(t, size.width, size.height)) {
+                                    Some(frame) => {
+                                        pill::paint_crt(
+                                            bounds, &frame, &shape, look, rests, window,
+                                        );
+                                    }
+                                    None => pill::paint(bounds, &shape, look, 1., window),
+                                }
+                            }
+                            (Some(look), Some(t)) => {
+                                let size = bounds.size.map(f32::from);
+                                if let Some(frame) = crt::at(t, size.width, size.height) {
+                                    pill::paint_crt(bounds, &frame, &shape, look, rests, window);
+                                }
+                            }
+                            (None, _) => {}
                         }
                         let id = window.window_handle().window_id();
                         let last = painted.get();
-                        if rests && last != Some((id, bounds)) {
+                        if takes_pointer && last != Some((id, bounds)) {
                             // Only the pill takes the pointer; everywhere
                             // else clicks reach whatever is below.
-                            window.set_input_region(Some(&[bounds]));
-                            // With room for the shadow and the water, which
-                            // the region clips on Windows.
-                            #[cfg(windows)]
-                            crate::ui::platform::set_input_region(
-                                window,
-                                Some(bounds.dilate(px(INSET))),
-                            );
+                            set_pointer_region(window, Some(bounds));
                             if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
                                 window.refresh();
@@ -877,7 +975,7 @@ impl OverlayView {
                 .left_0()
                 .size_full(),
             )
-            .child(self.header(theme))
+            .child(self.header(theme).opacity(content))
             .child(
                 // Only the last `max_lines` wrapped lines: anchor the text to
                 // the bottom and clip what scrolls off the top.
@@ -890,10 +988,11 @@ impl OverlayView {
                     .justify_end()
                     .text_size(px(15.))
                     .line_height(px(LINE_HEIGHT))
+                    .opacity(content)
                     .child(self.body(theme)),
             )
-            .when(rests && !self.has_outcome(), |this| {
-                this.child(discard_button(theme))
+            .when(rests && self.failure().is_none(), |this| {
+                this.child(discard_button(theme, self.is_recording()).opacity(content))
             })
     }
 
@@ -952,6 +1051,14 @@ impl Render for OverlayView {
                 view.land(landing, cx);
             });
         }
+        if self.life.stage() == Stage::Off {
+            // Gone from the screen: clicks go through until the pill comes
+            // back to say the insertion failed, or the window closes.
+            if self.painted.take().is_some() {
+                set_pointer_region(window, None);
+            }
+            return div();
+        }
         self.tick(window, cx);
         let viewport = window.viewport_size();
         let (area, origin) = match self.area(window, cx) {
@@ -976,20 +1083,31 @@ impl Render for OverlayView {
         if self.drag.is_covered() {
             return div().size_full().children(follow);
         }
-        let pill = self
-            .pill(cx.theme(), Role::Rest)
-            .when(self.movable(), |this| {
+        let pill = self.pill(cx.theme(), Role::Rest).when(
+            self.movable() && self.takes_pointer(),
+            |this| {
                 this.cursor(CursorStyle::OpenHand)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::start_drag))
-            });
+            },
+        );
         self.layout(pill, spot, origin, viewport, area)
             .children(follow)
     }
 }
 
-/// The × in the pill's top-right corner, shown while the pointer is on the
-/// pill: throws the dictation away.
-fn discard_button(theme: &Theme) -> impl IntoElement {
+/// Clicks reach the window only on the pill at `pill` (nowhere for `None`);
+/// everywhere else they go to whatever is below.
+fn set_pointer_region(window: &Window, pill: Option<Bounds<Pixels>>) {
+    window.set_input_region(Some(pill.as_slice()));
+    // With room for the shadow, the water and the glow, which the region
+    // clips on Windows.
+    #[cfg(windows)]
+    crate::ui::platform::set_input_region(window, pill.map(|pill| pill.dilate(px(INSET))));
+}
+
+/// The × in the pill's top-right corner: throws the dictation away while
+/// `live`; switching off, it only fades with the text.
+fn discard_button(theme: &Theme, live: bool) -> Stateful<Div> {
     // As far from the top and right edges as the header row's centre.
     let inset = px(PADDING_Y + (HEADER_HEIGHT - DISCARD_SIZE) / 2.);
     let (highlight, bright) = (theme.foreground.opacity(0.12), theme.foreground);
@@ -1004,14 +1122,14 @@ fn discard_button(theme: &Theme) -> impl IntoElement {
         .justify_center()
         .rounded_full()
         .text_color(theme.muted_foreground)
-        .cursor(CursorStyle::PointingHand)
-        .invisible()
-        .group_hover(PILL, gpui_kit::StyleRefinement::visible)
-        .hover(move |style| style.bg(highlight).text_color(bright))
         .child(Icon::new(IconName::Close).size(px(14.)))
-        // A press here is no drag.
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(|_, _, cx| cx.defer(crate::ui::discard))
+        .when(live, |this| {
+            this.cursor(CursorStyle::PointingHand)
+                .hover(move |style| style.bg(highlight).text_color(bright))
+                // A press here is no drag.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(|_, _, cx| cx.defer(crate::ui::discard))
+        })
 }
 
 /// While a drag lasts, follow the pointer anywhere (the resting window keeps
@@ -1092,6 +1210,9 @@ impl Render for DragView {
         let viewport = window.viewport_size();
         let overlay = self.overlay.downgrade();
         self.overlay.update(cx, |view, cx| {
+            if view.life.stage() == Stage::Off {
+                return div();
+            }
             if view.drag.is_held() && !view.drag.is_covered() {
                 // Once this shows the pill, its window can leave it out.
                 after_present(window, overlay, |view, cx| {
