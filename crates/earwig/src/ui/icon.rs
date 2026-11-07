@@ -1,48 +1,67 @@
-//! The app icon drawn in code for the tray: a filled circle with three sound
-//! bars, red while dictating. Mirrors `assets/io.github.adeci.earwig.svg`.
+//! The tray icon: `assets/tray.svg`, the app icon's pill fattened to fill
+//! the square so it holds its own beside other tray icons, with a big
+//! recording dot and one bold word bar cut out; blue, red while dictating.
+//! resvg draws it at whatever size the tray asks for.
 
-/// `size`×`size` pixels, RGBA, rows top to bottom, not premultiplied.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
+use std::sync::LazyLock;
+
+use resvg::{tiny_skia, usvg};
+
+/// The pill. Only its shape is used; the state gives the colour.
+static PILL: LazyLock<usvg::Tree> = LazyLock::new(|| {
+    usvg::Tree::from_str(
+        include_str!("../../../../assets/tray.svg"),
+        &usvg::Options::default(),
+    )
+    .expect("assets/tray.svg is valid SVG")
+});
+
+const IDLE: [u8; 3] = [0x35, 0x84, 0xe4];
+const DICTATING: [u8; 3] = [0xe5, 0x48, 0x4d];
+
+/// `size`×`size` pixels, RGBA, rows top to bottom, not premultiplied; clear
+/// pixels are black, since some hosts (swaybar) take the data as
+/// premultiplied and would tint the panel around the icon otherwise.
+#[allow(clippy::cast_precision_loss)]
 pub(crate) fn rgba(size: u32, recording: bool) -> Vec<u8> {
-    let (r, g, b) = if recording {
-        (0xe5, 0x48, 0x4d)
-    } else {
-        (0x2b, 0x6c, 0xb0)
-    };
-    let s = size as f32;
-    let center = s / 2.;
-    let radius = s / 2. - 0.5;
-    // Bars in a 24-unit design grid: x centre, half height.
-    let bars = [(8.0_f32, 3.5_f32), (12., 6.5), (16., 3.5)];
-    let unit = s / 24.;
-    let bar_half_width = 1.25 * unit;
-    let mut data = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let dist = ((px - center).powi(2) + (py - center).powi(2)).sqrt();
-            let coverage = (radius - dist + 0.5).clamp(0., 1.);
-            let bar = bars
-                .iter()
-                .map(|&(bx, half)| {
-                    let dx = bar_half_width - (px - bx * unit).abs();
-                    // Rounded ends: distance to the bar's centre segment.
-                    let dy = (py - center).abs() - half * unit;
-                    let edge = if dy > 0. {
-                        bar_half_width - (dy.powi(2) + (px - bx * unit).powi(2)).sqrt()
-                    } else {
-                        dx
-                    };
-                    (edge + 0.5).clamp(0., 1.)
-                })
-                .fold(0., f32::max);
-            let mix = |c: u8| (f32::from(c) * (1. - bar) + 255. * bar).round() as u8;
-            data.extend_from_slice(&[mix(r), mix(g), mix(b), (coverage * 255.).round() as u8]);
-        }
+    let [r, g, b] = if recording { DICTATING } else { IDLE };
+    let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("the tray asks for pixels");
+    let scale = size as f32 / PILL.size().width();
+    resvg::render(
+        &PILL,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+        .pixels()
+        .iter()
+        .flat_map(|pixel| match pixel.alpha() {
+            0 => [0; 4],
+            alpha => [r, g, b, alpha],
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pixel at `x`, `y` of a `size`×`size` icon.
+    fn pixel(icon: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {
+        let at = ((y * size + x) * 4) as usize;
+        icon[at..at + 4].try_into().unwrap()
     }
-    data
+
+    #[test]
+    fn a_blue_pill_red_while_dictating_with_the_dot_cut_out() {
+        let size = 64;
+        let idle = rgba(size, false);
+        let dictating = rgba(size, true);
+        assert_eq!(idle.len(), 64 * 64 * 4);
+        // Inside the pill past the words, the recording dot's centre, a corner.
+        assert_eq!(pixel(&idle, size, 58, 32), [0x35, 0x84, 0xe4, 255]);
+        assert_eq!(pixel(&dictating, size, 58, 32), [0xe5, 0x48, 0x4d, 255]);
+        assert_eq!(pixel(&idle, size, 16, 32), [0; 4]);
+        assert_eq!(pixel(&idle, size, 0, 0), [0; 4]);
+    }
 }

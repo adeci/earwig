@@ -1,8 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <circle cx="12" cy="12" r="12" fill="#2b6cb0"/>
-  <g stroke="#ffffff" stroke-width="2.5" stroke-linecap="round">
-    <line x1="8" y1="8.5" x2="8" y2="15.5"/>
-    <line x1="12" y1="5.5" x2="12" y2="18.5"/>
-    <line x1="16" y1="8.5" x2="16" y2="15.5"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- earwig: the overlay's pill, its edge swelling like water with the voice,
+       the red recording dot and the words on it, and the ripple it sends out.
+       icon-small.svg stands in for it below 32 px; the tray draws tray.svg. -->
+  <defs>
+    <linearGradient id="pill" x1="0" y1="74" x2="0" y2="182" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2c3048"/>
+      <stop offset="0.5" stop-color="#1f2130"/>
+      <stop offset="1" stop-color="#1a1b26"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="70" x2="0" y2="186" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="echo" x1="12" y1="0" x2="244" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3584e4" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#3584e4" stop-opacity="0.75"/>
+      <stop offset="0.7" stop-color="#3584e4" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#3584e4" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- The ripple the voice sends out. -->
+  <path fill="none" stroke="url(#echo)" stroke-width="7"
+        d="M68 66 C84 66 84 54 100 54 C120 54 120 69 140 69 C155 69 155 59 170 59 C179 59 179 66 188 66
+           A56 56 0 0 1 244 122 L244 134 A56 56 0 0 1 188 190
+           C172 190 172 202 156 202 C136 202 136 187 116 187 C101 187 101 197 86 197 C77 197 77 190 68 190
+           A56 56 0 0 1 12 134 L12 122 A56 56 0 0 1 68 66 Z"/>
+  <!-- The pill, its edge swelling like water. -->
+  <path fill="url(#pill)" stroke="url(#rim)" stroke-width="10"
+        d="M68 84 C84 84 84 74 100 74 C120 74 120 87 140 87 C155 87 155 78 170 78 C179 78 179 84 188 84
+           A38 38 0 0 1 226 122 L226 134 A38 38 0 0 1 188 172
+           C172 172 172 182 156 182 C136 182 136 169 116 169 C101 169 101 178 86 178 C77 178 77 172 68 172
+           A38 38 0 0 1 30 134 L30 122 A38 38 0 0 1 68 84 Z"/>
+  <!-- Recording, and the words so far. -->
+  <circle cx="74" cy="128" r="15" fill="#e5484d"/>
+  <rect x="102" y="120" width="82" height="16" rx="8" fill="#c0caf5" fill-opacity="0.85"/>
 </svg>

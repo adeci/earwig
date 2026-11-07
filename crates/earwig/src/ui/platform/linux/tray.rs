@@ -59,7 +59,9 @@ impl ksni::Tray for Tray {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         let recording = !matches!(self.state, DictationState::Idle);
-        [22, 32, 48, 64]
+        // Hosts scale the nearest size, which blurs the cut-outs at the small
+        // ones; these cover the usual panels.
+        [16, 22, 24, 32, 48, 64]
             .into_iter()
             .map(|size| icon(size, recording))
             .collect()
@@ -109,7 +111,7 @@ impl ksni::Tray for Tray {
     }
 }
 
-/// The app icon at `size` px as ARGB32 in network byte order.
+/// The tray icon at `size` px as ARGB32 in network byte order.
 #[allow(clippy::cast_possible_wrap)]
 fn icon(size: u32, recording: bool) -> ksni::Icon {
     let mut data = crate::ui::icon::rgba(size, recording);

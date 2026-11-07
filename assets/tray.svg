@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- The tray icon (crates/earwig/src/ui/icon.rs): the app icon's pill,
+       fattened to fill the square, with the recording dot and the words cut
+       out. Only its shape counts; the tray paints it blue, red while
+       dictating. -->
+  <path fill="#3584e4" fill-rule="evenodd"
+        d="M66 44 C82 44 82 26 98 26 C116 26 116 50 134 50 C149 50 149 34 164 34 C177 34 177 44 190 44
+           A60 60 0 0 1 250 104 L250 152 A60 60 0 0 1 190 212
+           C174 212 174 230 158 230 C140 230 140 206 122 206 C107 206 107 222 92 222 C79 222 79 212 66 212
+           A60 60 0 0 1 6 152 L6 104 A60 60 0 0 1 66 44 Z
+           M40 128 A32 32 0 1 0 104 128 A32 32 0 1 0 40 128 Z
+           M142 110 H202 A18 18 0 0 1 202 146 H142 A18 18 0 0 1 142 110 Z"/>
+</svg>

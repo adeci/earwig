@@ -114,9 +114,19 @@ in
         machine.send_key(KEY)
 
 
-    def dictate_by_shortcut(name: str) -> str:
+    def overlays():
+        """The overlay: an override-redirect X11 window (GPUI's WM_CLASS is
+        the app id)."""
+        return [
+            w for w in windows()
+            if w["override_redirect"] and w["x11"] and w["wm_class"] == "earwig-overlay"
+        ]
+
+
+    def dictate_by_shortcut(name: str) -> tuple[str, list]:
         """Tap, play the clip into the virtual mic, wait until the overlay
-        shows live text (CPU decoding trails the audio), tap again."""
+        shows live text (CPU decoding trails the audio), tap again; returns
+        that text and the overlay's windows while recording."""
         tap_shortcut()
         wait_status(lambda s: s["state"]["state"] == "recording", "recording")
         play_clip()
@@ -124,8 +134,9 @@ in
             text = wait_live_text(f"{name}-recording")
         finally:
             print(f"windows while recording ({name}): {json.dumps(windows())}")
+        overlay = overlays()
         tap_shortcut()
-        return text
+        return text, overlay
 
 
     start_all()
@@ -200,8 +211,7 @@ in
         wait_for(lambda: focused_class() == "org.gnome.TextEditor", "the text editor")
         machine.sleep(2)
         events = watch_events()
-        overlay_text = dictate_by_shortcut("editor")
-        overlay = [w for w in windows() if w["override_redirect"] and w["x11"]]
+        overlay_text, overlay = dictate_by_shortcut("editor")
         assert overlay, "no override-redirect overlay window"
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
         # CPU decoding in the VM finishes well after the stop tap. Save only
@@ -214,6 +224,9 @@ in
         machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/editor.txt", timeout=td(seconds=30))
         print(f"editor file: {machine.succeed('cat /tmp/editor.txt')!r}")
         machine.screenshot("editor-inserted")
+        # It switched off as the recording stopped; once the text has
+        # landed its window is gone too.
+        wait_for(lambda: not overlays(), "the overlay to close", timeout=30)
 
     with machine.nested("EARWIG: dictation into GNOME Console (Ctrl+Shift+V)"):
         spawn(

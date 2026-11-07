@@ -4,7 +4,8 @@
 use std::sync::PoisonError;
 
 use earwig_core::config::{
-    ActivationMode, Config, InsertSetting, OverlayPosition, OverlayStyle, ThemeSetting,
+    ActivationMode, Config, InsertSetting, OverlayAnimation, OverlayPosition, OverlayStyle,
+    ThemeSetting,
 };
 use earwig_core::events::InsertMethod;
 use gpui_kit::component::clipboard::Clipboard;
@@ -268,6 +269,22 @@ fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
                     edit_config(cx, |c| c.overlay.style = style);
                     preview.update(cx, |preview, cx| preview.set_style(style, cx));
                 },
+            ),
+        ),
+        item(
+            cx,
+            "overlay.animation",
+            "Animation",
+            "How the panel comes and goes: it powers on and off like an old \
+             TV screen, or appears and is gone at once. Applies from the next \
+             dictation.",
+            enum_dropdown(
+                &[
+                    (OverlayAnimation::Crt, "CRT"),
+                    (OverlayAnimation::Instant, "Instant"),
+                ],
+                |c| c.overlay.animation,
+                |c, v| c.overlay.animation = v,
             ),
         ),
         pill_item(

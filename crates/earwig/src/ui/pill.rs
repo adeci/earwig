@@ -2,7 +2,9 @@
 //! shows the voice in one of two styles, both following the speech bands
 //! mirrored from the centre outward, low bands in the middle. Wave: the
 //! outline behaves like water the voice disturbs (see [`water`]), painted
-//! as a path. Bars: thin accent bars above and below a still pill.
+//! as a path. Bars: thin accent bars above and below a still pill. Once
+//! the dictation is finished it switches off like an old CRT screen (see
+//! [`crt`]).
 
 use std::f32::consts::TAU;
 use std::time::Instant;
@@ -15,6 +17,7 @@ use gpui_kit::{
     point, px, size,
 };
 
+use crate::ui::crt;
 use crate::ui::water::{self, NODES, Ring};
 
 /// Corner radius of the pill at rest.
@@ -69,6 +72,28 @@ const DROP: f32 = 0.13;
 const GRAVITY: f32 = 2. / (DROP * DROP);
 /// Bar opacity from the shortest to the tallest.
 const BAR_ALPHA: (f32, f32) = (0.55, 0.95);
+
+/// Switching off, the line, the dot and the ripple ease toward a soft ink
+/// in the overlay's palette: Tokyo Night's foreground on the dark theme...
+const INK_DARK: u32 = 0x00c0_caf5;
+/// ...the accent with this share of its saturation on the light one.
+const INK_SATURATION: f32 = 0.45;
+/// How far toward the ink the line goes, on the dark theme and the light
+/// one: a gentle tint, never a light of its own.
+const INK: (f32, f32) = (0.62, 0.5);
+/// Width of the ripple's ring, in pixels.
+const RIPPLE_STROKE: f32 = 1.5;
+/// A very faint halo around the line and the dot: its opacity on the dark
+/// theme and the light one, its blur and spread in pixels, and the share
+/// of the accent's saturation it keeps (Tokyo Night's blue stands in for
+/// an accent that is grey).
+const HALO: (f32, f32) = (0.22, 0.16);
+const HALO_BLUR: f32 = 5.;
+const HALO_SPREAD: f32 = 1.;
+const HALO_SATURATION: f32 = 0.6;
+const TOKYO_BLUE: u32 = 0x007a_a2f7;
+/// Below this saturation an accent counts as grey.
+const GREY: f32 = 0.15;
 
 const fn larger(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
@@ -184,6 +209,21 @@ impl Shape {
         match self {
             Shape::Wave(edge) => edge.reach(),
             Shape::Bars(bars) => bars.tallest(),
+        }
+    }
+
+    /// The voice's effect cut to `share` of it, as the picture collapses.
+    fn scaled(self, share: f32) -> Shape {
+        match self {
+            Shape::Wave(edge) => Shape::Wave(Edge {
+                offsets: edge.offsets.map(|o| o * share),
+                reach: edge.reach * share,
+                inward: edge.inward * share,
+            }),
+            Shape::Bars(bars) => Shape::Bars(Bars {
+                length: bars.length * share,
+                ..bars
+            }),
         }
     }
 }
@@ -334,6 +374,57 @@ impl Look {
     fn border_width(&self, scale: f32) -> Option<Pixels> {
         (self.border > 0.).then(|| px((self.border * scale).max(1.)))
     }
+
+    /// The soft colour the line, the dot and the ripple ease toward.
+    fn ink(&self) -> Hsla {
+        if self.dark {
+            gpui_kit::rgb(INK_DARK).into()
+        } else {
+            let mut ink = self.accent.opacity(1.);
+            ink.s *= INK_SATURATION;
+            ink
+        }
+    }
+
+    /// The ripple's colour: the dot's own on the dark theme, a mid tone
+    /// that shows on dark and light backgrounds alike; the ink itself on
+    /// the light theme, where the dot is too pale for a white background.
+    fn ripple(&self) -> Hsla {
+        if self.dark {
+            mix(self.fill.opacity(1.), self.ink(), INK.0)
+        } else {
+            self.ink()
+        }
+    }
+
+    /// The halo's colour: a muted accent.
+    fn halo(&self) -> Hsla {
+        let mut halo = if self.accent.s < GREY {
+            gpui_kit::rgb(TOKYO_BLUE).into()
+        } else {
+            self.accent.opacity(1.)
+        };
+        halo.s *= HALO_SATURATION;
+        halo
+    }
+
+    /// `self` as far switched off as `frame`: the pill's own fill and
+    /// border, gently tinted toward the ink as it thins to the line, going
+    /// with the dot.
+    fn switching_off(self, frame: &crt::Frame) -> Look {
+        let ink = self.ink();
+        let share = if self.dark { INK.0 } else { INK.1 };
+        let tint = |colour: Hsla| {
+            mix(colour, ink.opacity(colour.a), frame.tint * share).opacity(frame.alpha)
+        };
+        Look {
+            fill: tint(self.fill),
+            accent: tint(self.accent),
+            dark: self.dark,
+            depth: self.depth * frame.alpha,
+            border: self.border,
+        }
+    }
 }
 
 /// Whether the pill should hold still: the desktop asks for reduced motion,
@@ -352,32 +443,105 @@ pub fn software_rendered(window: &Window) -> bool {
 /// Paint the shadow, body, border and voice of a pill resting at `bounds`,
 /// drawn at `scale`.
 pub fn paint(bounds: Bounds<Pixels>, shape: &Shape, look: Look, scale: f32, window: &mut Window) {
+    let depth = (look.depth, look.depth);
     match shape {
         Shape::Wave(edge) if edge.reach() > 0. => {
-            paint_shadow(bounds, edge.inward, look, scale, window);
+            paint_shadow(bounds, edge.inward, look, depth, scale, window);
             paint_wave(bounds, edge, look, scale, window);
         }
         Shape::Wave(_) => {
-            paint_shadow(bounds, 0., look, scale, window);
+            paint_shadow(bounds, 0., look, depth, scale, window);
             paint_body(bounds, look, scale, window);
         }
         Shape::Bars(bars) => {
-            paint_shadow(bounds, 0., look, scale, window);
+            paint_shadow(bounds, 0., look, depth, scale, window);
             paint_body(bounds, look, scale, window);
-            for (bar, height) in bar_layout(bounds, bars, scale) {
-                let alpha = BAR_ALPHA.0 + (BAR_ALPHA.1 - BAR_ALPHA.0) * height;
-                window.paint_quad(
-                    fill(bar, look.accent.opacity(alpha))
-                        .corner_radii(Corners::all(bar.size.width / 2.)),
-                );
-            }
+            paint_bars(bounds, bars, look, scale, window);
         }
+    }
+}
+
+/// The pill at `bounds` switched off as far as `frame` (see [`crt`]): the
+/// pill itself squeezing, its ripples, bars and wide shadow shrinking with
+/// it while the tight one stays under the line and the dot, then the ring
+/// the closing dot releases. With `paths` edges are smooth at any size;
+/// without (an output-sized surface, where paths cost too much) the pill is
+/// quads, snapped to pixels, and no ring.
+pub fn paint_crt(
+    bounds: Bounds<Pixels>,
+    frame: &crt::Frame,
+    shape: &Shape,
+    look: Look,
+    paths: bool,
+    window: &mut Window,
+) {
+    let centre = bounds.center();
+    let pill = Bounds::centered_at(centre, size(px(frame.width), px(frame.height)));
+    let shape = shape.scaled(frame.picture);
+    let off = look.switching_off(frame);
+    let (edge, bars) = match shape {
+        Shape::Wave(edge) => (edge, None),
+        Shape::Bars(bars) => (Edge::default(), Some(bars)),
+    };
+    if frame.width > 0. && frame.alpha > 0. {
+        let depth = (off.depth * frame.picture.powf(1.5), off.depth);
+        paint_shadow(pill, edge.inward, off, depth, 1., window);
+        paint_halo(pill, &look, frame, window);
+        if paths {
+            paint_wave(pill, &edge, off, 1., window);
+        } else {
+            paint_body(pill, off, 1., window);
+        }
+        if let Some(bars) = bars {
+            paint_bars(pill, &bars, off, 1., window);
+        }
+    }
+    if let Some(ripple) = frame.ripple.filter(|_| paths) {
+        let ring = Bounds::centered_at(centre, size(px(ripple.diameter), px(ripple.diameter)));
+        let mut line = PathBuilder::stroke(px(RIPPLE_STROKE));
+        line.add_polygon(&wave_outline(ring, &Edge::default(), 1.), true);
+        if let Ok(path) = line.build() {
+            window.paint_path(path, look.ripple().opacity(ripple.opacity));
+        }
+    }
+}
+
+/// A very faint halo around the line and the dot at `pill`, coming in with
+/// their tint. Tucked inside, as the shadow is, so it meets the line.
+fn paint_halo(pill: Bounds<Pixels>, look: &Look, frame: &crt::Frame, window: &mut Window) {
+    let opacity = frame.glow * frame.alpha * if look.dark { HALO.0 } else { HALO.1 };
+    if opacity <= 0. {
+        return;
+    }
+    let middle = f32::from(pill.size.width.min(pill.size.height)) / 2.;
+    let tuck = px((middle - 0.25).clamp(0., 1.));
+    let inner = pill.dilate(-tuck);
+    window.paint_drop_shadows(
+        inner,
+        Corners::all(px(corner_radius(inner, RADIUS))),
+        &[BoxShadow {
+            color: look.halo().opacity(opacity),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(HALO_BLUR),
+            spread_radius: tuck + px(HALO_SPREAD),
+            inset: false,
+        }],
+    );
+}
+
+fn paint_bars(bounds: Bounds<Pixels>, bars: &Bars, look: Look, scale: f32, window: &mut Window) {
+    for (bar, height) in bar_layout(bounds, bars, scale) {
+        let alpha = BAR_ALPHA.0 + (BAR_ALPHA.1 - BAR_ALPHA.0) * height;
+        window.paint_quad(
+            fill(bar, look.accent.opacity(alpha)).corner_radii(Corners::all(bar.size.width / 2.)),
+        );
     }
 }
 
 /// The pill at rest: an exact rounded rectangle.
 fn paint_body(bounds: Bounds<Pixels>, look: Look, scale: f32, window: &mut Window) {
-    let mut body = fill(bounds, look.fill).corner_radii(Corners::all(px(RADIUS * scale)));
+    let radius = corner_radius(bounds, RADIUS * scale);
+    let mut body = fill(bounds, look.fill).corner_radii(Corners::all(px(radius)));
     if let Some(width) = look.border_width(scale) {
         body = body
             .border_widths(Edges::all(width))
@@ -457,27 +621,37 @@ fn bar_layout(
     })
 }
 
-/// A wide ambient shadow and a tight contact one, cast by the pill at rest.
-/// Shadows are drawn only outside the element they belong to; tucking that
-/// element a pixel inside the body, or inside where the edge dips by
-/// `inward` pixels (and spreading by as much), keeps the rim and any
-/// trough shaded, while a translucent fill shows no shadow band beneath it.
-fn paint_shadow(bounds: Bounds<Pixels>, inward: f32, look: Look, scale: f32, window: &mut Window) {
-    let tuck = px((inward + 1.) * scale);
+/// A wide ambient shadow and a tight contact one, cast by the pill at rest,
+/// at `depth` (ambient, contact) of their strength. Shadows are drawn only
+/// outside the element they belong to; tucking that element a pixel inside
+/// the body, or inside where the edge dips by `inward` pixels (and
+/// spreading by as much), keeps the rim and any trough shaded, while a
+/// translucent fill shows no shadow band beneath it.
+fn paint_shadow(
+    bounds: Bounds<Pixels>,
+    inward: f32,
+    look: Look,
+    (ambient_depth, contact_depth): (f32, f32),
+    scale: f32,
+    window: &mut Window,
+) {
+    let half = f32::from(bounds.size.width.min(bounds.size.height)) / 2.;
+    let tuck = px(((inward + 1.) * scale).min(half));
     let (ambient, contact) = if look.dark { (0.5, 0.3) } else { (0.16, 0.1) };
     let shadow = |alpha: f32, y: f32, blur: f32| BoxShadow {
-        color: Hsla::black().opacity(alpha * look.depth),
+        color: Hsla::black().opacity(alpha),
         offset: point(px(0.), px(y * scale)),
         blur_radius: px(blur * scale),
         spread_radius: tuck,
         inset: false,
     };
+    let inner = bounds.dilate(-tuck);
     window.paint_drop_shadows(
-        bounds.dilate(-tuck),
-        Corners::all(px(RADIUS * scale)),
+        inner,
+        Corners::all(px(corner_radius(inner, RADIUS * scale))),
         &[
-            shadow(ambient, SHADOW_DROP, SHADOW_BLUR),
-            shadow(contact, 1., 3.),
+            shadow(ambient * ambient_depth, SHADOW_DROP, SHADOW_BLUR),
+            shadow(contact * contact_depth, 1., 3.),
         ],
     );
 }
