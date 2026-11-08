@@ -890,14 +890,7 @@ impl OverlayView {
             }
             shape
         };
-        let accent = accent::get(cx);
-        let theme = cx.theme();
-        let target = Look::themed(
-            theme,
-            accent.unwrap_or(theme.primary),
-            self.opacity,
-            self.border,
-        );
+        let target = Look::themed(cx.theme(), accent::get(cx), self.opacity, self.border);
         self.look = Some(self.look.map_or(target, |look| look.fade_to(target, dt)));
     }
 
@@ -927,6 +920,8 @@ impl OverlayView {
         div()
             .w(px(WIDTH))
             .flex_shrink_0()
+            // No Base root sets the theme's font here (see `open`).
+            .font_family(theme.font_family.clone())
             .flex()
             .flex_col()
             .gap(px(GAP))

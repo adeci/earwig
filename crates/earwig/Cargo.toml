@@ -41,5 +41,8 @@ windows-sys.workspace = true
 [build-dependencies]
 embed-resource.workspace = true
 
+[dev-dependencies]
+ttf-parser.workspace = true
+
 [lints]
 workspace = true

@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 
 use resvg::{tiny_skia, usvg};
 
+use crate::ui::accent;
+
 /// The pill. Only its shape is used; the state gives the colour.
 static PILL: LazyLock<usvg::Tree> = LazyLock::new(|| {
     usvg::Tree::from_str(
@@ -16,7 +18,11 @@ static PILL: LazyLock<usvg::Tree> = LazyLock::new(|| {
     .expect("assets/tray.svg is valid SVG")
 });
 
-const IDLE: [u8; 3] = [0x35, 0x84, 0xe4];
+/// earwig's blue, the default accent.
+const IDLE: [u8; 3] = {
+    let [_, r, g, b] = accent::EARWIG.to_be_bytes();
+    [r, g, b]
+};
 const DICTATING: [u8; 3] = [0xe5, 0x48, 0x4d];
 
 /// `size`×`size` pixels, RGBA, rows top to bottom, not premultiplied; clear

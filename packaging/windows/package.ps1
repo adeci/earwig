@@ -15,7 +15,8 @@ $name = "earwig-$version-windows-x64"
 $stage = "$out\$name"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item "$target\release\earwig.exe", "$target\release\earwigw.exe", LICENSE, README.md $stage
+Copy-Item "$target\release\earwig.exe", "$target\release\earwigw.exe", LICENSE, README.md,
+    assets\fonts\LICENSE-IBM-Plex-Sans.txt $stage
 Compress-Archive -Force -Path "$stage\*" -DestinationPath "$out\$name.zip"
 Write-Output "$out\$name.zip"
 

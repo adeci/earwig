@@ -40,6 +40,7 @@ Name: autostart; Description: "Start earwig when I sign in"
 Source: "{#Stage}\earwig.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\earwigw.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"
+Source: "..\..\assets\fonts\LICENSE-IBM-Plex-Sans.txt"; DestDir: "{app}"
 Source: "..\..\README.md"; DestDir: "{app}"
 
 [Icons]
