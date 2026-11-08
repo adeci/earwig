@@ -197,7 +197,7 @@ impl Render for PillPreview {
             }
         };
         let theme = cx.theme();
-        let accent = accent::get(cx).unwrap_or(theme.primary);
+        let accent = accent::get(cx);
         let look = Look::themed(theme, accent, self.opacity.value, self.border.value);
         let (base, check) = (theme.background, theme.muted_foreground.opacity(0.3));
 

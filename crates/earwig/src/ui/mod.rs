@@ -9,6 +9,7 @@
 mod accent;
 mod crt;
 mod drag;
+mod font;
 mod icon;
 mod lifecycle;
 mod overlay;
@@ -20,7 +21,7 @@ mod water;
 use std::sync::PoisonError;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use earwig_core::config::{Config, ThemeSetting};
+use earwig_core::config::{AppearanceConfig, Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
 use earwig_core::events::{Command, DictationState, Event, Status};
@@ -61,7 +62,13 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
         .with_assets(gpui_kit::assets::Assets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
+            // Before init, whose theme looks up the system font: GPUI's is
+            // IBM Plex Sans on Linux.
+            let bundled = font::register(cx);
             gpui_kit::init(cx);
+            if bundled {
+                font::name_on_theme(cx);
+            }
             // Inside the application: some trays need its run loop.
             let tray = platform::spawn_tray(handle.clone(), local_tx);
             accent::watch(cx);
@@ -82,7 +89,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
                 overlay_wake: None,
                 input_devices: Vec::new(),
             });
-            apply_theme(cx);
+            apply_appearance(cx);
 
             cx.spawn(async move |cx| {
                 while let Ok(event) = events.recv_async().await {
@@ -190,16 +197,17 @@ pub(crate) fn edit_config(cx: &mut App, edit: impl FnOnce(&mut Config)) {
     cx.refresh_windows();
 }
 
-/// Theme every window with the configured scheme. Cheap when it is already
-/// in place, so it runs whenever a window opens and picks up hand edits.
-pub(crate) fn apply_theme(cx: &mut App) {
-    let theme = UiState::handle(cx)
+/// Theme every window with the configured scheme and accent. Cheap when
+/// they are already in place, so it runs whenever a window opens and picks
+/// up hand edits.
+pub(crate) fn apply_appearance(cx: &mut App) {
+    let AppearanceConfig { theme, accent } = UiState::handle(cx)
         .config()
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .config()
         .appearance
-        .theme;
+        .clone();
     let mode = match theme {
         ThemeSetting::Dark => ThemeMode::Dark,
         ThemeSetting::Light => ThemeMode::Light,
@@ -207,6 +215,7 @@ pub(crate) fn apply_theme(cx: &mut App) {
     if cx.theme().mode != mode {
         Theme::change(mode, None, cx);
     }
+    accent::set(accent, cx);
 }
 
 fn apply(event: Event, cx: &mut App) {
@@ -315,7 +324,7 @@ fn open_overlay(cx: &mut App) {
     if !overlay_config.enabled || surface == OverlaySurface::None {
         return;
     }
-    apply_theme(cx);
+    apply_appearance(cx);
     match overlay::open(&overlay_config, surface, voice, cx) {
         Ok(view) => cx.global_mut::<UiState>().overlay = Some(view),
         Err(e) => log::error!("opening the overlay: {e:#}"),
@@ -339,7 +348,7 @@ pub(crate) fn discard(cx: &mut App) {
 
 fn show_settings(cx: &mut App) {
     refresh_input_devices(cx);
-    apply_theme(cx);
+    apply_appearance(cx);
     if let Some(window) = cx.global::<UiState>().settings
         && window
             .update(cx, |_, window, _| window.activate_window())

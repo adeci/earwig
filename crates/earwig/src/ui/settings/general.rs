@@ -4,22 +4,23 @@
 use std::sync::PoisonError;
 
 use earwig_core::config::{
-    ActivationMode, Config, InsertSetting, OverlayAnimation, OverlayPosition, OverlayStyle,
-    ThemeSetting,
+    AccentSetting, ActivationMode, Config, InsertSetting, OverlayAnimation, OverlayPosition,
+    OverlayStyle, ThemeSetting,
 };
 use earwig_core::events::InsertMethod;
 use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
 use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{App, Entity, ParentElement as _, SharedString, Styled as _, div, px};
+use gpui_kit::{App, Axis, Entity, ParentElement as _, SharedString, Styled as _, div, px};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::ui::settings::pill_preview::{Knob, PillPreview};
-use crate::ui::{UiState, apply_theme, config, edit_config};
+use crate::ui::{UiState, apply_appearance, config, edit_config};
 
 const LOCKED_HINT: &str = "Set by system configuration.";
 
@@ -199,20 +200,40 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
 }
 
 fn appearance(cx: &App) -> SettingGroup {
-    SettingGroup::new().title("Appearance").item(item(
-        cx,
-        "appearance.theme",
-        "Theme",
-        "Colours of this window and the overlay, whatever the desktop uses.",
-        enum_dropdown_with(
-            &[(ThemeSetting::Dark, "Dark"), (ThemeSetting::Light, "Light")],
-            |c| c.appearance.theme,
-            |theme, cx| {
-                edit_config(cx, |c| c.appearance.theme = theme);
-                apply_theme(cx);
-            },
+    SettingGroup::new().title("Appearance").items([
+        item(
+            cx,
+            "appearance.theme",
+            "Theme",
+            "Colours of this window and the overlay, whatever the desktop uses.",
+            enum_dropdown_with(
+                &[(ThemeSetting::Dark, "Dark"), (ThemeSetting::Light, "Light")],
+                |c| c.appearance.theme,
+                |theme, cx| {
+                    edit_config(cx, |c| c.appearance.theme = theme);
+                    apply_appearance(cx);
+                },
+            ),
         ),
-    ))
+        item(
+            cx,
+            "appearance.accent",
+            "Accent",
+            "Colour of the overlay's bars, border and glow: earwig's own blue, \
+             or the desktop's accent colour where it has one.",
+            enum_dropdown_with(
+                &[
+                    (AccentSetting::Earwig, "earwig"),
+                    (AccentSetting::System, "System"),
+                ],
+                |c| c.appearance.accent,
+                |accent, cx| {
+                    edit_config(cx, |c| c.appearance.accent = accent);
+                    apply_appearance(cx);
+                },
+            ),
+        ),
+    ])
 }
 
 fn overlay(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
@@ -520,17 +541,25 @@ where
     SettingField<T>: gpui_kit::component::setting::AnySettingField,
 {
     let locked = is_locked(cx, key);
-    let description = if locked {
-        format!("{description} {LOCKED_HINT}")
-    } else {
-        description.to_owned()
-    };
     SettingItem::new(title, field)
-        .description(description)
+        .description(hinted(description, locked))
         .disabled(locked)
 }
 
+/// `description`, saying so when its key is locked.
+fn hinted(description: &str, locked: bool) -> String {
+    if locked {
+        format!("{description} {LOCKED_HINT}")
+    } else {
+        description.to_owned()
+    }
+}
+
 /// A slider row for one of the overlay pill's looks, sharing its preview.
+/// Laid out as [`item`]'s rows are, except that the description wraps as
+/// narrow as the slider and the preview beside it need: GPUI measures text
+/// unwrapped, so a standard row keeps a long description at its widest and
+/// pushes a field this wide past the window's edge.
 fn pill_item(
     cx: &App,
     pill: &Entity<PillPreview>,
@@ -540,14 +569,41 @@ fn pill_item(
     description: &str,
 ) -> SettingItem {
     let locked = is_locked(cx, key);
+    let description = SharedString::from(hinted(description, locked));
+    let keywords = [SharedString::from(title), description.clone()];
     let pill = pill.clone();
-    item(
-        cx,
-        key,
-        title,
-        description,
-        SettingField::render(move |_, _, cx| PillPreview::field(&pill, knob, locked, cx)),
-    )
+    SettingItem::render(move |options, _, cx| {
+        let stacked = options.layout() == Axis::Vertical;
+        let text = v_flex()
+            .map(|this| {
+                if stacked {
+                    this.w_full()
+                } else {
+                    this.flex_1().min_w_0().max_w_3_5()
+                }
+            })
+            .child(Label::new(title).text_sm())
+            .child(
+                div()
+                    .size_full()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(description.clone()),
+            );
+        let field = PillPreview::field(&pill, knob, locked, cx);
+        if stacked {
+            v_flex().w_full().gap_3().child(text).child(field)
+        } else {
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_3()
+                .child(text)
+                .child(field)
+        }
+    })
+    .keywords(keywords)
+    .disabled(locked)
 }
 
 fn is_locked(cx: &App, key: &str) -> bool {

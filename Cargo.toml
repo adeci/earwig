@@ -96,6 +96,8 @@ ksni = { version = "0.3", default-features = false, features = [
 resvg = { version = "0.46", default-features = false }
 # The tray on Windows (and macOS): the notification area, `NSStatusItem`.
 tray-icon = { version = "0.26", default-features = false }
+# Reads the bundled font in tests; the version GPUI parses fonts with.
+ttf-parser = "0.25"
 
 # Vendored C++ build; the GPU backend is compiled in statically (no
 # runtime-loaded backend modules to stage next to the binary). Each target

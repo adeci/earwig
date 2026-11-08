@@ -121,7 +121,11 @@ craneLib.buildPackage (
     meta = {
       description = "Local, instant dictation for Linux desktops";
       homepage = "https://github.com/adeci/earwig";
-      license = lib.licenses.mit;
+      # OFL: the IBM Plex Sans compiled into the binary.
+      license = [
+        lib.licenses.mit
+        lib.licenses.ofl
+      ];
       mainProgram = "earwig";
       platforms = lib.platforms.linux;
     };

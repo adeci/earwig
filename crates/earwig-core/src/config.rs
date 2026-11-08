@@ -148,10 +148,24 @@ pub enum ThemeSetting {
     Light,
 }
 
+/// The accent of the overlay's pill (its bars, border and glow, and the
+/// settings window's preview of it).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AccentSetting {
+    /// earwig's own blue, the icon's, the same on every computer.
+    #[default]
+    Earwig,
+    /// The desktop's accent colour, following its changes; earwig's blue
+    /// where the desktop has none.
+    System,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppearanceConfig {
     pub theme: ThemeSetting,
+    pub accent: AccentSetting,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,5 +662,27 @@ mod tests {
         let (_dir, store) = self::store("[appearance]\ntheme = \"system\"\n", "");
         assert!(store.user_error().is_some());
         assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn accent_defaults_to_earwig_round_trips_and_rejects_unknown() {
+        let (_dir, mut store) = store("", "");
+        assert_eq!(store.config().appearance.accent, AccentSetting::Earwig);
+        store
+            .update(|c| c.appearance.accent = AccentSetting::System)
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[appearance]\naccent = \"system\"");
+        let (_dir, mut store) = self::store(&written, "");
+        assert_eq!(store.config().appearance.accent, AccentSetting::System);
+        // Back to the default leaves nothing behind.
+        store
+            .update(|c| c.appearance.accent = AccentSetting::Earwig)
+            .unwrap();
+        assert_eq!(fs::read_to_string(&store.paths().user).unwrap().trim(), "");
+
+        let (_dir, store) = self::store("[appearance]\naccent = \"purple\"\n", "");
+        assert!(store.user_error().is_some());
+        assert_eq!(store.config().appearance.accent, AccentSetting::Earwig);
     }
 }

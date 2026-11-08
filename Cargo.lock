@@ -1670,6 +1670,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tray-icon",
+ "ttf-parser",
  "wayland-client",
  "wayland-protocols-wlr",
  "windows-sys 0.61.2",
