@@ -9,7 +9,7 @@ use gpui_kit::{App, Global, Hsla};
 use crate::ui::platform;
 
 /// earwig's blue, the tray and app icon's. Both themes use it as it is: it
-/// stands out from the light theme's white (3.8:1) and from the dark
+/// stands out from the light pill's off-white (3.6:1) and from the dark
 /// pill's charcoal (4.5:1), past the 3:1 that graphics need.
 pub(crate) const EARWIG: u32 = 0x0035_84e4;
 

@@ -87,7 +87,7 @@ pub struct Frame {
     pub width: f32,
     pub height: f32,
     /// What is left of the pill as it was: 1 whole, 0 once it is a line.
-    /// Its ripples, bars and wide shadow shrink with it.
+    /// Its ripples and wide shadow shrink with it.
     pub picture: f32,
     /// From the pill's own colours (0) to the line's soft tint (1).
     pub tint: f32,

@@ -80,7 +80,9 @@ impl Default for HotkeyConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
-    /// Input device name as listed by `earwig devices`; `None` = system default.
+    /// Input device as `earwig devices` lists it first on each line (a sound
+    /// server source on Linux, the device's name on Windows); `None` =
+    /// system default.
     pub device: Option<String>,
     /// Keep the microphone open between dictations so speech that starts as
     /// the key goes down is not clipped. The desktop's mic indicator stays on.
@@ -148,8 +150,8 @@ pub enum ThemeSetting {
     Light,
 }
 
-/// The accent of the overlay's pill (its bars, border and glow, and the
-/// settings window's preview of it).
+/// The accent of the overlay's pill (its border and glow, and the settings
+/// window's preview of it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccentSetting {
@@ -176,18 +178,6 @@ pub enum OverlayPosition {
     Bottom,
 }
 
-/// How the overlay pill shows the voice.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OverlayStyle {
-    /// The pill's outline behaves like water the voice disturbs: speech
-    /// sends ripples around it that ring on and settle after it.
-    #[default]
-    Wave,
-    /// Sound bars above and below a still pill, one pair per speech band.
-    Bars,
-}
-
 /// How the overlay pill comes and goes. Either way the final text and its
 /// insertion carry on unseen once a dictation is finished, and a pill that
 /// holds still (reduced motion, software rendering) comes and goes at once.
@@ -210,14 +200,8 @@ pub struct OverlayConfig {
     pub position: OverlayPosition,
     /// Lines of live text shown before older lines scroll away.
     pub max_lines: u32,
-    pub style: OverlayStyle,
-    /// How far the voice moves the pill (bar height or wave amplitude): 0
-    /// is still, up to [`OverlayConfig::MAX_MOTION`].
-    #[serde(serialize_with = "short_float")]
-    pub motion: f32,
     /// Opacity of the pill's fill (and the depth of its shadow), from
-    /// [`OverlayConfig::MIN_OPACITY`] to 1; text, bars and border stay
-    /// opaque.
+    /// [`OverlayConfig::MIN_OPACITY`] to 1; text and border stay opaque.
     #[serde(serialize_with = "short_float")]
     pub opacity: f32,
     /// Width of the pill's accent border in pixels, 0 (none, the default)
@@ -235,20 +219,9 @@ fn short_float<S: serde::Serializer>(value: &f32, serializer: S) -> Result<S::Ok
 }
 
 impl OverlayConfig {
-    pub const MAX_MOTION: f32 = 2.;
-    pub const DEFAULT_MOTION: f32 = 0.8;
     pub const DEFAULT_OPACITY: f32 = 0.97;
     pub const MIN_OPACITY: f32 = 0.3;
     pub const MAX_BORDER: f32 = 3.;
-
-    /// `motion` within its range; an unreadable value means the default.
-    pub fn motion(&self) -> f32 {
-        if self.motion.is_nan() {
-            Self::DEFAULT_MOTION
-        } else {
-            self.motion.clamp(0., Self::MAX_MOTION)
-        }
-    }
 
     /// `opacity` within its range; an unreadable value means the default.
     pub fn opacity(&self) -> f32 {
@@ -275,8 +248,6 @@ impl Default for OverlayConfig {
             enabled: true,
             position: OverlayPosition::Bottom,
             max_lines: 3,
-            style: OverlayStyle::default(),
-            motion: Self::DEFAULT_MOTION,
             opacity: Self::DEFAULT_OPACITY,
             border: 0.,
             animation: OverlayAnimation::default(),
@@ -572,46 +543,33 @@ mod tests {
     fn overlay_looks_default_round_trip_and_clamp() {
         let (_dir, mut store) = store("", "");
         let overlay = &store.config().overlay;
-        assert_eq!(overlay.style, OverlayStyle::Wave);
-        assert!((overlay.motion() - OverlayConfig::DEFAULT_MOTION).abs() < f32::EPSILON);
         assert!((overlay.opacity() - 0.97).abs() < f32::EPSILON);
         assert!(overlay.border().abs() < f32::EPSILON, "borderless");
         store
             .update(|c| {
-                c.overlay.style = OverlayStyle::Bars;
-                c.overlay.motion = 1.5;
                 c.overlay.opacity = 0.7;
                 c.overlay.border = 1.5;
             })
             .unwrap();
         let written = fs::read_to_string(&store.paths().user).unwrap();
-        assert_eq!(
-            written.trim(),
-            "[overlay]\nborder = 1.5\nmotion = 1.5\nopacity = 0.7\nstyle = \"bars\""
-        );
+        assert_eq!(written.trim(), "[overlay]\nborder = 1.5\nopacity = 0.7");
         let (_dir, reloaded) = self::store(&written, "");
         let overlay = &reloaded.config().overlay;
-        assert_eq!(overlay.style, OverlayStyle::Bars);
-        assert!((overlay.motion() - 1.5).abs() < f32::EPSILON);
         assert!((overlay.opacity() - 0.7).abs() < f32::EPSILON);
         assert!((overlay.border() - 1.5).abs() < f32::EPSILON);
 
         let over = OverlayConfig {
-            motion: 7.,
             opacity: 3.,
             border: 10.,
             ..OverlayConfig::default()
         };
-        assert!((over.motion() - OverlayConfig::MAX_MOTION).abs() < f32::EPSILON);
         assert!((over.opacity() - 1.).abs() < f32::EPSILON);
         assert!((over.border() - OverlayConfig::MAX_BORDER).abs() < f32::EPSILON);
         let under = OverlayConfig {
-            motion: -1.,
             opacity: 0.,
             border: -2.,
             ..OverlayConfig::default()
         };
-        assert!(under.motion().abs() < f32::EPSILON);
         assert!((under.opacity() - OverlayConfig::MIN_OPACITY).abs() < f32::EPSILON);
         assert!(under.border().abs() < f32::EPSILON);
         let unreadable = OverlayConfig {

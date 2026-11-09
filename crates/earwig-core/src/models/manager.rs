@@ -21,7 +21,8 @@ struct CatalogFile {
     model: Vec<CatalogEntry>,
 }
 
-/// Parse a catalog file; exactly one entry must be the default.
+/// Parse a catalog file; exactly one entry must be the default, and every
+/// benchmark must hold numbers a benchmark can produce.
 fn parse_catalog(text: &str) -> anyhow::Result<Vec<CatalogEntry>> {
     let file: CatalogFile = toml::from_str(text)?;
     let defaults = file.model.iter().filter(|m| m.default).count();
@@ -29,6 +30,16 @@ fn parse_catalog(text: &str) -> anyhow::Result<Vec<CatalogEntry>> {
         defaults == 1,
         "catalog must have exactly one default model, found {defaults}"
     );
+    if let Some(m) = file
+        .model
+        .iter()
+        .find(|m| m.benchmark.is_some_and(|b| !b.is_valid()))
+    {
+        anyhow::bail!(
+            "benchmark of {}: the error must be 0 to 100 and both speeds above 0",
+            m.id
+        );
+    }
     Ok(file.model)
 }
 
@@ -92,6 +103,16 @@ impl ModelManager {
 
     pub fn curated(&self, id: &str) -> Option<&CatalogEntry> {
         self.catalog.iter().find(|m| m.id == id)
+    }
+
+    /// The `[model] model` setting that selects `spec`: none for the
+    /// catalog's default, so that a later release's new default reaches the
+    /// user too.
+    pub fn setting_for(&self, spec: ModelSpec) -> Option<ModelSpec> {
+        match &spec {
+            ModelSpec::Curated { id } if *id == self.default_model().id => None,
+            _ => Some(spec),
+        }
     }
 
     /// Where a spec's file lives: `<store>/<owner>/<repo>/<commit>/<file>`
@@ -210,9 +231,10 @@ impl ModelManager {
     }
 
     /// Download `spec` into the store and return its path. Already present
-    /// files return at once; an earlier partial download resumes. The file
-    /// is verified against the catalog's sha256 (curated) or the Hub's LFS
-    /// sha256 (`hf:`) before it appears at its final path.
+    /// files return at once; a failed download resumes where it stopped,
+    /// and a cancelled one leaves nothing behind. The file is verified
+    /// against the catalog's sha256 (curated) or the Hub's LFS sha256
+    /// (`hf:`) before it appears at its final path.
     pub fn download(
         &self,
         spec: &ModelSpec,
@@ -277,7 +299,7 @@ impl ModelManager {
             sha256: &sha256,
             size: Some(size),
         };
-        download::fetch(
+        let fetched = download::fetch(
             self.hub.files_agent(),
             &src,
             &dest,
@@ -289,7 +311,11 @@ impl ModelManager {
                 });
             },
             cancel,
-        )?;
+        );
+        if matches!(fetched, Err(ModelError::Cancelled)) {
+            self.prune(&dest);
+        }
+        fetched?;
         log::info!("downloaded {spec} to {}", dest.display());
         Ok(dest)
     }
@@ -316,15 +342,19 @@ impl ModelManager {
                 ModelError::NotInstalled(spec.clone())
             });
         }
-        // Drop directories left empty, up to the store itself.
-        let mut dir = path.parent();
+        self.prune(&path);
+        Ok(())
+    }
+
+    /// Drop the directories above `file` left empty, up to the store itself.
+    fn prune(&self, file: &Path) {
+        let mut dir = file.parent();
         while let Some(d) = dir.filter(|d| *d != self.store && d.starts_with(&self.store)) {
             if fs::remove_dir(d).is_err() {
                 break;
             }
             dir = d.parent();
         }
-        Ok(())
     }
 
     fn hf_path(&self, repo: &str, revision: &str, file: &str) -> Result<PathBuf, ModelError> {
@@ -374,9 +404,10 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+    use crate::models::{Benchmark, Role, Tier};
 
     #[test]
-    fn builtin_catalog_parses() {
+    fn builtin_catalog_parses_with_roles() {
         let catalog = super::parse_catalog(super::BUILTIN_CATALOG).unwrap();
         assert!(
             catalog
@@ -387,6 +418,112 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), catalog.len(), "catalog ids are unique");
+        // Each tag marks one model, and the default is the recommended one.
+        for role in [Role::Recommended, Role::Faster, Role::Accurate] {
+            let tagged = catalog.iter().filter(|m| m.role == Some(role)).count();
+            assert_eq!(tagged, 1, "{role:?}");
+        }
+        let default = catalog.iter().find(|m| m.default).unwrap();
+        assert_eq!(default.role, Some(Role::Recommended));
+    }
+
+    /// A catalog of one default model, with `extra` lines at its end.
+    fn one_model(extra: &str) -> String {
+        format!(
+            r#"[[model]]
+id = "m"
+name = "M"
+summary = "s"
+repo = "o/r"
+file = "m.gguf"
+revision = "c"
+sha256 = "x"
+size = 1
+license = "mit"
+languages = ["en"]
+streaming = false
+default = true
+{extra}"#
+        )
+    }
+
+    #[test]
+    fn roles_are_optional_and_spelled_out() {
+        let role = |text: &str| super::parse_catalog(&one_model(text)).map(|c| c[0].role);
+        assert_eq!(role("").unwrap(), None);
+        assert_eq!(role(r#"role = "faster""#).unwrap(), Some(Role::Faster));
+        assert_eq!(role(r#"role = "accurate""#).unwrap(), Some(Role::Accurate));
+        assert!(role(r#"role = "best""#).is_err());
+    }
+
+    #[test]
+    fn builtin_catalog_carries_handys_benchmarks() {
+        let catalog = super::parse_catalog(super::BUILTIN_CATALOG).unwrap();
+        let measured = |english_error, gpu_speed, cpu_speed| Benchmark {
+            english_error,
+            gpu_speed,
+            cpu_speed,
+        };
+        // Handy's numbers (models.toml names the source), then the grade and
+        // the accuracy, GPU speed and CPU speed steps they come to.
+        let expected = [
+            (measured(3.99, 25.28, 13.955), ("A−", 5, 5, 4)),
+            (measured(6.11, 76.455, 50.03), ("B+", 4, 5, 5)),
+            (measured(3.23, 4.085, 2.47), ("A", 5, 2, 1)),
+            (measured(4.26, 23., 13.29), ("A−", 5, 5, 4)),
+            (measured(7.9, 17.135, 10.59), ("B", 4, 4, 4)),
+        ];
+        let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "parakeet-unified-en-0.6b",
+                "parakeet-tdt-ctc-110m",
+                "Qwen3-ASR-1.7B",
+                "parakeet-ultra",
+                "nemotron-3.5-asr-streaming-0.6b",
+            ]
+        );
+        for (entry, (benchmark, graded)) in catalog.iter().zip(expected) {
+            assert_eq!(entry.benchmark, Some(benchmark), "{}", entry.id);
+            let shown = (
+                benchmark.grade(),
+                benchmark.accuracy_steps(),
+                benchmark.speed_steps(Tier::Gpu),
+                benchmark.speed_steps(Tier::Cpu),
+            );
+            assert_eq!(shown, graded, "{}", entry.id);
+        }
+    }
+
+    #[test]
+    fn benchmarks_are_optional_and_checked() {
+        let benchmark = |text: &str| super::parse_catalog(&one_model(text)).map(|c| c[0].benchmark);
+        assert_eq!(benchmark("").unwrap(), None);
+        let table = "[model.benchmark]\nenglish_error = 3.5\ngpu_speed = 20\ncpu_speed = 10.5";
+        assert_eq!(
+            benchmark(table).unwrap(),
+            Some(Benchmark {
+                english_error: 3.5,
+                gpu_speed: 20.,
+                cpu_speed: 10.5,
+            })
+        );
+        assert!(benchmark("[model.benchmark]\nenglish_error = 3.5\ngpu_speed = 20").is_err());
+        assert!(benchmark(&table.replace("= 10.5", "= 0")).is_err());
+    }
+
+    #[test]
+    fn choosing_the_default_model_sets_none() {
+        let manager = ModelManager::with_endpoint("/nowhere".into(), "http://127.0.0.1:9");
+        let curated = |m: &CatalogEntry| ModelSpec::Curated { id: m.id.clone() };
+        assert_eq!(manager.setting_for(curated(manager.default_model())), None);
+        let other = curated(manager.catalog().iter().find(|m| !m.default).unwrap());
+        assert_eq!(manager.setting_for(other.clone()), Some(other));
+        let file = ModelSpec::Path {
+            path: "/models/m.gguf".into(),
+        };
+        assert_eq!(manager.setting_for(file.clone()), Some(file));
     }
 
     /// A one-repo fake Hub: the tree listing and the file itself.
@@ -479,6 +616,22 @@ mod tests {
             manager.delete(&spec),
             Err(ModelError::NotInstalled(_))
         ));
+    }
+
+    #[test]
+    fn a_cancelled_download_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("models");
+        let manager = ModelManager::with_endpoint(store.clone(), &fake_hub(b"GGUF"));
+        let spec: ModelSpec = "hf:o/r/sub/m.gguf@c".parse().unwrap();
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        let err = manager.download(&spec, &mut |_| {}, &cancel).unwrap_err();
+        assert!(matches!(err, ModelError::Cancelled), "{err}");
+        assert!(
+            !store.join("o").exists(),
+            "no partial file, no empty directories"
+        );
     }
 
     #[test]

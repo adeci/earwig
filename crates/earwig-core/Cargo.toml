@@ -31,6 +31,7 @@ ashpd.workspace = true
 async-io.workspace = true
 atspi-proxies.workspace = true
 futures-lite.workspace = true
+pulseaudio.workspace = true
 reis.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true

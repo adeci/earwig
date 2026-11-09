@@ -4,7 +4,8 @@
 //! written. A later attempt re-hashes the part and asks the server for the
 //! rest with `Range`; a server that answers with the whole file instead
 //! (200) restarts it. Only a file whose SHA-256 matches is renamed into
-//! place, so a path in the store is always a verified file.
+//! place, so a path in the store is always a verified file. A cancelled
+//! download deletes its part.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -38,7 +39,8 @@ pub(crate) fn part_path(dest: &Path) -> PathBuf {
 
 /// Download `src` to `dest`. `progress(downloaded, total)` is called at most
 /// every 100 ms and once at the end; `total` is 0 while unknown.
-/// Cancelling (or failing) keeps the part for the next call to resume.
+/// Failing keeps the part for the next call to resume; cancelling deletes
+/// it.
 pub(crate) fn fetch(
     agent: &Agent,
     src: &Source<'_>,
@@ -72,29 +74,18 @@ pub(crate) fn fetch(
         last_report: None,
         progress,
     };
-    part.rehash(cancel)?;
-    if src.size.is_some_and(|size| part.len > size) {
-        part.restart()?;
-    }
-    part.report(false);
-
-    let mut attempt = 1;
-    while src.size != Some(part.len) {
-        match part.transfer(agent, src, cancel) {
-            Ok(()) => break,
-            Err(Failure::Fatal(e)) => return Err(e),
-            Err(Failure::Retry(e)) if attempt >= ATTEMPTS => return Err(e),
-            Err(Failure::Retry(e)) => {
-                log::warn!("download interrupted at {} bytes ({e}); resuming", part.len);
-                std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
-                if cancel.is_cancelled() {
-                    return Err(ModelError::Cancelled);
-                }
-                attempt += 1;
+    match part.complete(agent, src, cancel) {
+        Ok(()) => {}
+        // Deleted while still locked, so no other download of it can start
+        // on the part first.
+        Err(ModelError::Cancelled) => {
+            if let Err(e) = fs::remove_file(&part_path) {
+                log::warn!("removing {}: {e}", part_path.display());
             }
+            return Err(ModelError::Cancelled);
         }
+        Err(e) => return Err(e),
     }
-    part.report(true);
 
     let actual = hex::encode(part.hasher.finalize_reset());
     if !actual.eq_ignore_ascii_case(src.sha256) {
@@ -139,6 +130,39 @@ struct Part<'p> {
 }
 
 impl Part<'_> {
+    /// Hash what an earlier attempt left behind, then fetch the rest,
+    /// resuming a broken transfer up to [`ATTEMPTS`] times.
+    fn complete(
+        &mut self,
+        agent: &Agent,
+        src: &Source<'_>,
+        cancel: &CancelToken,
+    ) -> Result<(), ModelError> {
+        self.rehash(cancel)?;
+        if src.size.is_some_and(|size| self.len > size) {
+            self.restart()?;
+        }
+        self.report(false);
+        let mut attempt = 1;
+        while src.size != Some(self.len) {
+            match self.transfer(agent, src, cancel) {
+                Ok(()) => break,
+                Err(Failure::Fatal(e)) => return Err(e),
+                Err(Failure::Retry(e)) if attempt >= ATTEMPTS => return Err(e),
+                Err(Failure::Retry(e)) => {
+                    log::warn!("download interrupted at {} bytes ({e}); resuming", self.len);
+                    std::thread::sleep(Duration::from_millis(500 * u64::from(attempt)));
+                    if cancel.is_cancelled() {
+                        return Err(ModelError::Cancelled);
+                    }
+                    attempt += 1;
+                }
+            }
+        }
+        self.report(true);
+        Ok(())
+    }
+
     /// Hash what an earlier attempt left behind and position at its end.
     fn rehash(&mut self, cancel: &CancelToken) -> Result<(), ModelError> {
         self.file.seek(SeekFrom::Start(0))?;
@@ -508,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_keeps_the_part_and_the_next_call_resumes() {
+    fn cancel_deletes_the_part() {
         let (data, sha) = data();
         let server = serve(data.clone(), vec![Reply::Stall { after: 600_000 }]);
         let dir = tempfile::tempdir().unwrap();
@@ -529,9 +553,16 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ModelError::Cancelled), "{err}");
         assert!(!dest.exists());
-        let kept = fs::metadata(part_path(&dest)).unwrap().len();
-        assert!(kept > 0 && kept < data.len() as u64, "kept {kept}");
+        assert!(!part_path(&dest).exists());
+    }
 
+    #[test]
+    fn a_part_left_by_an_earlier_call_resumes() {
+        let (data, sha) = data();
+        let server = serve(data.clone(), vec![]);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.gguf");
+        fs::write(part_path(&dest), &data[..600_000]).unwrap();
         let mut first = None;
         run(
             &server,
@@ -544,11 +575,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(first, Some(kept), "progress starts at the resumed offset");
+        assert_eq!(
+            first,
+            Some(600_000),
+            "progress starts at the resumed offset"
+        );
         assert_eq!(fs::read(&dest).unwrap(), data);
         assert_eq!(
-            server.ranges.lock().unwrap().last().unwrap().as_deref(),
-            Some(format!("bytes={kept}-").as_str())
+            *server.ranges.lock().unwrap(),
+            [Some("bytes=600000-".to_owned())]
         );
     }
 

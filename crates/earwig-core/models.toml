@@ -1,15 +1,36 @@
-# Curated models shipped with this release. Exactly one entry is the
-# default; the rest are offered in the settings window. Anything else the
+# Curated models shipped with this release, in the order the settings
+# window lists them. Exactly one entry is the default. Anything else the
 # engine can load is reachable through Hugging Face search or a local path.
 #
 # Every field comes from the Hub: `revision` is a full commit, `sha256` and
 # `size` are the LFS object of `file` at that commit, `license` is the card's
-# `license_name` (or `license` when it is an SPDX id).
+# `license_name` (or `license` when it is an SPDX id). `language_hint = true`
+# marks a model that takes a language hint (`[model] language`); only those
+# get a Language row in the settings window.
+#
+# `role` is the tag Handy's picks give a model for English dictation
+# (`recommended`, `faster` or `accurate`, from @handy-computer/models); the
+# rest have none.
+#
+# `[model.benchmark]` is Handy's measurement of the very same file (the
+# sha256 Handy benchmarked), copied from Handy's catalog: github.com/
+# cjpais/Handy at commit 73cc8579cff74e97e08de9d86035a92e4335ff7f,
+# src-tauri/src/catalog/catalog.json (the same file as catalog.json in
+# @handy-computer/models 0.2.3). `english_error` is
+# `results.<id>.accuracy.en.error`: the percentage of words wrong in English
+# on FLEURS (test split). `gpu_speed` and `cpu_speed` are
+# `results.<id>.performance.accelerated` and `.cpu`: how many times faster
+# than real time the Q8_0 file transcribes on a Ryzen 4750U laptop with
+# Vulkan, and on its processor alone. Handy's id for the 110M is
+# `parakeet-tdt_ctc-110m`. The settings window grades them as that package
+# does: `accuracyGrade` (Handy's A to F) and `speedMeterLevel` (five steps of
+# the seconds 30 s of speech take). A model Handy hasn't measured gets no
+# table, and no meters.
 
 [[model]]
 id = "parakeet-unified-en-0.6b"
-name = "Parakeet Unified 0.6B (English)"
-summary = "Streaming English with punctuation; text is ready the moment you stop talking."
+name = "Parakeet Unified 0.6B"
+summary = "The best all-round model for English; the text is ready the moment you stop."
 repo = "handy-computer/parakeet-unified-en-0.6b-gguf"
 file = "parakeet-unified-en-0.6b-Q8_0.gguf"
 revision = "7e948f21b7bdbac698d3318db9d350f1096f3b6c"
@@ -19,11 +40,131 @@ license = "nvidia-open-model-license"
 languages = ["en"]
 streaming = true
 default = true
+role = "recommended"
+
+[model.benchmark]
+english_error = 3.99
+gpu_speed = 25.28
+cpu_speed = 13.955
+
+[[model]]
+id = "parakeet-tdt-ctc-110m"
+name = "Parakeet TDT-CTC 110M"
+summary = "Tiny English model, nearly instant even on a slow processor."
+repo = "handy-computer/parakeet-tdt_ctc-110m-gguf"
+file = "parakeet-tdt_ctc-110m-Q8_0.gguf"
+revision = "1c3f0d5378fdd358905cc410a93ed9e64f52d170"
+sha256 = "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296"
+size = 135373280
+license = "cc-by-4.0"
+languages = ["en"]
+streaming = false
+role = "faster"
+
+[model.benchmark]
+english_error = 6.11
+gpu_speed = 76.455
+cpu_speed = 50.03
+
+[[model]]
+id = "Qwen3-ASR-1.7B"
+name = "Qwen3-ASR 1.7B"
+summary = "Top accuracy in 30 languages; slow without a graphics card."
+repo = "handy-computer/Qwen3-ASR-1.7B-gguf"
+file = "Qwen3-ASR-1.7B-Q8_0.gguf"
+revision = "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f"
+sha256 = "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7"
+size = 2185030624
+license = "apache-2.0"
+languages = [
+  "zh",
+  "en",
+  "yue",
+  "ar",
+  "de",
+  "fr",
+  "es",
+  "pt",
+  "id",
+  "it",
+  "ko",
+  "ru",
+  "th",
+  "vi",
+  "ja",
+  "tr",
+  "hi",
+  "ms",
+  "nl",
+  "sv",
+  "da",
+  "fi",
+  "pl",
+  "cs",
+  "fil",
+  "fa",
+  "el",
+  "ro",
+  "hu",
+  "mk",
+]
+streaming = false
+language_hint = true
+role = "accurate"
+
+[model.benchmark]
+english_error = 3.23
+gpu_speed = 4.085
+cpu_speed = 2.47
+
+[[model]]
+id = "parakeet-ultra"
+name = "Parakeet Ultra"
+summary = "The most accurate in 25 European languages; it detects which one you speak."
+repo = "handy-computer/parakeet-ultra-gguf"
+file = "parakeet-ultra-Q8_0.gguf"
+revision = "a1539be1b849ea7463b88343e5277b373d0c4ea9"
+sha256 = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59"
+size = 740363168
+license = "cc-by-4.0"
+languages = [
+  "en",
+  "de",
+  "fr",
+  "es",
+  "it",
+  "pt",
+  "ru",
+  "uk",
+  "hr",
+  "sl",
+  "lv",
+  "lt",
+  "et",
+  "fi",
+  "sv",
+  "da",
+  "nl",
+  "pl",
+  "cs",
+  "sk",
+  "hu",
+  "ro",
+  "bg",
+  "el",
+  "mt",
+]
+streaming = false
+
+[model.benchmark]
+english_error = 4.26
+gpu_speed = 23.0
+cpu_speed = 13.29
 
 [[model]]
 id = "nemotron-3.5-asr-streaming-0.6b"
-name = "Nemotron 3.5 ASR Streaming 0.6B (multilingual)"
-summary = "Streaming in 28 languages including Chinese, Japanese and Arabic; set a language for best results."
+name = "Nemotron Streaming 3.5"
+summary = "Streams in 28 languages, from English to Japanese and Arabic."
 repo = "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf"
 file = "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
 revision = "53ce288f69326b415aeef030cfcb02a08a8096dd"
@@ -61,55 +202,9 @@ languages = [
   "et",
 ]
 streaming = true
+language_hint = true
 
-[[model]]
-id = "parakeet-tdt-0.6b-v3"
-name = "Parakeet TDT 0.6B v3 (25 European languages)"
-summary = "Accurate in 25 European languages with automatic language detection; transcribes when you stop, so no live text."
-repo = "handy-computer/parakeet-tdt-0.6b-v3-gguf"
-file = "parakeet-tdt-0.6b-v3-Q8_0.gguf"
-revision = "d8d8c32cb2017c57e5307767343e97870f8a7f53"
-sha256 = "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7"
-size = 739508576
-license = "cc-by-4.0"
-languages = [
-  "bg",
-  "hr",
-  "cs",
-  "da",
-  "nl",
-  "en",
-  "et",
-  "fi",
-  "fr",
-  "de",
-  "el",
-  "hu",
-  "it",
-  "lv",
-  "lt",
-  "mt",
-  "pl",
-  "pt",
-  "ro",
-  "ru",
-  "sk",
-  "sl",
-  "es",
-  "sv",
-  "uk",
-]
-streaming = false
-
-[[model]]
-id = "parakeet-tdt-ctc-110m"
-name = "Parakeet TDT-CTC 110M (English, tiny)"
-summary = "135 MB English model for slow machines and quick setups; transcribes when you stop, so no live text."
-repo = "handy-computer/parakeet-tdt_ctc-110m-gguf"
-file = "parakeet-tdt_ctc-110m-Q8_0.gguf"
-revision = "1c3f0d5378fdd358905cc410a93ed9e64f52d170"
-sha256 = "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296"
-size = 135373280
-license = "cc-by-4.0"
-languages = ["en"]
-streaming = false
+[model.benchmark]
+english_error = 7.9
+gpu_speed = 17.135
+cpu_speed = 10.59

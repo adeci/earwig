@@ -19,7 +19,7 @@ settings window, transcribe.cpp for speech. NixOS first.
   and Windows; Linux is the flake's checks.
 
 Per-OS code lives in `linux`, `macos` and `windows` modules behind one
-signature each: `desktop/`, `hotkey/`, `insert/` and `paths/` in
+signature each: `audio/`, `desktop/`, `hotkey/`, `insert/` and `paths/` in
 earwig-core, `ui/platform/` in earwig; `ipc/` and `hooks/` split `unix`
 from `windows`.
 

@@ -93,6 +93,27 @@ fn backend_request(backend: Backend) -> anyhow::Result<tc::Backend> {
     })
 }
 
+/// The language hint `lang` as the model lists it: as given, or, for a bare
+/// language code the model lists only with a region (Nemotron lists `en-US`
+/// and `en-GB` where the catalog says `en`), the first such tag. `None`, with
+/// a warning, when the model lists languages and not this one.
+fn listed_language(lang: &str, listed: &[String]) -> Option<String> {
+    if listed.is_empty() || listed.iter().any(|tag| tag == lang) {
+        return Some(lang.to_owned());
+    }
+    let regional = listed.iter().find(|tag| {
+        tag.split_once('-')
+            .is_some_and(|(base, _)| base.eq_ignore_ascii_case(lang))
+    });
+    if regional.is_none() {
+        log::warn!(
+            "the model does not list language {lang:?} ({}); ignoring the hint",
+            listed.join(", ")
+        );
+    }
+    regional.cloned()
+}
+
 enum Job {
     Begin {
         generation: u64,
@@ -190,17 +211,10 @@ impl TranscribeModel {
         let caps = model
             .capabilities()
             .context("the model does not transcribe speech")?;
-        let mut language = options.language.clone();
-        if let Some(lang) = &language
-            && !caps.languages.is_empty()
-            && !caps.languages.contains(lang)
-        {
-            log::warn!(
-                "the model does not list language {lang:?} ({}); ignoring the hint",
-                caps.languages.join(", ")
-            );
-            language = None;
-        }
+        let language = options
+            .language
+            .as_deref()
+            .and_then(|lang| listed_language(lang, &caps.languages));
         let info = ModelInfo {
             architecture: model.arch(),
             streaming: caps.supports_streaming,
@@ -610,6 +624,19 @@ mod tests {
         assert!(!engine.supports_architecture("silero_vad"));
         assert!(!engine.supports_architecture("sortformer"));
         assert!(!engine.supports_architecture("llama"));
+    }
+
+    #[test]
+    fn a_bare_language_code_finds_the_models_regional_tag() {
+        let listed = ["en-US", "en-GB", "ja-JP", "fr"].map(String::from);
+        let hint = |lang| listed_language(lang, &listed);
+        assert_eq!(hint("en-GB").as_deref(), Some("en-GB"));
+        assert_eq!(hint("en").as_deref(), Some("en-US"));
+        assert_eq!(hint("ja").as_deref(), Some("ja-JP"));
+        assert_eq!(hint("fr").as_deref(), Some("fr"));
+        assert_eq!(hint("de"), None);
+        // A model that lists no languages gets the hint as it is.
+        assert_eq!(listed_language("de", &[]).as_deref(), Some("de"));
     }
 
     fn words(text: &str) -> String {

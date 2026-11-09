@@ -7,7 +7,8 @@
 //!   so Release and Cancel are handled at once.
 //! - `earwig-engine`: owns the loaded [`Model`]; loads, feeds, finishes.
 //! - `earwig-output`: owns the [`Inserter`]; runs the `[hooks]` filter,
-//!   inserts, appends history, runs `on_insert`.
+//!   inserts, appends history, runs `on_insert`. Between deliveries it
+//!   replaces the inserter when the `[insert]` settings change.
 //! - `earwig-audio`: the [`Capture`] worker.
 //!
 //! Every recording gets an id; results for an older (cancelled) recording
@@ -20,9 +21,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEvent, Capture, Source};
-use crate::config::{AudioConfig, BackendSetting, Config, ConfigStore};
+use crate::config::{AudioConfig, BackendSetting, Config, ConfigStore, InsertConfig};
 use crate::engine::{Backend, EngineFactory, EngineOptions, Model, ModelInfo, Partial};
-use crate::events::{Command, DictationState, Event, ModelStatus, Status};
+use crate::events::{Command, DictationState, Event, InsertMethod, ModelStatus, Status};
 use crate::history::{History, HistoryEntry};
 use crate::hooks;
 use crate::insert::Inserter;
@@ -30,12 +31,19 @@ use crate::models::{ModelError, ModelManager, ModelSpec};
 use crate::session::{Action, Input, Phase, Session};
 use crate::spectrum::Feed;
 
+/// Builds the inserter for the `[insert]` settings. It may block (a consent
+/// dialog) and never fails: where no method works it returns a stand-in that
+/// fails every insertion.
+pub type InserterFactory = dyn Fn(&InsertConfig) -> Box<dyn Inserter> + Send;
+
 pub struct Parts {
     pub config: ConfigStore,
     pub models: Arc<ModelManager>,
     pub history: Arc<History>,
     pub engine: Arc<dyn EngineFactory>,
-    pub inserter: Box<dyn Inserter>,
+    /// Called at start, then on the output thread whenever `[insert]`
+    /// changes.
+    pub inserter: Box<InserterFactory>,
     /// Names of the hotkey sources started for this session.
     pub hotkey_sources: Vec<String>,
 }
@@ -160,10 +168,11 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         models,
         history,
         engine,
-        inserter,
+        inserter: build_inserter,
         hotkey_sources,
     } = parts;
     let settings = config.config().clone();
+    let inserter = build_inserter(&settings.insert);
     let (commands_tx, commands) = flume::unbounded();
     let shared = Arc::new(Shared {
         commands: commands_tx,
@@ -200,12 +209,21 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     let output_shared = shared.clone();
     let output_worker = thread::Builder::new()
         .name("earwig-output".into())
-        .spawn(move || output_thread(inserter, &output_shared, &output_jobs, &output_events_tx))?;
+        .spawn(move || {
+            output_thread(
+                &*build_inserter,
+                inserter,
+                &output_shared,
+                &output_jobs,
+                &output_events_tx,
+            );
+        })?;
 
     let mut controller = Controller {
         shared: shared.clone(),
         session: Session::new(settings.hotkey.mode, settings.hotkey.hold_threshold_ms),
         audio_config: settings.audio.clone(),
+        insert_config: settings.insert,
         capture: Some(capture),
         engine: engine_tx,
         output: output_tx,
@@ -421,7 +439,13 @@ fn engine_thread(
     }
 }
 
-struct OutputJob {
+enum OutputJob {
+    Deliver(Box<Delivery>),
+    /// The `[insert]` settings changed: replace the inserter.
+    Rebuild(InsertConfig),
+}
+
+struct Delivery {
     id: u64,
     text: String,
     duration_ms: u64,
@@ -430,20 +454,39 @@ struct OutputJob {
     cancel: Arc<AtomicBool>,
 }
 
+enum OutputEvent {
+    /// The text of this recording was dealt with.
+    Delivered(u64),
+    /// A new inserter is in place, with these methods.
+    Rebuilt(Vec<InsertMethod>),
+}
+
 fn output_thread(
+    build: &InserterFactory,
     mut inserter: Box<dyn Inserter>,
     shared: &Shared,
     jobs: &flume::Receiver<OutputJob>,
-    done: &flume::Sender<u64>,
+    events: &flume::Sender<OutputEvent>,
 ) {
     for job in jobs {
-        deliver(inserter.as_mut(), shared, &job);
-        let _ = done.send(job.id);
+        match job {
+            OutputJob::Deliver(delivery) => {
+                deliver(inserter.as_mut(), shared, &delivery);
+                let _ = events.send(OutputEvent::Delivered(delivery.id));
+            }
+            OutputJob::Rebuild(config) => {
+                // Only one input method may hold the seat: the old inserter
+                // lets go before the new one connects.
+                drop(inserter);
+                inserter = build(&config);
+                let _ = events.send(OutputEvent::Rebuilt(inserter.methods()));
+            }
+        }
     }
 }
 
 /// Filter, insert, record, announce.
-fn deliver(inserter: &mut dyn Inserter, shared: &Shared, job: &OutputJob) {
+fn deliver(inserter: &mut dyn Inserter, shared: &Shared, job: &Delivery) {
     let text = hooks::filter(&job.config.hooks, &job.text);
     if text.trim().is_empty() || job.cancel.load(Ordering::Relaxed) {
         return;
@@ -500,6 +543,8 @@ struct Controller {
     shared: Arc<Shared>,
     session: Session,
     audio_config: AudioConfig,
+    /// The `[insert]` settings the output thread was last told to build for.
+    insert_config: InsertConfig,
     capture: Option<Capture>,
     engine: flume::Sender<EngineJob>,
     output: flume::Sender<OutputJob>,
@@ -523,7 +568,7 @@ enum Wake {
     Command(Result<Command, flume::RecvError>),
     Audio(Result<AudioEvent, flume::RecvError>),
     Engine(Result<EngineEvent, flume::RecvError>),
-    Output(Result<u64, flume::RecvError>),
+    Output(Result<OutputEvent, flume::RecvError>),
 }
 
 impl Controller {
@@ -532,7 +577,7 @@ impl Controller {
         commands: &flume::Receiver<Command>,
         audio: &flume::Receiver<AudioEvent>,
         engine: &flume::Receiver<EngineEvent>,
-        output: &flume::Receiver<u64>,
+        output: &flume::Receiver<OutputEvent>,
     ) {
         loop {
             let wake = flume::Selector::new()
@@ -546,7 +591,8 @@ impl Controller {
                 Wake::Command(Ok(cmd)) => self.command(cmd),
                 Wake::Audio(Ok(event)) => self.audio(event),
                 Wake::Engine(Ok(event)) => self.engine_event(event),
-                Wake::Output(Ok(id)) => self.delivered(id),
+                Wake::Output(Ok(OutputEvent::Delivered(id))) => self.delivered(id),
+                Wake::Output(Ok(OutputEvent::Rebuilt(methods))) => self.set_insert_methods(methods),
                 Wake::Audio(Err(_)) | Wake::Engine(Err(_)) | Wake::Output(Err(_)) => {
                     log::error!("a worker thread died; stopping");
                     break;
@@ -603,6 +649,19 @@ impl Controller {
     fn set_model(&self, model: ModelStatus) {
         self.update_status(|s| s.model = model.clone());
         self.publish(&Event::Model { model });
+    }
+
+    /// The insertion methods have no event of their own: front ends get a
+    /// fresh snapshot.
+    fn set_insert_methods(&self, methods: Vec<InsertMethod>) {
+        self.update_status(|s| s.insert_methods = methods);
+        let status = self
+            .shared
+            .status
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        self.publish(&Event::Status { status });
     }
 
     fn model_status(&self) -> ModelStatus {
@@ -802,14 +861,14 @@ impl Controller {
             | ModelStatus::Ready { model, .. }
             | ModelStatus::Failed { model, .. } => model.to_string(),
         };
-        let _ = self.output.send(OutputJob {
+        let _ = self.output.send(OutputJob::Deliver(Box::new(Delivery {
             id,
             text,
             duration_ms: self.duration_ms,
             model,
             config: self.config(),
             cancel,
-        });
+        })));
     }
 
     fn delivered(&mut self, id: u64) {
@@ -905,6 +964,12 @@ impl Controller {
             }
             self.audio_config = config.audio.clone();
         }
+        if config.insert != self.insert_config {
+            // Built on the output thread between deliveries: connecting can
+            // wait on a consent dialog.
+            self.insert_config = config.insert.clone();
+            let _ = self.output.send(OutputJob::Rebuild(config.insert));
+        }
         if let Err(e) = self.shared.history.set_limit(config.history.limit) {
             log::warn!("history: {e}");
         }
@@ -912,17 +977,20 @@ impl Controller {
     }
 
     fn use_model(&mut self, model: &ModelSpec) {
+        let setting = self.shared.models.setting_for(model.clone());
         let updated = self
             .shared
             .config
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .update(|c| c.model.model = Some(model.clone()));
+            .update(|c| c.model.model = setting);
         if let Err(e) = updated {
             self.error(format!("saving the model choice: {e:#}"));
             return;
         }
-        if self.config().model.model.as_ref() != Some(model) {
+        // The catalog's default is chosen by setting none, and a system file
+        // may pin the same model: what counts is the model that results.
+        if wanted_model(&self.shared.models, &self.config()).spec != *model {
             self.error("the model is set by the system configuration".into());
         }
         self.apply_config();
@@ -936,8 +1004,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::config::ConfigPaths;
-    use crate::events::InsertMethod;
+    use crate::config::{ConfigPaths, InsertSetting};
     use crate::insert::InsertError;
 
     const TEXT: &str = "hello from the fake engine";
@@ -1006,18 +1073,21 @@ mod tests {
 
     #[derive(Default)]
     struct Calls {
+        /// The `[insert] method` of every inserter built.
+        built: Vec<InsertSetting>,
         inserted: Vec<String>,
         clipboard: Vec<String>,
     }
 
     struct FakeInserter {
+        method: InsertMethod,
         fail: bool,
         calls: Arc<Mutex<Calls>>,
     }
 
     impl Inserter for FakeInserter {
         fn methods(&self) -> Vec<InsertMethod> {
-            vec![InsertMethod::InputMethod]
+            vec![self.method]
         }
         fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError> {
             if self.fail {
@@ -1026,7 +1096,7 @@ mod tests {
                 )));
             }
             self.calls.lock().unwrap().inserted.push(text.into());
-            Ok(InsertMethod::InputMethod)
+            Ok(self.method)
         }
         fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError> {
             self.calls.lock().unwrap().clipboard.push(text.into());
@@ -1069,14 +1139,25 @@ mod tests {
             .unwrap();
             let calls = Arc::new(Mutex::new(Calls::default()));
             let live_models = Arc::new(AtomicUsize::new(0));
+            let inserter_calls = calls.clone();
             let parts = Parts {
                 config,
                 models: Arc::new(ModelManager::new(dir.path().join("models"))),
                 history: Arc::new(History::open(dir.path().join("history.jsonl"), 50).unwrap()),
                 engine: Arc::new(FakeEngine(live_models.clone())),
-                inserter: Box::new(FakeInserter {
-                    fail: fail_insert,
-                    calls: calls.clone(),
+                inserter: Box::new(move |config: &InsertConfig| -> Box<dyn Inserter> {
+                    inserter_calls.lock().unwrap().built.push(config.method);
+                    Box::new(FakeInserter {
+                        method: match config.method {
+                            InsertSetting::Auto | InsertSetting::InputMethod => {
+                                InsertMethod::InputMethod
+                            }
+                            InsertSetting::Paste => InsertMethod::Paste,
+                            InsertSetting::Portal => InsertMethod::PortalPaste,
+                        },
+                        fail: fail_insert,
+                        calls: inserter_calls.clone(),
+                    })
                 }),
                 hotkey_sources: Vec::new(),
             };
@@ -1257,5 +1338,75 @@ mod tests {
             assert!(Instant::now() < deadline, "the old model is still loaded");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn default_model(d: &Daemon) -> ModelSpec {
+        ModelSpec::Curated {
+            id: d.handle.models().default_model().id.clone(),
+        }
+    }
+
+    #[test]
+    fn using_the_default_model_leaves_the_choice_to_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("fake.gguf");
+        fs::write(&model, b"").unwrap();
+        let user = format!("[model]\nmodel = '{}'\n", model.display());
+        fs::write(dir.path().join("user.toml"), user).unwrap();
+        let d = Daemon::spawn(dir, Vec::new(), false);
+        d.handle.send(Command::UseModel {
+            model: default_model(&d),
+        });
+        // It switches without a word about the system configuration.
+        let event = d.wait_for(|e| matches!(e, Event::Model { .. } | Event::Error { .. }));
+        assert!(matches!(event, Event::Model { .. }), "{event:?}");
+        assert_eq!(d.handle.config().read().unwrap().config().model.model, None);
+    }
+
+    #[test]
+    fn a_model_the_system_pins_stays() {
+        let d = Daemon::start(false);
+        d.handle.send(Command::UseModel {
+            model: default_model(&d),
+        });
+        let event = d.wait_for(|e| matches!(e, Event::Error { .. }));
+        assert!(
+            matches!(&event, Event::Error { message } if message.contains("system configuration")),
+            "{event:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_changed_insert_method_replaces_the_inserter() {
+        let d = Daemon::start(false);
+        let edit = |change: fn(&mut Config)| {
+            d.handle.config().write().unwrap().update(change).unwrap();
+            d.handle.send(Command::ReloadConfig);
+        };
+        edit(|c| c.insert.method = InsertSetting::Paste);
+        d.wait_for(|e| {
+            matches!(e, Event::Status { status } if status.insert_methods == [InsertMethod::Paste])
+        });
+        assert_eq!(d.handle.status().insert_methods, [InsertMethod::Paste]);
+
+        // Other settings leave it alone. The output thread takes jobs in
+        // order, so a rebuild would come before this dictation's insertion.
+        edit(|c| c.history.limit = 20);
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        thread::sleep(Duration::from_millis(100));
+        d.handle.send(Command::Toggle);
+        let inserted = d.wait_for(|e| matches!(e, Event::Inserted { .. }));
+        assert_eq!(
+            inserted,
+            Event::Inserted {
+                text: TEXT.into(),
+                method: InsertMethod::Paste
+            }
+        );
+        assert_eq!(
+            d.calls.lock().unwrap().built,
+            [InsertSetting::Auto, InsertSetting::Paste]
+        );
     }
 }

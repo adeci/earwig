@@ -16,10 +16,10 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use earwig_core::config::{OverlayAnimation, OverlayConfig, OverlayPosition, OverlayStyle};
+use earwig_core::config::{OverlayAnimation, OverlayConfig, OverlayPosition};
 use earwig_core::spectrum::Feed;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -34,7 +34,7 @@ use gpui_kit::{
 
 use crate::ui::drag::{Drag, Grab, Pointer};
 use crate::ui::lifecycle::{Lifecycle, Stage};
-use crate::ui::pill::{self, Clock, Look, Motion, Shape};
+use crate::ui::pill::{self, Clock, Edge, Look, Motion};
 use crate::ui::platform::Popup;
 use crate::ui::{OverlaySurface, accent, crt, now_ms};
 
@@ -42,20 +42,21 @@ use crate::ui::{OverlaySurface, accent, crt, now_ms};
 mod layer_shell;
 
 /// Width of the pill.
-const WIDTH: f32 = 560.;
+pub(crate) const WIDTH: f32 = 560.;
 /// Gap between the pill and the edge of the screen (less bars) it starts
 /// at; at least `INSET`, so the window never reaches past that edge.
 const MARGIN: f32 = 56.;
-/// Transparent room around the pill for its bars or moving edge and its
-/// shadow.
+/// Transparent room around the pill for its moving edge and its shadow.
 const INSET: f32 = pill::ROOM;
 /// Gap between the window and the edge it starts at.
 const WINDOW_MARGIN: f32 = MARGIN - INSET;
 const _: () = assert!(WINDOW_MARGIN >= 0.);
 /// Closest a dragged pill gets to an edge, so even its fullest swell stays
 /// on screen.
-const EDGE_GAP: f32 = pill::MAX_REACH;
-const LINE_HEIGHT: f32 = 22.;
+const EDGE_GAP: f32 = pill::DEPTH;
+/// Size and line height of the dictated text.
+pub(crate) const TEXT_SIZE: f32 = 15.;
+pub(crate) const LINE_HEIGHT: f32 = 22.;
 /// Frame pacing: every display frame while the voice moves the pill, slow
 /// otherwise, so the overlay never competes with CPU decoding at display
 /// rate. A voice wakes a slow overlay at once (see [`OverlayView::hears`]).
@@ -72,9 +73,10 @@ const DISCARD_SIZE: f32 = 24.;
 /// Pixels the voice must move the pill by to be worth every frame.
 const SPEAKING_REACH: f32 = 0.35;
 const HEADER_HEIGHT: f32 = 22.;
-const PADDING_X: f32 = 18.;
-const PADDING_Y: f32 = 18.;
-const GAP: f32 = 8.;
+/// The pill's padding, and the gap between its header and its text.
+pub(crate) const PADDING_X: f32 = 18.;
+pub(crate) const PADDING_Y: f32 = 18.;
+pub(crate) const GAP: f32 = 8.;
 
 /// Open the overlay's window at home.
 pub fn open(
@@ -298,10 +300,9 @@ pub struct OverlayView {
     /// The voice of the current recording.
     voice: Feed,
     clock: Clock,
-    style: OverlayStyle,
     motion: Motion,
-    /// What the voice did to the pill as of the last tick.
-    shape: Shape,
+    /// What the voice did to the pill's edge as of the last tick.
+    edge: Edge,
     /// The pill holds still (reduced motion, software rendering).
     still: bool,
     /// How the pill comes and goes.
@@ -314,7 +315,6 @@ pub struct OverlayView {
     frame_pending: bool,
     /// The pill's colours as they fade toward the theme's and the accent's.
     look: Option<Look>,
-    tabular_numbers: FontFeatures,
     /// The pill sits on a layer surface, which cannot move once mapped.
     layer_shell: bool,
     /// The popup, when it can be moved.
@@ -418,9 +418,8 @@ impl OverlayView {
             tentative: String::new(),
             voice,
             clock: Clock::default(),
-            style: config.style,
-            motion: Motion::new(config.style, config.motion()),
-            shape: Shape::still(config.style),
+            motion: Motion::default(),
+            edge: Edge::default(),
             still: false,
             animation: config.animation,
             power_on: PowerOn::Due,
@@ -428,7 +427,6 @@ impl OverlayView {
             border: config.border(),
             frame_pending: false,
             look: None,
-            tabular_numbers: FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
             layer_shell,
             popup,
             usable: None,
@@ -577,30 +575,8 @@ impl OverlayView {
 
     fn header(&self, theme: &Theme) -> Div {
         let status = self.failure().map(|_| "Not inserted");
-        let dot = theme.danger;
         let words = word_count(&self.committed) + word_count(&self.tentative);
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .h(px(HEADER_HEIGHT))
-            .text_size(px(13.))
-            .text_color(theme.muted_foreground)
-            .child(div().size(px(8.)).rounded_full().bg(dot))
-            .child(
-                div()
-                    .text_color(theme.foreground)
-                    .font_weight(FontWeight::MEDIUM)
-                    .font_features(self.tabular_numbers.clone())
-                    .child(format_elapsed(self.elapsed())),
-            )
-            .child(format!(
-                "{words} {}",
-                if words == 1 { "word" } else { "words" }
-            ))
-            .when_some(status, |this, status| {
-                this.child(div().text_color(dot).child(status))
-            })
+        header_row(theme, self.elapsed(), words, status)
     }
 
     fn body(&self, theme: &Theme) -> Div {
@@ -866,7 +842,7 @@ impl OverlayView {
         let now = Instant::now();
         let dt = self.clock.tick(now);
         let voice = self.is_recording().then(|| self.voice.latest());
-        let shape = self.motion.step(dt, voice.as_ref());
+        let edge = self.motion.step(dt, voice.as_ref());
         self.still = pill::holds_still(window, cx);
         if self.power_on == PowerOn::Due {
             // From this, its first frame: nothing waits for it.
@@ -876,11 +852,11 @@ impl OverlayView {
                 PowerOn::Done
             };
         }
-        self.shape = if self.still {
+        self.edge = if self.still {
             self.schedule_frame(STILL_FRAME, cx);
-            Shape::still(self.style)
+            Edge::default()
         } else {
-            if shape.reach() > SPEAKING_REACH
+            if edge.reach() > SPEAKING_REACH
                 || self.switching_off(now).is_some()
                 || self.powering_on(now).is_some()
             {
@@ -888,7 +864,7 @@ impl OverlayView {
             } else {
                 self.schedule_frame(QUIET_FRAME, cx);
             }
-            shape
+            edge
         };
         let target = Look::themed(cx.theme(), accent::get(cx), self.opacity, self.border);
         self.look = Some(self.look.map_or(target, |look| look.fade_to(target, dt)));
@@ -899,12 +875,11 @@ impl OverlayView {
     /// discard the dictation.
     fn pill(&self, theme: &Theme, role: Role) -> Div {
         let rests = role == Role::Rest;
-        let shape = if rests {
-            self.shape
+        let edge = if rests {
+            self.edge
         } else {
-            // Shadow and body quads, whatever the style: no paths on an
-            // output-sized surface.
-            Shape::still(OverlayStyle::Bars)
+            // Shadow and body quads: no paths on an output-sized surface.
+            Edge::default()
         };
         let look = self.look;
         let painted = self.painted.clone();
@@ -936,17 +911,15 @@ impl OverlayView {
                                 let size = bounds.size.map(f32::from);
                                 match on.and_then(|t| crt::opening(t, size.width, size.height)) {
                                     Some(frame) => {
-                                        pill::paint_crt(
-                                            bounds, &frame, &shape, look, rests, window,
-                                        );
+                                        pill::paint_crt(bounds, &frame, &edge, look, rests, window);
                                     }
-                                    None => pill::paint(bounds, &shape, look, 1., window),
+                                    None => pill::paint(bounds, &edge, look, 1., window),
                                 }
                             }
                             (Some(look), Some(t)) => {
                                 let size = bounds.size.map(f32::from);
                                 if let Some(frame) = crt::at(t, size.width, size.height) {
-                                    pill::paint_crt(bounds, &frame, &shape, look, rests, window);
+                                    pill::paint_crt(bounds, &frame, &edge, look, rests, window);
                                 }
                             }
                             (None, _) => {}
@@ -981,7 +954,7 @@ impl OverlayView {
                     .flex()
                     .flex_col()
                     .justify_end()
-                    .text_size(px(15.))
+                    .text_size(px(TEXT_SIZE))
                     .line_height(px(LINE_HEIGHT))
                     .opacity(content)
                     .child(self.body(theme)),
@@ -1098,6 +1071,42 @@ fn set_pointer_region(window: &Window, pill: Option<Bounds<Pixels>>) {
     // clips on Windows.
     #[cfg(windows)]
     crate::ui::platform::set_input_region(window, pill.map(|pill| pill.dilate(px(INSET))));
+}
+
+/// The pill's header: the recording dot, the time recorded, the word count
+/// and `status`, if any.
+pub(crate) fn header_row(
+    theme: &Theme,
+    elapsed: Duration,
+    words: usize,
+    status: Option<&'static str>,
+) -> Div {
+    /// Figures of one width, so the time holds still as it counts.
+    static TABULAR: LazyLock<FontFeatures> =
+        LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+    let dot = theme.danger;
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .h(px(HEADER_HEIGHT))
+        .text_size(px(13.))
+        .text_color(theme.muted_foreground)
+        .child(div().size(px(8.)).rounded_full().bg(dot))
+        .child(
+            div()
+                .text_color(theme.foreground)
+                .font_weight(FontWeight::MEDIUM)
+                .font_features(TABULAR.clone())
+                .child(format_elapsed(elapsed)),
+        )
+        .child(format!(
+            "{words} {}",
+            if words == 1 { "word" } else { "words" }
+        ))
+        .when_some(status, |this, status| {
+            this.child(div().text_color(dot).child(status))
+        })
 }
 
 /// The × in the pill's top-right corner: throws the dictation away while

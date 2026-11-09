@@ -1,4 +1,4 @@
-//! The wave style's outline as a ring of water: a closed string of nodes
+//! The pill's outline as a ring of water: a closed string of nodes
 //! around the pill, each with a height (outward from the pill at rest) and
 //! a velocity, under a damped wave equation. The voice's onsets kick the
 //! long top and bottom runs, mirrored from the centre with low bands in the
@@ -68,8 +68,8 @@ const FOCUS: f32 = 1.4;
 const FOCUS_K: f32 = 2.;
 /// ...and fading out over this span toward the corners.
 const TAPER: (f32, f32) = (0.7, 1.);
-/// With nothing pushing, a ring lower and slower than this is at rest: a
-/// fifth of a pixel at the widest motion.
+/// With nothing pushing, a ring lower and slower than this is at rest:
+/// about a sixth of a pixel.
 const REST: f32 = 0.01;
 /// How unevenly kicks land around the ring: a smooth gain within 1 ± this
 /// that drifts at random, so no two syllables or dictations ripple alike.

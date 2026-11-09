@@ -2,10 +2,10 @@
 //! dictation state; commands come in and [`events::Event`]s go out through
 //! [`ipc`] and [`controller::Handle`].
 //!
-//! Each OS fills the same slots: [`desktop`] (`probe`), [`hotkey`]
-//! (`sources`), [`insert`] (`backends`), [`paths`], [`ipc`] (transport) and
-//! [`hooks`] (process tree), each with a `linux`, `macos` and `windows`
-//! module behind one signature.
+//! Each OS fills the same slots: [`audio`] (`input_devices`, `open`),
+//! [`desktop`] (`probe`), [`hotkey`] (`sources`), [`insert`] (`backends`),
+//! [`paths`], [`ipc`] (transport) and [`hooks`] (process tree), each with a
+//! `linux`, `macos` and `windows` module behind one signature.
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("earwig runs on Linux, macOS and Windows");

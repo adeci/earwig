@@ -121,7 +121,7 @@ impl From<ModelSpec> for String {
 }
 
 /// One entry of the curated catalog (`models.toml`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogEntry {
     pub id: String,
     /// Human name, e.g. "Parakeet Unified 0.6B (English)".
@@ -142,14 +142,34 @@ pub struct CatalogEntry {
     /// The release default. Exactly one entry has it.
     #[serde(default)]
     pub default: bool,
+    /// The model takes a language hint (`[model] language`); only these get
+    /// a Language row in the settings window.
+    #[serde(default)]
+    pub language_hint: bool,
+    /// Its tag among Handy's picks for English dictation, if it is one.
+    #[serde(default)]
+    pub role: Option<Role>,
+    /// Handy's measurements of the file; `None` where it has none.
+    #[serde(default)]
+    pub benchmark: Option<Benchmark>,
+}
+
+/// Why a curated model is offered: the tags of Handy's picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// The best balance of accuracy and speed.
+    Recommended,
+    /// Quicker than the recommended pick, a little less accurate.
+    Faster,
+    /// More accurate than the recommended pick, and slower.
+    Accurate,
 }
 
 /// A Hugging Face search hit, already checked against the engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchResult {
     pub repo: String,
-    pub downloads: u64,
-    pub likes: u64,
     pub files: Vec<RemoteFile>,
 }
 
@@ -157,8 +177,6 @@ pub struct SearchResult {
 pub struct RemoteFile {
     pub file: String,
     pub size: u64,
-    /// LFS sha256 from the Hub tree listing.
-    pub sha256: Option<String>,
     /// `general.architecture` read from the GGUF header with a range request.
     pub architecture: Option<String>,
     /// The engine can load this architecture.
@@ -188,8 +206,8 @@ pub struct DownloadProgress {
     pub total: u64,
 }
 
-/// Cooperative cancellation for downloads. Cancelling keeps the partial file
-/// so the next attempt resumes.
+/// Cooperative cancellation for downloads. Cancelling deletes the partial
+/// file; a download that fails keeps it for the next attempt to resume.
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
@@ -226,10 +244,12 @@ pub enum ModelError {
     Io(#[from] std::io::Error),
 }
 
+pub mod benchmark;
 mod download;
 mod gguf;
 mod hub;
 mod manager;
+pub use benchmark::{Benchmark, Tier};
 pub use manager::ModelManager;
 
 #[cfg(test)]
