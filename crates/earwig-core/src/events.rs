@@ -1,6 +1,7 @@
 //! The control socket's wire format (one JSON object per line) and the
-//! in-process feed the UI renders from. The overlay's sound bars come from
-//! [`crate::spectrum::Feed`] instead, which is not sent over the socket.
+//! in-process feed the UI renders from. The voice the overlay's pill shows
+//! comes from [`crate::spectrum::Feed`] instead, which is not sent over the
+//! socket.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,8 +38,8 @@ pub enum Command {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
-    /// Full snapshot; the reply to [`Command::Status`] and the first event of
-    /// every subscription.
+    /// Full snapshot; the reply to [`Command::Status`], the first event of
+    /// every subscription, and sent again when the insertion methods change.
     Status {
         status: Status,
     },

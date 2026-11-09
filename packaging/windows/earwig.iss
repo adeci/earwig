@@ -55,7 +55,45 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 
 [Run]
 Filename: "{app}\earwigw.exe"; Parameters: "settings"; Description: "Start earwig"; \
-  Flags: nowait postinstall skipifsilent
+  Flags: nowait postinstall skipifsilent; Check: not WasRunning
+; An upgrade brings back the earwig it stopped, silent ones (winget) too.
+Filename: "{app}\earwigw.exe"; Flags: nowait; Check: WasRunning
 
 [UninstallRun]
 Filename: "{app}\earwig.exe"; Parameters: "quit"; Flags: runhidden; RunOnceId: "QuitEarwig"
+
+[Code]
+var
+  Running: Boolean;
+
+function Earwig(const Args: String): Boolean;
+var
+  Code: Integer;
+begin
+  Result := Exec(ExpandConstant('{app}\earwig.exe'), Args, '', SW_HIDE,
+    ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+{ An upgrade stops the running earwig first, so its files can be replaced. }
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Tries: Integer;
+begin
+  Result := '';
+  if FileExists(ExpandConstant('{app}\earwig.exe')) and Earwig('quit') then
+  begin
+    Running := True;
+    Tries := 0;
+    while Earwig('status') and (Tries < 50) do
+    begin
+      Sleep(100);
+      Tries := Tries + 1;
+    end;
+    Sleep(500);
+  end;
+end;
+
+function WasRunning: Boolean;
+begin
+  Result := Running;
+end;

@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use clap::Subcommand;
 use earwig_core::config::ConfigStore;
 use earwig_core::events::Command;
-use earwig_core::models::{CancelToken, DownloadProgress, ModelError, ModelManager, ModelSpec};
+use earwig_core::models::{CancelToken, DownloadProgress, ModelManager, ModelSpec};
 
 use crate::human_size;
 
@@ -25,7 +25,8 @@ pub enum ModelsCmd {
         /// Catalog id or `hf:owner/repo/file.gguf@<commit>`.
         spec: ModelSpec,
     },
-    /// Use a model: writes `model.model` in the user config.
+    /// Use a model: writes `model.model` in the user config (removes it for
+    /// the catalog's default, so a later release's default follows).
     Use {
         /// Catalog id, `hf:owner/repo/file.gguf@<commit>`, or an absolute path.
         spec: ModelSpec,
@@ -167,21 +168,20 @@ fn search(manager: &ModelManager, query: &str) -> anyhow::Result<()> {
 }
 
 fn download(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
-    let cancel = CancelToken::default();
-    let on_signal = cancel.clone();
-    ctrlc::set_handler(move || on_signal.cancel()).context("installing the Ctrl-C handler")?;
+    // Ctrl-C stops at once and leaves the partial file to resume from;
+    // cancelling the download would delete it.
+    ctrlc::set_handler(|| {
+        eprintln!("\ninterrupted; run the same command to resume");
+        std::process::exit(130);
+    })
+    .context("installing the Ctrl-C handler")?;
 
     let mut line = ProgressLine::new();
-    match manager.download(spec, &mut |p| line.update(&p), &cancel) {
+    match manager.download(spec, &mut |p| line.update(&p), &CancelToken::default()) {
         Ok(path) => {
             line.finish();
             println!("{}", path.display());
             Ok(())
-        }
-        Err(ModelError::Cancelled) => {
-            line.finish();
-            eprintln!("cancelled; the partial download is kept, run the same command to resume");
-            std::process::exit(130);
         }
         Err(e) => {
             line.finish();
@@ -210,8 +210,15 @@ fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
                 .join(", ")
         );
     }
-    store.update(|c| c.model.model = Some(spec.clone()))?;
-    println!("model.model = {spec} in {}", store.paths().user.display());
+    let setting = manager.setting_for(spec.clone());
+    let pinned = setting.is_some();
+    store.update(|c| c.model.model = setting)?;
+    let user = store.paths().user.display();
+    if pinned {
+        println!("model.model = {spec} in {user}");
+    } else {
+        println!("model.model unset in {user}: the default, {spec}, is used");
+    }
     if manager.resolve(spec).is_ok() {
         // A running daemon switches now; without one there is nothing to do.
         if let Err(e) = crate::daemon::send(&Command::ReloadConfig) {

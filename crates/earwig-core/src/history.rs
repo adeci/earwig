@@ -60,6 +60,15 @@ impl History {
         state.entries.iter().rev().cloned().collect()
     }
 
+    /// How many entries are kept.
+    pub fn len(&self) -> usize {
+        self.lock().entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lock().entries.is_empty()
+    }
+
     pub fn append(&self, entry: HistoryEntry) -> io::Result<()> {
         self.lock().entries.push(entry);
         self.trim()

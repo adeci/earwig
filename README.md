@@ -36,9 +36,13 @@ elsewhere, bind it as [docs/desktops.md](docs/desktops.md) shows.
 
 ## Models
 
-Pick a model in the settings window (`earwig settings`). It lists a few
-recommended ones and searches Hugging Face for anything else that works. From
-a terminal, `earwig models`.
+Pick a model in the settings window (`earwig settings`): click one to use it,
+and it downloads first if it isn't on your computer yet. Dots rate each
+curated model's accuracy and speed, as measured by
+[Handy](https://github.com/cjpais/Handy). Typing in the search box filters
+the list; the row at its end searches Hugging Face for untested models. A
+GGUF file of your own goes in `config.toml` as `model = "/path/to/model.gguf"`
+under `[model]`. From a terminal, `earwig models`.
 
 ## Customizing
 

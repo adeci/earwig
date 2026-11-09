@@ -7,6 +7,12 @@
 //! shows within a few milliseconds and low bands do not flicker. The work is
 //! per sample and allocation-free; readings are taken whenever a buffer has
 //! been analysed.
+//!
+//! The analyser hears the input between recordings too, and learns its noise
+//! floor: the quietest the input has been over the last few seconds, and
+//! each band's power while only the room sounds. A reading shows only what
+//! stands above that floor, so steady background noise draws nothing on any
+//! mic, and a quiet mic draws exactly what it always did.
 
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -31,10 +37,30 @@ const TILT_PER_OCTAVE: f64 = 4.;
 /// `BAND_FLOOR + BAND_SPAN` reaches the top.
 const BAND_FLOOR: f64 = -52.;
 const BAND_SPAN: f64 = 32.;
-/// Below this overall level (dBFS) every band is zero, so room noise draws
+/// Below this overall level (dBFS) every band is zero, so a quiet room draws
 /// nothing; bands fade in over `GATE_KNEE` dB above it.
 const GATE: f64 = -45.;
 const GATE_KNEE: f64 = 6.;
+/// On a noisier mic the gate stays this many dB above the noise floor: the
+/// quietest of the last `FLOOR_WINDOWS` level windows (3 s). A voice pauses
+/// well within that, so talking does not lift the floor, while a noise that
+/// stops lowers it at once.
+const NOISE_MARGIN: f64 = 10.;
+const FLOOR_WINDOWS: usize = 60;
+/// The floor applies once this many windows (0.4 s) of sound have been
+/// heard; until then the gate stays at `GATE`, so a voice there from the
+/// first moment has paused before any of it is taken for noise.
+const SEED_WINDOWS: usize = 8;
+/// A level window below the gate and within `ROOM` dB of the floor is the
+/// room alone: each band's noise then moves `BAND_NOISE_FOLLOW` of the way
+/// to the band's power (settling in about 0.3 s). Twice that noise is taken
+/// off the band, so a hum or hiss does not stand up while someone talks.
+const ROOM: f64 = 6.;
+const BAND_NOISE_FOLLOW: f64 = 0.15;
+const NOISE_OVERSUBTRACT: f64 = 2.;
+/// In digital silence the filters decay toward zero without end, through
+/// subnormal floats, which are slow; below this they are zero.
+const TINY: f64 = 1e-30;
 /// [`crate::events::Event::Level`] is the RMS of this many windows a second.
 const LEVEL_HZ: u32 = 20;
 
@@ -44,15 +70,15 @@ pub struct Spectrum {
     /// Overall level on the scale of [`crate::events::Event::Level`]: 0..1
     /// over -60..0 dBFS.
     pub level: f32,
-    /// How far each band stands above the voice floor, 0 (nothing to show)
-    /// to 1, from low to high frequencies.
+    /// How far each band of the voice stands above the noise, 0 (nothing to
+    /// show) to 1, from low to high frequencies.
     pub bands: [f32; BANDS],
 }
 
 impl Spectrum {
-    /// Whether the level is below the gate: every band is zero.
+    /// Whether no band shows.
     pub fn is_quiet(&self) -> bool {
-        f64::from(self.level) <= level_of(GATE)
+        self.bands.iter().all(|&band| band == 0.)
     }
 }
 
@@ -64,7 +90,6 @@ fn level_of(dbfs: f64) -> f64 {
 /// Turns raw samples at one rate into [`Spectrum`] readings and the
 /// windowed levels of [`crate::events::Event::Level`].
 pub(crate) struct Analyzer {
-    rate: u32,
     filters: [Bandpass; BANDS],
     /// Smoothed power of each band's output, and how much of the way to a
     /// new sample's power it moves.
@@ -74,6 +99,15 @@ pub(crate) struct Analyzer {
     level_power: f64,
     level_follow: f64,
     window: Window,
+    /// Power of the latest level windows, the oldest at `next`; how many
+    /// windows of sound have been heard, up to `SEED_WINDOWS`; and the
+    /// overall level (dBFS) above which bands show.
+    recent: [f64; FLOOR_WINDOWS],
+    next: usize,
+    heard: usize,
+    gate: f64,
+    /// Each band's power while only the room sounds.
+    noise: [f64; BANDS],
 }
 
 /// Centre frequency of `band`, in Hz.
@@ -89,7 +123,6 @@ impl Analyzer {
         let ratio = centre(1) / centre(0);
         let q = 1. / (ratio.sqrt() - 1. / ratio.sqrt());
         Self {
-            rate,
             filters: std::array::from_fn(|band| Bandpass::new(centre(band), q, fs)),
             power: [0.; BANDS],
             follow: std::array::from_fn(|band| {
@@ -101,14 +134,16 @@ impl Analyzer {
             level_power: 0.,
             level_follow: follow_rate(LEVEL_FOLLOW, fs),
             window: Window::new(rate),
+            recent: [f64::INFINITY; FLOOR_WINDOWS],
+            next: 0,
+            heard: 0,
+            gate: GATE,
+            noise: [0.; BANDS],
         }
     }
 
-    pub(crate) fn rate(&self) -> u32 {
-        self.rate
-    }
-
     /// Analyse `pcm`; `on_level` receives each completed level window.
+    #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn push(&mut self, pcm: &[f32], mut on_level: impl FnMut(f32)) {
         for &sample in pcm {
             let x = f64::from(sample);
@@ -123,8 +158,39 @@ impl Analyzer {
                 *power += (y * y - *power) * follow;
             }
             self.level_power += (square - self.level_power) * self.level_follow;
-            if let Some(level) = self.window.push(square) {
-                on_level(level);
+            if let Some(power) = self.window.push(square) {
+                self.end_window(power);
+                on_level(level_of(decibels(power)) as f32);
+            }
+        }
+    }
+
+    /// A level window of mean `power` ended: follow the noise floor and each
+    /// band's noise, and zero what decayed below `TINY`.
+    fn end_window(&mut self, power: f64) {
+        for filter in &mut self.filters {
+            filter.flush();
+        }
+        for band in &mut self.power {
+            flush(band);
+        }
+        flush(&mut self.level_power);
+        // A new input may start with digital silence, which says nothing
+        // about the room.
+        if self.heard == 0 && power == 0. {
+            return;
+        }
+        self.recent[self.next] = power;
+        self.next = (self.next + 1) % FLOOR_WINDOWS;
+        let floor = decibels(self.recent.iter().copied().fold(f64::INFINITY, f64::min));
+        if self.heard < SEED_WINDOWS {
+            self.heard += 1;
+        } else {
+            self.gate = (floor + NOISE_MARGIN).max(GATE);
+        }
+        if decibels(power) <= (floor + ROOM).min(self.gate) {
+            for (noise, band) in self.noise.iter_mut().zip(&self.power) {
+                *noise += (band - *noise) * BAND_NOISE_FOLLOW;
             }
         }
     }
@@ -133,11 +199,17 @@ impl Analyzer {
     #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn spectrum(&self) -> Spectrum {
         let level_db = decibels(self.level_power);
-        let gate = ((level_db - GATE) / GATE_KNEE).clamp(0., 1.);
+        let gate = ((level_db - self.gate) / GATE_KNEE).clamp(0., 1.);
         let mut bands = [0.; BANDS];
         if gate > 0. {
-            for ((band, power), tilt) in bands.iter_mut().zip(&self.power).zip(&self.tilt) {
-                let height = (decibels(*power) + tilt - BAND_FLOOR) / BAND_SPAN;
+            for (((band, power), noise), tilt) in bands
+                .iter_mut()
+                .zip(&self.power)
+                .zip(&self.noise)
+                .zip(&self.tilt)
+            {
+                let voice = power - NOISE_OVERSUBTRACT * noise;
+                let height = (decibels(voice) + tilt - BAND_FLOOR) / BAND_SPAN;
                 *band = (height.clamp(0., 1.) * gate) as f32;
             }
         }
@@ -150,6 +222,12 @@ impl Analyzer {
 
 fn decibels(power: f64) -> f64 {
     10. * power.max(1e-12).log10()
+}
+
+fn flush(value: &mut f64) {
+    if value.abs() < TINY {
+        *value = 0.;
+    }
 }
 
 /// The per-sample step of a one-pole follower with time constant `seconds`.
@@ -198,10 +276,14 @@ impl Bandpass {
         self.z2 = -self.b0 * x - self.a2 * y;
         y
     }
+
+    fn flush(&mut self) {
+        flush(&mut self.z1);
+        flush(&mut self.z2);
+    }
 }
 
-/// RMS over consecutive windows of 1/`LEVEL_HZ` s, mapped like
-/// [`Spectrum::level`].
+/// Mean power over consecutive windows of 1/`LEVEL_HZ` s.
 struct Window {
     length: usize,
     sum: f64,
@@ -217,17 +299,17 @@ impl Window {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn push(&mut self, square: f64) -> Option<f32> {
+    #[allow(clippy::cast_precision_loss)]
+    fn push(&mut self, square: f64) -> Option<f64> {
         self.sum += square;
         self.count += 1;
         if self.count < self.length {
             return None;
         }
-        let level = level_of(decibels(self.sum / self.length as f64)) as f32;
+        let power = self.sum / self.length as f64;
         self.sum = 0.;
         self.count = 0;
-        Some(level)
+        Some(power)
     }
 }
 
@@ -287,6 +369,8 @@ impl Feed {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const RATE: u32 = 48_000;
@@ -307,6 +391,50 @@ mod tests {
         (0..BANDS)
             .max_by(|&a, &b| spectrum.bands[a].total_cmp(&spectrum.bands[b]))
             .unwrap()
+    }
+
+    /// `seconds` of steady room noise at `dbfs` RMS: hiss and a 120 Hz hum
+    /// of equal power.
+    #[allow(clippy::cast_possible_truncation)]
+    fn room_noise(rate: u32, seconds: f64, dbfs: f64) -> Vec<f32> {
+        let rms = 10_f64.powf(dbfs / 20.);
+        let mut seed = 1_u32;
+        tone(rate, 120., seconds, rms)
+            .into_iter()
+            .map(|hum| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                // Uniform over ±0.5: an RMS of 1/√12.
+                let hiss = f64::from(seed >> 8) / f64::from(1_u32 << 24) - 0.5;
+                hum + (hiss * 6_f64.sqrt() * rms) as f32
+            })
+            .collect()
+    }
+
+    fn mix(a: &[f32], b: &[f32]) -> Vec<f32> {
+        a.iter().zip(b).map(|(a, b)| a + b).collect()
+    }
+
+    /// The readings of `pcm`, pushed in 10 ms buffers as a capture delivers
+    /// it.
+    fn readings(analyzer: &mut Analyzer, rate: u32, pcm: &[f32]) -> Vec<Spectrum> {
+        pcm.chunks(rate as usize / 100)
+            .map(|buffer| {
+                analyzer.push(buffer, |_| {});
+                analyzer.spectrum()
+            })
+            .collect()
+    }
+
+    /// The bands as they were before the analyzer learned noise floors: the
+    /// absolute gate alone, nothing taken off.
+    #[allow(clippy::cast_possible_truncation)]
+    fn with_absolute_gate(analyzer: &Analyzer) -> [f32; BANDS] {
+        let gate = ((decibels(analyzer.level_power) - GATE) / GATE_KNEE).clamp(0., 1.);
+        std::array::from_fn(|band| {
+            let height =
+                (decibels(analyzer.power[band]) + analyzer.tilt[band] - BAND_FLOOR) / BAND_SPAN;
+            (height.clamp(0., 1.) * gate) as f32
+        })
     }
 
     #[test]
@@ -364,6 +492,119 @@ mod tests {
         let spectrum = analyzer.spectrum();
         assert!(!spectrum.is_quiet());
         assert!(spectrum.bands.iter().any(|&b| b > 0.3), "{spectrum:?}");
+    }
+
+    #[test]
+    fn steady_noise_draws_nothing_once_heard() {
+        for rate in [16_000, RATE] {
+            for dbfs in [-40., -35.] {
+                let mut analyzer = Analyzer::new(rate);
+                let heard = readings(&mut analyzer, rate, &room_noise(rate, 10., dbfs));
+                // Louder than the absolute gate, it shows at first...
+                assert!(!heard[10].is_quiet(), "{rate} Hz, {dbfs} dBFS");
+                // ...and draws nothing once half a second of it was heard.
+                for (i, spectrum) in heard.iter().enumerate().skip(50) {
+                    assert!(
+                        spectrum.is_quiet(),
+                        "{rate} Hz, {dbfs} dBFS, after {i}0 ms: {spectrum:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_voice_over_steady_noise_shows_at_once_and_alone() {
+        for rate in [16_000, RATE] {
+            // A voice at a typical level, -20 dBFS, for 100 ms.
+            let voice = tone(rate, centre(12), 0.1, 0.14);
+            let quiet = readings(&mut Analyzer::new(rate), rate, &voice);
+            for dbfs in [-40., -35.] {
+                let room = room_noise(rate, 2.1, dbfs);
+                let (heard, rest) = room.split_at(2 * rate as usize);
+                let mut analyzer = Analyzer::new(rate);
+                analyzer.push(heard, |_| {});
+                let noisy = readings(&mut analyzer, rate, &mix(&voice, rest));
+                let context = |i: usize| {
+                    format!(
+                        "{rate} Hz, {dbfs} dBFS: {:?} against {:?}",
+                        noisy[i], quiet[i]
+                    )
+                };
+                // In the first buffer...
+                assert!(noisy[0].bands[12] > 0.3, "{}", context(0));
+                // ...and once it has settled as on a quiet mic, with neither
+                // the hum nor the hiss standing up beside it.
+                let last = noisy.len() - 1;
+                assert!(
+                    noisy[last].bands[12] > 0.8 * quiet[last].bands[12],
+                    "{}",
+                    context(last)
+                );
+                for (noisy, quiet) in noisy[last].bands.iter().zip(quiet[last].bands) {
+                    assert!(*noisy <= quiet + 0.05, "{}", context(last));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_floor_falls_as_soon_as_the_noise_stops() {
+        // A soft voice, -36 dBFS: a quiet mic shows it, a noisy one hides it.
+        let soft = tone(RATE, centre(9), 0.01, 0.022);
+        let noise = room_noise(RATE, 3.01, -35.);
+        let (heard, rest) = noise.split_at(3 * RATE as usize);
+        let mut analyzer = Analyzer::new(RATE);
+        analyzer.push(heard, |_| {});
+        analyzer.push(&mix(&soft, rest), |_| {});
+        assert!(analyzer.spectrum().is_quiet());
+
+        // The noise stops, leaving a quiet room.
+        analyzer.push(&room_noise(RATE, 0.2, -65.), |_| {});
+        analyzer.push(&soft, |_| {});
+        let spectrum = analyzer.spectrum();
+        assert_eq!(loudest(&spectrum), 9, "{spectrum:?}");
+        assert!(spectrum.bands[9] > 0.3, "{spectrum:?}");
+    }
+
+    #[test]
+    fn a_noise_that_starts_later_fades_within_seconds() {
+        let mut analyzer = Analyzer::new(RATE);
+        analyzer.push(&room_noise(RATE, 5., -65.), |_| {});
+        let heard = readings(&mut analyzer, RATE, &room_noise(RATE, 6., -35.));
+        // A new sound shows, as it may be a voice...
+        assert!(!heard[..100].iter().any(Spectrum::is_quiet));
+        // ...but a few seconds of it are the room.
+        assert!(heard[400..].iter().all(Spectrum::is_quiet));
+    }
+
+    #[test]
+    fn speech_never_lifts_the_floor() {
+        let rate = crate::SAMPLE_RATE;
+        for clip in ["quick-brown-fox.wav", "dictation-sentences.wav"] {
+            let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
+            let speech = crate::audio::read_wav(&fixtures.join(clip)).unwrap();
+            let mut analyzer = Analyzer::new(rate);
+            let (mut peaks, mut before) = ([0_f32; BANDS], [0_f32; BANDS]);
+            for buffer in speech.chunks(rate as usize / 100) {
+                analyzer.push(buffer, |_| {});
+                for (((peak, old), now), then) in peaks
+                    .iter_mut()
+                    .zip(&mut before)
+                    .zip(analyzer.spectrum().bands)
+                    .zip(with_absolute_gate(&analyzer))
+                {
+                    *peak = peak.max(now);
+                    *old = old.max(then);
+                }
+            }
+            for (band, (peak, old)) in peaks.iter().zip(&before).enumerate() {
+                assert!(
+                    *peak >= 0.9 * old,
+                    "{clip}, band {band}: {peaks:?} against {before:?}"
+                );
+            }
+        }
     }
 
     #[test]

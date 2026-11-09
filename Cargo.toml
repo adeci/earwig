@@ -42,6 +42,9 @@ futures-lite = "2"
 hex = "0.4"
 hound = "3"
 log = "0.4"
+# Lists the sound server's microphones and records from one (Linux): the
+# PulseAudio protocol, which PipeWire speaks too, in pure Rust.
+pulseaudio = "0.3"
 raw-window-handle = "0.6"
 reis = { version = "0.7", features = ["async-io"] }
 rubato = "5"

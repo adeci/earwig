@@ -29,6 +29,8 @@ pub(super) struct Worker<S> {
     /// `None` only while dropping, so the thread sees the channel close.
     jobs: Option<flume::Sender<Job<S>>>,
     wake: Arc<OwnedFd>,
+    /// Disconnects once the thread has closed its connection.
+    closed: flume::Receiver<()>,
 }
 
 impl<S> Worker<S>
@@ -48,11 +50,14 @@ where
         );
         let (jobs, job_rx) = flume::unbounded::<Job<S>>();
         let (ready_tx, ready_rx) = flume::bounded(1);
+        let (closed_tx, closed) = flume::bounded::<()>(0);
         let thread_wake = wake.clone();
         let thread_name = name.to_owned();
         std::thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
+                // Dropped last, after the connection.
+                let _closed = closed_tx;
                 let setup = || -> anyhow::Result<(EventQueue<S>, S)> {
                     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
                     let (globals, mut queue) =
@@ -88,6 +93,7 @@ where
         Ok(Self {
             jobs: Some(jobs),
             wake,
+            closed,
         })
     }
 
@@ -128,6 +134,9 @@ impl<S> Drop for Worker<S> {
     fn drop(&mut self) {
         self.jobs = None;
         let _ = rustix::io::write(&*self.wake, &1u64.to_ne_bytes());
+        // Only one input method may hold the seat: an inserter replacing
+        // this one can bind it once this connection is gone.
+        let _ = self.closed.recv_timeout(CALL_TIMEOUT);
     }
 }
 

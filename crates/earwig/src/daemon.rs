@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use earwig_core::audio::{self, Source};
-use earwig_core::config::{BackendSetting, ConfigStore};
+use earwig_core::config::{BackendSetting, ConfigStore, InsertConfig};
 use earwig_core::controller::{self, Parts};
 use earwig_core::engine::{Backend, EngineFactory, EngineOptions};
 use earwig_core::events::{Command, Event, InsertMethod};
@@ -47,9 +47,12 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     );
     let engine: Arc<dyn EngineFactory> = Arc::new(TranscribeEngine::new());
     let caps = desktop::probe();
-    let inserter = insert::auto(&settings.insert, &caps).unwrap_or_else(|e| {
-        log::warn!("no way to insert text in this session ({e:#}); dictations go to history");
-        Box::new(Unavailable(format!("{e:#}")))
+    let insert_caps = caps.clone();
+    let inserter = Box::new(move |config: &InsertConfig| -> Box<dyn Inserter> {
+        insert::auto(config, &insert_caps).unwrap_or_else(|e| {
+            log::warn!("no way to insert text in this session ({e:#}); dictations go to history");
+            Box::new(Unavailable(format!("{e:#}")))
+        })
     });
     let sources = hotkey::sources(&settings.hotkey, &caps);
     let mut hotkey_sources = vec!["socket".to_owned()];
@@ -234,15 +237,27 @@ fn transcribe_one(model: &mut dyn earwig_core::engine::Model, wav: &Path) -> any
     Ok(())
 }
 
+/// One line per microphone: what `[audio] device` takes, then the name the
+/// system shows when that differs.
 pub fn devices() -> anyhow::Result<()> {
-    let default = audio::default_input_device();
-    for name in audio::input_devices()? {
-        let mark = if default.as_ref() == Some(&name) {
+    let found = audio::input_devices(None)?;
+    let width = found
+        .devices
+        .iter()
+        .map(|device| device.id.chars().count())
+        .max()
+        .unwrap_or(0);
+    for device in &found.devices {
+        let mark = if found.default.as_ref() == Some(device) {
             "  (default)"
         } else {
             ""
         };
-        println!("{name}{mark}");
+        if device.name == device.id {
+            println!("{}{mark}", device.id);
+        } else {
+            println!("{:width$}  {}{mark}", device.id, device.name);
+        }
     }
     Ok(())
 }

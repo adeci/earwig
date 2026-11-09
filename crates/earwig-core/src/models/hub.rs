@@ -47,10 +47,6 @@ pub(crate) struct Hub {
 #[derive(Deserialize)]
 struct RepoHit {
     id: String,
-    #[serde(default)]
-    downloads: u64,
-    #[serde(default)]
-    likes: u64,
 }
 
 #[derive(Deserialize)]
@@ -204,14 +200,11 @@ impl Hub {
             }
             results.push(SearchResult {
                 repo: hit.id,
-                downloads: hit.downloads,
-                likes: hit.likes,
                 files: files
                     .into_iter()
                     .map(|e| RemoteFile {
                         file: e.path,
                         size: e.size,
-                        sha256: e.lfs.map(|l| l.oid),
                         architecture: None,
                         compatible: false,
                         revision: sha.clone(),

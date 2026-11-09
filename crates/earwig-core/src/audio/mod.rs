@@ -1,11 +1,25 @@
-//! Microphone capture as 16 kHz mono `f32`. The cpal callback only downmixes;
-//! a worker thread analyses the raw input for the overlay (see
+//! Microphone capture as 16 kHz mono `f32`. The capture callback only
+//! downmixes; a worker thread analyses the raw input for the overlay (see
 //! [`crate::spectrum`]), resamples, keeps the pre-roll, and reopens a failed
 //! input until it works again.
 //!
-//! Linux goes through ALSA: on PipeWire systems the ALSA `default` device is
-//! PipeWire's plugin, so routing and device switching work without cpal's
-//! `pipewire` feature.
+//! Each OS module lists the microphones and opens one, behind
+//! `input_devices(configured)` and `open(device, tx)`: Linux the sound
+//! server's sources, macOS and Windows cpal's devices.
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(target_os = "linux")]
+use linux as os;
+#[cfg(target_os = "macos")]
+use macos as os;
+#[cfg(windows)]
+use windows as os;
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -22,36 +36,76 @@ use crate::SAMPLE_RATE;
 use crate::config::AudioConfig;
 use crate::spectrum::{Analyzer, Feed, Spectrum};
 
+/// Starts every [`AudioEvent::Error`], so the microphone's failures stand
+/// out among the daemon's [`crate::events::Event::Error`]s.
+pub const MIC_ERROR_PREFIX: &str = "microphone: ";
+
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
 /// An open input that delivers nothing for this long counts as failed.
 const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 /// How often a clip recording delivers audio, like a capture buffer.
 const CLIP_TICK: Duration = Duration::from_millis(10);
 
-/// Names of the input devices, for `[audio] device`, stable across runs:
-/// cpal device ids (ALSA PCM names such as `default` or `pipewire`), and on
-/// Windows the names the Sound settings show (its ids are opaque GUIDs).
-pub fn input_devices() -> anyhow::Result<Vec<String>> {
+/// A microphone that `[audio] device` can name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputDevice {
+    /// What `[audio] device` holds; the same across runs.
+    pub id: String,
+    /// What people call it: the name the desktop's sound settings show.
+    pub name: String,
+}
+
+/// The microphones there are now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InputDevices {
+    pub devices: Vec<InputDevice>,
+    /// What the system default records from, when that is known; not always
+    /// one of `devices` (it can be a monitor of an output).
+    pub default: Option<InputDevice>,
+}
+
+/// The microphones there are now. `configured`, the current
+/// `[audio] device`, is among them under its own name when it is an older
+/// kind of name that still opens (an ALSA PCM name on Linux), so settings
+/// can show it without calling it missing.
+pub fn input_devices(configured: Option<&str>) -> anyhow::Result<InputDevices> {
+    os::input_devices(configured)
+}
+
+/// cpal's input devices that `device` describes, and the default one. Linux
+/// lists the sound server's sources instead.
+#[cfg(not(target_os = "linux"))]
+fn cpal_devices(
+    device: impl Fn(&cpal::Device) -> Option<InputDevice>,
+) -> anyhow::Result<InputDevices> {
     let host = cpal::default_host();
-    Ok(host
-        .input_devices()?
-        .filter_map(|device| device_name(&device))
-        .collect())
+    Ok(InputDevices {
+        devices: host
+            .input_devices()?
+            .filter_map(|input| device(&input))
+            .collect(),
+        default: host.default_input_device().as_ref().and_then(&device),
+    })
 }
 
-/// Name of the system default input device, if there is one.
-pub fn default_input_device() -> Option<String> {
-    device_name(&cpal::default_host().default_input_device()?)
-}
-
-#[cfg(not(windows))]
-fn device_name(device: &cpal::Device) -> Option<String> {
-    device.id().ok().map(|id| id.id().to_owned())
-}
-
-#[cfg(windows)]
-fn device_name(device: &cpal::Device) -> Option<String> {
-    device.description().ok().map(|d| d.name().to_owned())
+/// The cpal input device whose `id` is `wanted`, or the default one, and
+/// its id.
+fn cpal_input(
+    wanted: Option<&str>,
+    id: impl Fn(&cpal::Device) -> Option<String>,
+) -> anyhow::Result<(cpal::Device, String)> {
+    let host = cpal::default_host();
+    let device = match wanted {
+        None => host
+            .default_input_device()
+            .context("no default input device")?,
+        Some(wanted) => host
+            .input_devices()?
+            .find(|d| id(d).as_deref() == Some(wanted))
+            .with_context(|| format!("input device {wanted:?} not found"))?,
+    };
+    let id = id(&device).unwrap_or_else(|| "unknown".into());
+    Ok((device, id))
 }
 
 /// Read a WAV file as 16 kHz mono `f32`, whatever its rate, channel count or
@@ -192,8 +246,16 @@ enum Raw {
     Error(String),
 }
 
+/// An input an OS module opened: its audio goes to the channel it was given
+/// until `stream` is dropped.
+struct Opened {
+    stream: os::Stream,
+    rate: u32,
+    name: String,
+}
+
 struct Input {
-    _stream: cpal::Stream,
+    _stream: os::Stream,
     rx: flume::Receiver<Raw>,
     rate: u32,
     resampler: StreamResampler,
@@ -203,8 +265,6 @@ struct Input {
 
 struct Recording {
     id: u64,
-    /// For the rate of the audio being analysed; made on first use.
-    analyzer: Option<Analyzer>,
     started: Instant,
     clip_sent: usize,
 }
@@ -221,6 +281,10 @@ struct Worker {
     failing: bool,
     preroll: VecDeque<f32>,
     recording: Option<Recording>,
+    /// Hears everything the input delivers, recording or not, so it knows
+    /// the noise floor before the first word; made afresh for each new
+    /// input, and for each recording of a clip.
+    analyzer: Option<Analyzer>,
 }
 
 enum Wake {
@@ -246,6 +310,7 @@ impl Worker {
             failing: false,
             preroll: VecDeque::new(),
             recording: None,
+            analyzer: None,
         }
     }
 
@@ -309,6 +374,7 @@ impl Worker {
             Ok(input) => {
                 self.failing = false;
                 self.input = Some(input);
+                self.analyzer = None;
             }
             Err(e) => self.fail(&format!("{e:#}")),
         }
@@ -321,7 +387,7 @@ impl Worker {
             log::warn!("audio input failed, retrying: {message}");
             let _ = self
                 .events
-                .send(AudioEvent::Error(format!("microphone: {message}")));
+                .send(AudioEvent::Error(format!("{MIC_ERROR_PREFIX}{message}")));
         }
     }
 
@@ -344,10 +410,12 @@ impl Worker {
         self.preroll.clear();
         self.recording = Some(Recording {
             id,
-            analyzer: None,
             started: Instant::now(),
             clip_sent: 0,
         });
+        if matches!(self.source, Source::Clip(_)) {
+            self.analyzer = None;
+        }
         self.feed.publish(Spectrum::default());
         if self.input.is_none() {
             self.reopen_at = Instant::now();
@@ -399,24 +467,20 @@ impl Worker {
         }
     }
 
-    /// Feed `pcm`, audio at `rate` just heard by the recording, to its
-    /// analyzer: levels go to the controller, the spectrum to the overlay.
+    /// Feed `pcm`, audio at `rate` just heard, to the analyzer, which learns
+    /// the noise floor from all of it; while recording, levels go to the
+    /// controller and the spectrum to the overlay.
     fn analyze(&mut self, rate: u32, pcm: &[f32]) {
-        let Some(recording) = &mut self.recording else {
-            return;
-        };
-        let analyzer = match &mut recording.analyzer {
-            Some(analyzer) if analyzer.rate() == rate => analyzer,
-            slot => slot.insert(Analyzer::new(rate)),
-        };
-        let id = recording.id;
+        let analyzer = self.analyzer.get_or_insert_with(|| Analyzer::new(rate));
+        let recording = self.recording.as_ref().map(|r| r.id);
         analyzer.push(pcm, |level| {
-            let _ = self.events.send(AudioEvent::Level {
-                recording: id,
-                level,
-            });
+            if let Some(recording) = recording {
+                let _ = self.events.send(AudioEvent::Level { recording, level });
+            }
         });
-        self.feed.publish(analyzer.spectrum());
+        if recording.is_some() {
+            self.feed.publish(analyzer.spectrum());
+        }
     }
 
     fn trim_preroll(&mut self) {
@@ -457,35 +521,42 @@ impl Worker {
     }
 }
 
-fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
-    let host = cpal::default_host();
-    let device = match name {
-        None => host
-            .default_input_device()
-            .context("no default input device")?,
-        Some(name) => host
-            .input_devices()?
-            .find(|d| device_name(d).as_deref() == Some(name))
-            .with_context(|| format!("input device {name:?} not found"))?,
-    };
-    let name = device_name(&device).unwrap_or_else(|| "unknown".into());
+fn open_input(device: Option<&str>) -> anyhow::Result<Input> {
+    let (tx, rx) = flume::unbounded();
+    let opened = os::open(device, tx)?;
+    Ok(Input {
+        _stream: opened.stream,
+        rx,
+        rate: opened.rate,
+        resampler: StreamResampler::new(opened.rate)?,
+        last_data: Instant::now(),
+        name: opened.name,
+    })
+}
+
+/// Capture from `device`, called `name` in the log, in its own default
+/// format, downmixed to mono, into `tx`; returns the stream and its rate.
+fn open_cpal(
+    device: &cpal::Device,
+    name: &str,
+    tx: flume::Sender<Raw>,
+) -> anyhow::Result<(cpal::Stream, u32)> {
     let supported = device.default_input_config()?;
     let channels = usize::from(supported.channels());
     let rate = supported.sample_rate();
     let config = supported.config();
-    let (tx, rx) = flume::unbounded();
     // The device's own period, never a fixed one: cpal rings only two
     // periods, and when PipeWire's graph runs another quantum (512 frames
     // against 480 asked for) the difference is lost every cycle, chopping
     // the voice the engine hears.
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, tx),
-        cpal::SampleFormat::F64 => build::<f64>(&device, config, channels, tx),
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, tx),
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, channels, tx),
-        cpal::SampleFormat::I8 => build::<i8>(&device, config, channels, tx),
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, tx),
-        cpal::SampleFormat::U8 => build::<u8>(&device, config, channels, tx),
+        cpal::SampleFormat::F32 => build::<f32>(device, config, channels, tx),
+        cpal::SampleFormat::F64 => build::<f64>(device, config, channels, tx),
+        cpal::SampleFormat::I16 => build::<i16>(device, config, channels, tx),
+        cpal::SampleFormat::I32 => build::<i32>(device, config, channels, tx),
+        cpal::SampleFormat::I8 => build::<i8>(device, config, channels, tx),
+        cpal::SampleFormat::U16 => build::<u16>(device, config, channels, tx),
+        cpal::SampleFormat::U8 => build::<u8>(device, config, channels, tx),
         other => anyhow::bail!("{name}: unsupported sample format {other}"),
     }
     .with_context(|| format!("opening {name}"))?;
@@ -500,14 +571,7 @@ fn open_input(name: Option<&str>) -> anyhow::Result<Input> {
         },
     );
     log::info!("audio input {name}: {rate} Hz, {channels} channel(s), buffer {buffer}");
-    Ok(Input {
-        _stream: stream,
-        rx,
-        rate,
-        resampler: StreamResampler::new(rate)?,
-        last_data: Instant::now(),
-        name,
-    })
+    Ok((stream, rate))
 }
 
 fn build<T>(
@@ -661,6 +725,22 @@ mod tests {
         assert!((7_990..=8_010).contains(&pcm.len()), "{}", pcm.len());
         let peak = pcm.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
         assert!((0.45..0.55).contains(&peak), "{peak}");
+    }
+
+    #[test]
+    fn a_failure_is_reported_once_with_the_microphone_prefix() {
+        let (tx, rx) = flume::unbounded();
+        let config = AudioConfig::default();
+        let mut worker = Worker::new(Source::Microphone, config, tx, Feed::default());
+        worker.fail("no audio from the input device");
+        worker.fail("no audio from the input device");
+        let reported: Vec<AudioEvent> = rx.try_iter().collect();
+        assert_eq!(
+            reported,
+            [AudioEvent::Error(format!(
+                "{MIC_ERROR_PREFIX}no audio from the input device"
+            ))]
+        );
     }
 
     fn recv(rx: &flume::Receiver<AudioEvent>) -> AudioEvent {

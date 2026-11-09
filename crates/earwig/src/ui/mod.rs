@@ -7,6 +7,7 @@
 //! [`Command`] or a config edit.
 
 mod accent;
+mod assets;
 mod crt;
 mod drag;
 mod font;
@@ -16,11 +17,13 @@ mod overlay;
 mod pill;
 mod platform;
 mod settings;
+mod theme;
 mod water;
 
 use std::sync::PoisonError;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use earwig_core::audio::{InputDevice, InputDevices};
 use earwig_core::config::{AppearanceConfig, Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
@@ -59,13 +62,14 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
     let surface = platform::overlay_surface(&caps);
 
     platform::application(surface, &caps)
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
             // Before init, whose theme looks up the system font: GPUI's is
             // IBM Plex Sans on Linux.
             let bundled = font::register(cx);
             gpui_kit::init(cx);
+            theme::install(cx);
             if bundled {
                 font::name_on_theme(cx);
             }
@@ -87,7 +91,8 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
                 overlay: None,
                 settings: None,
                 overlay_wake: None,
-                input_devices: Vec::new(),
+                input_devices: InputDevices::default(),
+                mic_error: None,
             });
             apply_appearance(cx);
 
@@ -148,7 +153,9 @@ pub(crate) struct UiState {
     /// When the overlay is woken next to move on by itself (see
     /// [`follow_overlay`]).
     overlay_wake: Option<Instant>,
-    input_devices: Vec<String>,
+    input_devices: InputDevices,
+    /// The microphone's last failure, until it delivers audio again.
+    mic_error: Option<String>,
 }
 
 impl Global for UiState {}
@@ -167,8 +174,26 @@ impl UiState {
     }
 
     /// Microphones as of the last time settings opened.
-    pub(crate) fn input_devices(cx: &App) -> &[String] {
-        &cx.global::<Self>().input_devices
+    pub(crate) fn input_devices(cx: &App) -> &[InputDevice] {
+        &cx.global::<Self>().input_devices.devices
+    }
+
+    /// The name of the microphone the system default records from, as of
+    /// the same listing.
+    pub(crate) fn default_input_device(cx: &App) -> Option<&str> {
+        let default = cx.global::<Self>().input_devices.default.as_ref();
+        default.map(|device| device.name.as_str())
+    }
+
+    /// Why the microphone last failed, until it delivers audio again.
+    pub(crate) fn mic_error(cx: &App) -> Option<&str> {
+        cx.global::<Self>().mic_error.as_deref()
+    }
+
+    /// Forget the microphone's failure: another one is picked, which reports
+    /// its own.
+    pub(crate) fn clear_mic_error(cx: &mut App) {
+        cx.global_mut::<Self>().mic_error = None;
     }
 }
 
@@ -221,18 +246,32 @@ pub(crate) fn apply_appearance(cx: &mut App) {
 fn apply(event: Event, cx: &mut App) {
     match event {
         Event::Status { status } => {
+            // Snapshots also come with the state unchanged (after the
+            // inserter is rebuilt); passing those on would restart the
+            // overlay's switch-off.
             let state = status.state;
+            let changed = UiState::status(cx).state != state;
             cx.global_mut::<UiState>().status = status;
-            set_state(state, cx);
+            if changed {
+                set_state(state, cx);
+            }
             cx.refresh_windows();
         }
         Event::State { state } => {
             cx.global_mut::<UiState>().status.state = state;
             set_state(state, cx);
         }
-        // For socket clients: the overlay follows the faster spectrum feed,
-        // and the pill switched off when the recording stopped.
-        Event::Level { .. } | Event::Inserted { .. } => {}
+        // Audio arrived, so the microphone works (again). The overlay itself
+        // follows the faster spectrum feed.
+        Event::Level { .. } => {
+            if UiState::mic_error(cx).is_some() {
+                UiState::clear_mic_error(cx);
+                cx.refresh_windows();
+            }
+        }
+        // For socket clients: the pill switched off when the recording
+        // stopped.
+        Event::Inserted { .. } => {}
         Event::Transcript {
             committed,
             tentative,
@@ -244,7 +283,14 @@ fn apply(event: Event, cx: &mut App) {
             cx.global_mut::<UiState>().status.model = model;
             cx.refresh_windows();
         }
-        Event::Error { message } => log::warn!("daemon: {message}"),
+        Event::Error { message } => {
+            log::warn!("daemon: {message}");
+            // The audio worker's failures, for the Microphone settings.
+            if let Some(error) = message.strip_prefix(earwig_core::audio::MIC_ERROR_PREFIX) {
+                cx.global_mut::<UiState>().mic_error = Some(error.to_owned());
+                cx.refresh_windows();
+            }
+        }
         Event::ShowSettings => show_settings(cx),
     }
 }
@@ -357,26 +403,34 @@ fn show_settings(cx: &mut App) {
         return;
     }
     match settings::open(cx) {
-        Ok(window) => cx.global_mut::<UiState>().settings = Some(window),
+        Ok(window) => {
+            // Opening only shows the window. Activating it, as for an open
+            // one, brings it to the front where `earwig settings` gave leave
+            // (Windows).
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+            cx.global_mut::<UiState>().settings = Some(window);
+        }
         Err(e) => log::error!("opening settings: {e:#}"),
     }
 }
 
-/// Re-list microphones off the main thread (ALSA enumeration can take a
-/// moment); the settings window re-renders when the list arrives.
+/// Re-list microphones, and which is the system default, off the main
+/// thread (asking the sound server or ALSA can take a moment); the settings
+/// window re-renders when the list arrives.
 fn refresh_input_devices(cx: &mut App) {
+    let configured = config(UiState::handle(cx)).audio.device;
     cx.spawn(async move |cx| {
         let devices = cx
             .background_executor()
-            .spawn(async { earwig_core::audio::input_devices() })
+            .spawn(async move { earwig_core::audio::input_devices(configured.as_deref()) })
             .await;
-        match devices {
-            Ok(devices) => cx.update(|cx| {
-                cx.global_mut::<UiState>().input_devices = devices;
-                cx.refresh_windows();
-            }),
-            Err(e) => log::warn!("listing microphones: {e:#}"),
-        }
+        cx.update(|cx| {
+            match devices {
+                Ok(devices) => cx.global_mut::<UiState>().input_devices = devices,
+                Err(e) => log::warn!("listing microphones: {e:#}"),
+            }
+            cx.refresh_windows();
+        });
     })
     .detach();
 }
