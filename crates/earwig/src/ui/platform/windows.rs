@@ -1,8 +1,11 @@
 //! Windows: the overlay is GPUI's topmost tool-window popup, made
 //! non-activating so clicking or dragging the pill never takes focus from
-//! the app the text is meant for; a notification-area icon (`tray-icon`);
-//! the accent colour from the DWM settings in the registry.
+//! the app the text is meant for, with hand cursors for grabbing it (Windows
+//! has none, and GPUI shows an arrow for them); a notification-area icon
+//! (`tray-icon`); the accent colour from the DWM settings in the registry.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 
 use anyhow::{Context as _, bail};
@@ -12,9 +15,12 @@ use gpui_kit::{
     px,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use resvg::{tiny_skia, usvg};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRectRgn, MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow, SetWindowRgn,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, CreateRectRgn,
+    DIB_RGB_COLORS, DeleteObject, MONITOR_DEFAULTTOPRIMARY, MonitorFromWindow, ScreenToClient,
+    SetWindowRgn,
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, KEY_READ, KEY_SET_VALUE, REG_NOTIFY_CHANGE_LAST_SET,
@@ -22,11 +28,15 @@ use windows_sys::Win32::System::Registry::{
     RegNotifyChangeKeyValue, RegOpenKeyExW, RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetCapture;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, MA_NOACTIVATE, PostMessageW,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WM_APP,
-    WM_MOUSEACTIVATE, WS_EX_NOACTIVATE,
+    CreateIconIndirect, GWL_EXSTYLE, GetCursor, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, HCURSOR, HTCLIENT, ICONINFO, IDC_ARROW, LoadCursorW, MA_NOACTIVATE,
+    PostMessageW, SM_CXCURSOR, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetCursor,
+    SetWindowLongPtrW, SetWindowPos, WM_APP, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_NOACTIVATE,
+    WindowFromPoint,
 };
 
 use crate::ui::OverlaySurface;
@@ -148,6 +158,178 @@ fn hwnd(window: &Window) -> anyhow::Result<HWND> {
     }
 }
 
+/// How the pointer may take the pill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Grip {
+    /// It cannot: the cursor is GPUI's.
+    None,
+    /// Over the pill at these bounds (window coordinates, logical pixels),
+    /// where GPUI shows an arrow (not over the ×), it can grab it.
+    Open(Bounds<Pixels>),
+    /// It holds the pill.
+    Held,
+}
+
+thread_local! {
+    static GRIP: Cell<Grip> = const { Cell::new(Grip::None) };
+    /// The hand cursors by size in pixels: open, closed.
+    static HANDS: RefCell<HashMap<i32, (HCURSOR, HCURSOR)>> = RefCell::new(HashMap::new());
+}
+
+/// Show the open hand where the pill can be grabbed and the closed one
+/// while it is held, as GPUI's `CursorStyle::OpenHand` and `ClosedHand`
+/// would elsewhere. Takes effect at once when the pointer is on `window`.
+pub(crate) fn set_grip(window: &Window, grip: Grip) {
+    if GRIP.replace(grip) == grip {
+        return;
+    }
+    let Ok(hwnd) = hwnd(window) else {
+        return;
+    };
+    // SAFETY: plain calls on a live window of this thread.
+    unsafe {
+        let mut pointer = POINT { x: 0, y: 0 };
+        let over = GetCapture() == hwnd
+            || (GetCursorPos(&raw mut pointer) != 0 && WindowFromPoint(pointer) == hwnd);
+        if !over {
+            return;
+        }
+        match grip_cursor(hwnd) {
+            Some(cursor) => SetCursor(cursor),
+            // Back from a hand to GPUI's cursor, which the next move sets.
+            None if is_hand(hwnd, GetCursor()) => {
+                SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW))
+            }
+            None => GetCursor(),
+        };
+    }
+}
+
+/// The hand for the pointer on `hwnd` as things stand, if any. GPUI has
+/// set its own cursor already.
+unsafe fn grip_cursor(hwnd: HWND) -> Option<HCURSOR> {
+    let (open, closed) = hands(hwnd)?;
+    match GRIP.get() {
+        Grip::None => None,
+        Grip::Held => Some(closed),
+        Grip::Open(pill) => {
+            let mut pointer = POINT { x: 0, y: 0 };
+            // SAFETY: `pointer` is written; `hwnd` is live.
+            unsafe {
+                if GetCursorPos(&raw mut pointer) == 0
+                    || ScreenToClient(hwnd, &raw mut pointer) == 0
+                {
+                    return None;
+                }
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.;
+            #[allow(clippy::cast_precision_loss)]
+            let at = point(px(pointer.x as f32 / scale), px(pointer.y as f32 / scale));
+            // SAFETY: plain calls.
+            let arrow = unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) };
+            // Not where GPUI shows a cursor of its own (the ×).
+            let shown = unsafe { GetCursor() };
+            (pill.contains(&at) && (shown == arrow || shown == open || shown == closed))
+                .then_some(open)
+        }
+    }
+}
+
+fn is_hand(hwnd: HWND, cursor: HCURSOR) -> bool {
+    hands(hwnd).is_some_and(|(open, closed)| cursor == open || cursor == closed)
+}
+
+/// The hand cursors at the system's cursor size for `hwnd`'s DPI.
+fn hands(hwnd: HWND) -> Option<(HCURSOR, HCURSOR)> {
+    // SAFETY: plain calls on a live window.
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXCURSOR, GetDpiForWindow(hwnd)) };
+    let size = if size > 0 { size } else { 32 };
+    HANDS.with_borrow_mut(|hands| {
+        if let Some(&hands) = hands.get(&size) {
+            return Some(hands);
+        }
+        let open = cursor(OPEN_HAND, size)?;
+        let closed = cursor(CLOSED_HAND, size)?;
+        hands.insert(size, (open, closed));
+        Some((open, closed))
+    })
+}
+
+const OPEN_HAND: &str = include_str!("../../../../../assets/cursors/open-hand.svg");
+const CLOSED_HAND: &str = include_str!("../../../../../assets/cursors/closed-hand.svg");
+
+/// `svg` as a `size`×`size` cursor, its hotspot in the middle (the palm).
+fn cursor(svg: &str, size: i32) -> Option<HCURSOR> {
+    let width = u32::try_from(size).ok()?;
+    let pixels = bgra(svg, width);
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).ok()?,
+            biWidth: size,
+            // Negative: rows top to bottom.
+            biHeight: -size,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // SAFETY: the DIB section has room for `width`² BGRA pixels, which are
+    // copied in; the bitmaps are copied into the cursor and freed after.
+    unsafe {
+        let mut bits = std::ptr::null_mut();
+        let color = CreateDIBSection(
+            std::ptr::null_mut(),
+            &raw const info,
+            DIB_RGB_COLORS,
+            &raw mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if color.is_null() || bits.is_null() {
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast(), pixels.len());
+        // The mask is unused with an alpha channel, but required.
+        let mask = CreateBitmap(size, size, 1, 1, std::ptr::null());
+        let icon = ICONINFO {
+            fIcon: 0,
+            xHotspot: width / 2,
+            yHotspot: width / 2,
+            hbmMask: mask,
+            hbmColor: color,
+        };
+        let cursor = CreateIconIndirect(&raw const icon);
+        DeleteObject(color);
+        DeleteObject(mask);
+        (!cursor.is_null()).then_some(cursor)
+    }
+}
+
+/// `svg` drawn `size`×`size`, BGRA with straight alpha, rows top to bottom.
+#[allow(clippy::cast_precision_loss)]
+fn bgra(svg: &str, size: u32) -> Vec<u8> {
+    let tree =
+        usvg::Tree::from_str(svg, &usvg::Options::default()).expect("the cursors are valid SVG");
+    let mut pixmap = tiny_skia::Pixmap::new(size, size).expect("a cursor has pixels");
+    let scale = size as f32 / tree.size().width();
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+        .pixels()
+        .iter()
+        .flat_map(|pixel| {
+            let pixel = pixel.demultiply();
+            [pixel.blue(), pixel.green(), pixel.red(), pixel.alpha()]
+        })
+        .collect()
+}
+
 /// [`Popup::move_to`]'s request: `lparam` holds x (low half) and y.
 const MOVE_TO: u32 = WM_APP + 1;
 
@@ -163,6 +345,17 @@ unsafe extern "system" fn no_activate(
 ) -> LRESULT {
     if msg == WM_MOUSEACTIVATE {
         return LRESULT::try_from(MA_NOACTIVATE).unwrap_or_default();
+    }
+    if msg == WM_SETCURSOR && (lparam & 0xffff) == LPARAM::try_from(HTCLIENT).unwrap_or_default() {
+        // SAFETY: GPUI sets its cursor first; `hwnd` is this live window.
+        unsafe {
+            let handled = DefSubclassProc(hwnd, msg, wparam, lparam);
+            if let Some(hand) = grip_cursor(hwnd) {
+                SetCursor(hand);
+                return 1;
+            }
+            return handled;
+        }
     }
     if msg == MOVE_TO {
         #[allow(clippy::cast_possible_truncation)]
@@ -375,6 +568,22 @@ fn wide(s: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hands_are_white_on_black_and_clear_around() {
+        for svg in [OPEN_HAND, CLOSED_HAND] {
+            let size = 32;
+            let pixels = bgra(svg, size);
+            assert_eq!(pixels.len(), 32 * 32 * 4);
+            let opaque = |want: u8| {
+                pixels
+                    .chunks(4)
+                    .any(|p| p[3] == 255 && p[..3].iter().all(|&c| c == want))
+            };
+            assert!(opaque(255) && opaque(0));
+            assert_eq!(&pixels[..4], &[0; 4]);
+        }
+    }
 
     #[test]
     fn the_accent_is_stored_red_first() {

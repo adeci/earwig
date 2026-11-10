@@ -7,12 +7,9 @@
 //!
 //! The pill's window is just big enough for it: GPUI's path rendering costs
 //! in proportion to the window's area, which makes an output-sized overlay
-//! expensive (very much so on software rendering). On layer-shell, where a
-//! surface cannot move once mapped, a drag shows the pill on a transparent
-//! surface over the output's usable area while the button is down, drawn
-//! with quads only, then reopens the small window where it was dropped (see
-//! [`drag`](crate::ui::drag) for the hand-over). On X11 the popup itself
-//! follows the pointer.
+//! expensive (very much so on software rendering). A drag moves that window
+//! with the pointer, the pill animated as ever: a layer surface through its
+//! margins, a popup to its new place.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -62,13 +59,6 @@ pub(crate) const LINE_HEIGHT: f32 = 22.;
 /// rate. A voice wakes a slow overlay at once (see [`OverlayView::hears`]).
 const QUIET_FRAME: Duration = Duration::from_millis(50);
 const STILL_FRAME: Duration = Duration::from_millis(250);
-/// The drag surface's frame interval on software rendering, where every
-/// frame of a surface that size costs real CPU.
-const SOFTWARE_DRAG_FRAME: Duration = Duration::from_millis(100);
-/// How long the drag surface waits, after a drop, for the pill's window to
-/// show it before closing anyway.
-#[cfg(target_os = "linux")]
-const LANDING_TIMEOUT: Duration = Duration::from_millis(500);
 const DISCARD_SIZE: f32 = 24.;
 /// Pixels the voice must move the pill by to be worth every frame.
 const SPEAKING_REACH: f32 = 0.35;
@@ -330,14 +320,6 @@ pub struct OverlayView {
     /// `None` keeps it at home.
     spot: Option<Point<Pixels>>,
     drag: Drag,
-    /// When the pill last followed the pointer.
-    moved_at: Option<Instant>,
-    /// The surface showing the pill while a drag lasts and until its window
-    /// shows it again (layer-shell).
-    drag_window: Option<AnyWindowHandle>,
-    /// The window the pill rested in before it was dropped elsewhere, which
-    /// closes with the drag surface.
-    left_behind: Option<AnyWindowHandle>,
     painted: Painted,
 }
 
@@ -354,16 +336,6 @@ enum PowerOn {
     Since(Instant),
     /// Done, or not animated.
     Done,
-}
-
-/// What a window draws the pill for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Role {
-    /// The pill at rest: animated, takes the pointer.
-    Rest,
-    /// The pill on the drag surface: static quads, no input.
-    #[cfg(target_os = "linux")]
-    Drag,
 }
 
 impl OverlayView {
@@ -434,9 +406,6 @@ impl OverlayView {
             origin: None,
             spot: None,
             drag: Drag::default(),
-            moved_at: None,
-            drag_window: None,
-            left_behind: None,
             painted: Rc::default(),
         }
     }
@@ -560,12 +529,7 @@ impl OverlayView {
 
     /// Every window the overlay has open.
     pub fn windows(&self) -> Vec<AnyWindowHandle> {
-        self.window
-            .iter()
-            .chain(&self.drag_window)
-            .chain(&self.left_behind)
-            .copied()
-            .collect()
+        self.window.iter().copied().collect()
     }
 
     fn elapsed(&self) -> Duration {
@@ -602,8 +566,8 @@ impl OverlayView {
     }
 
     /// The area the pill moves on: the output's usable area for layer-shell
-    /// (the frame of every overlay surface there), the screen less its
-    /// panels for the popup.
+    /// (the frame its window's margins are in), the screen less its panels
+    /// for the popup.
     fn area(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
         if self.popup.is_some() {
             window.display(cx).map(|display| display.visible_bounds())
@@ -637,18 +601,52 @@ impl OverlayView {
         clamp_spot(spot, pill, area, self.position)
     }
 
-    /// The pointer on `area`, given an event at `local` in the resting
-    /// window (which keeps the pointer while the button is down).
+    /// The pointer on `area`, given an event at `local` in the pill's window
+    /// (which keeps the pointer while the button is down).
     fn pointer(
         &self,
         local: Point<Pixels>,
         area: Bounds<Pixels>,
         window: &Window,
     ) -> Option<Point<Pixels>> {
-        match &self.popup {
-            Some(popup) => popup.pointer(window.scale_factor()),
-            None => Some(local + self.origin(area)),
+        let origin = self.origin(area);
+        match (&self.popup, self.drag.grab()) {
+            (Some(popup), _) => popup.pointer(window.scale_factor()),
+            (None, Some(grab)) => Some(grab.pointer(
+                self.pointer_travel(),
+                local,
+                origin,
+                self.follows_freely(area),
+            )),
+            (None, None) => Some(local + origin),
         }
+    }
+
+    /// Whether the pill's window sits where the pill was dragged, not
+    /// against an edge of `area`.
+    fn follows_freely(&self, area: Bounds<Pixels>) -> bool {
+        let Some(spot) = self.spot else {
+            return true;
+        };
+        let size = window_size(self.max_lines);
+        let held = self.current_spot(area, self.origin(area));
+        held == spot
+            && window_origin(spot, size, area, self.position)
+                == popup_origin(spot, size, self.position).map(|v| v.round())
+    }
+
+    /// How far the pointer has travelled (see [`Grab::pointer`]), on
+    /// layer-shell.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(clippy::unused_self, reason = "only layer-shell reports it")
+    )]
+    fn pointer_travel(&self) -> Option<Point<Pixels>> {
+        #[cfg(target_os = "linux")]
+        if self.layer_shell {
+            return gpui_linux::pointer_travel();
+        }
+        None
     }
 
     fn start_drag(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -658,44 +656,20 @@ impl OverlayView {
         let Some(pointer) = self.pointer(event.position, area, window) else {
             return;
         };
-        let from = self.current_spot(area, self.origin(area));
-        let grab = Grab {
+        let origin = self.origin(area);
+        let from = self.current_spot(area, origin);
+        if self.drag.hold(Grab {
             offset: pointer - from,
-            from,
-        };
-        if !self.drag.hold(grab) {
-            return;
+            at: pointer,
+            local: event.position,
+            origin,
+            travel: self.pointer_travel(),
+        }) {
+            cx.notify();
         }
-        #[cfg(target_os = "linux")]
-        if self.popup.is_none() {
-            self.open_drag_window(area.size, cx);
-        }
-        cx.notify();
     }
 
-    #[cfg(target_os = "linux")]
-    fn open_drag_window(&mut self, area: Size<Pixels>, cx: &mut Context<Self>) {
-        let options = layer_shell::drag_window_options(self.position, area);
-        let overlay = cx.entity();
-        // Opening renders the window, which reads this view: not while it
-        // is being updated.
-        cx.defer(move |cx| {
-            if !overlay.read(cx).drag.is_held() {
-                return;
-            }
-            let opened = cx.open_window(options, |window, cx| {
-                window.set_input_region(Some(&[]));
-                let overlay = overlay.clone();
-                cx.new(|_| DragView { overlay })
-            });
-            match opened {
-                Ok(handle) => overlay.update(cx, |view, _| view.drag_window = Some(handle.into())),
-                Err(e) => log::warn!("opening the overlay's drag surface: {e:#}"),
-            }
-        });
-    }
-
-    /// A pointer event in the resting window while the pill is held, at
+    /// A pointer event in the pill's window while the pill is held, at
     /// `local` in it.
     fn on_pointer(
         &mut self,
@@ -708,114 +682,68 @@ impl OverlayView {
             return;
         };
         if event.ends_drag() {
-            if matches!(event, Pointer::Released(_)) {
-                self.follow(local, grab, window, cx);
-            }
             self.end_drag(cx);
             return;
         }
-        // On software rendering each frame of the drag surface costs real
-        // CPU: follow the pointer at a calm rate.
-        if self.popup.is_none()
-            && pill::software_rendered(window)
-            && self
-                .moved_at
-                .is_some_and(|at| at.elapsed() < SOFTWARE_DRAG_FRAME)
-        {
-            return;
-        }
-        self.moved_at = Some(Instant::now());
-        self.follow(local, grab, window, cx);
-    }
-
-    fn follow(
-        &mut self,
-        local: Point<Pixels>,
-        grab: Grab,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
         let Some(area) = self.area(window, cx) else {
             return;
         };
         if let Some(pointer) = self.pointer(local, area, window) {
             self.spot = Some(pointer - grab.offset);
+            #[cfg(target_os = "linux")]
+            self.move_layer(area, window);
             cx.notify();
         }
     }
 
-    /// Let go of the pill. On layer-shell, reopen the resting window where
-    /// it was dropped (or let the old one show it again, when it did not
-    /// move); the drag surface shows it until that window does.
+    /// How the pointer may take the pill, for the hand cursors.
+    #[cfg(windows)]
+    fn grip(&self) -> crate::ui::platform::Grip {
+        use crate::ui::platform::Grip;
+        if self.drag.is_held() {
+            return Grip::Held;
+        }
+        match self.painted.get() {
+            Some((_, pill)) if self.movable() && self.takes_pointer() => Grip::Open(pill),
+            _ => Grip::None,
+        }
+    }
+
+    /// Let go of the pill where it is.
     fn end_drag(&mut self, cx: &mut Context<Self>) {
-        let Some(released) = self.drag.let_go() else {
-            return;
-        };
-        cx.notify();
-        // The popup already followed the pointer.
-        #[cfg(target_os = "linux")]
-        if let Some(area) = self.usable.filter(|_| self.popup.is_none()) {
-            self.reopen_where_dropped(Bounds::new(Point::default(), area), released, cx);
-            return;
+        if self.drag.let_go() {
+            cx.notify();
         }
-        self.land(released.1, cx);
     }
 
+    /// Move the layer surface to the pill's spot, at once rather than with
+    /// the next frame: the compositor sends the pointer relative to it.
     #[cfg(target_os = "linux")]
-    fn reopen_where_dropped(
-        &mut self,
-        area: Bounds<Pixels>,
-        (grab, landing): (Grab, u32),
-        cx: &mut Context<Self>,
-    ) {
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(LANDING_TIMEOUT).await;
-            let _ = this.update(cx, |view, cx| view.land(landing, cx));
-        })
-        .detach();
-        let spot = self.current_spot(area, self.origin(area));
-        if self.spot.is_none() || spot == grab.from {
+    fn move_layer(&mut self, area: Bounds<Pixels>, window: &Window) {
+        if !self.layer_shell {
             return;
         }
-        self.spot = Some(spot);
-        let window = window_size(self.max_lines);
-        let origin = window_origin(spot, window, area, self.position);
-        let previous_origin = self.origin.replace(origin);
-        self.left_behind = self.window.take();
-        let options = layer_shell::moved_window_options(self.position, origin, window, area.size);
-        let overlay = cx.entity();
-        cx.defer(move |cx| {
-            let opened = cx.open_window(options, |window, _| {
-                window.set_input_region(Some(&[]));
-                overlay.clone()
-            });
-            overlay.update(cx, |view, cx| match opened {
-                Ok(handle) => view.window = Some(handle.into()),
-                Err(e) => {
-                    log::warn!("moving the overlay: {e:#}");
-                    // Back to the old window, which never moved.
-                    view.window = view.left_behind.take();
-                    view.origin = previous_origin;
-                    view.spot = Some(grab.from);
-                    cx.notify();
-                }
-            });
-        });
-    }
-
-    /// The pill's window shows it again after `landing`: close the drag
-    /// surface and the window it was dropped out of.
-    fn land(&mut self, landing: u32, cx: &mut Context<Self>) {
-        if !self.drag.land(landing) {
+        let size = window_size(self.max_lines);
+        let from = self.origin(area);
+        let origin = window_origin(self.current_spot(area, from), size, area, self.position);
+        if origin == from {
             return;
         }
-        for handle in self
-            .drag_window
-            .take()
-            .into_iter()
-            .chain(self.left_behind.take())
-        {
-            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        let shift = crate::ui::drag::reads_current();
+        match layer_shell::move_window(
+            window,
+            self.position,
+            (from, origin),
+            size,
+            area.size,
+            shift,
+        ) {
+            Ok(()) => self.origin = Some(origin),
+            Err(e) => {
+                log::warn!("the overlay cannot be dragged: {e:#}");
+                self.layer_shell = false;
+                self.drag.let_go();
+            }
         }
     }
 
@@ -871,16 +799,9 @@ impl OverlayView {
     }
 
     /// The pill: outline, header and text, or as far switched off as it
-    /// is. Only the resting window's pill takes the pointer and offers to
-    /// discard the dictation.
-    fn pill(&self, theme: &Theme, role: Role) -> Div {
-        let rests = role == Role::Rest;
-        let edge = if rests {
-            self.edge
-        } else {
-            // Shadow and body quads: no paths on an output-sized surface.
-            Edge::default()
-        };
+    /// is.
+    fn pill(&self, theme: &Theme) -> Div {
+        let edge = self.edge;
         let look = self.look;
         let painted = self.painted.clone();
         let now = Instant::now();
@@ -891,7 +812,7 @@ impl OverlayView {
             (None, Some(t)) => crt::opening_content(t),
             (None, None) => 1.,
         };
-        let takes_pointer = rests && self.takes_pointer();
+        let takes_pointer = self.takes_pointer();
         div()
             .w(px(WIDTH))
             .flex_shrink_0()
@@ -911,7 +832,7 @@ impl OverlayView {
                                 let size = bounds.size.map(f32::from);
                                 match on.and_then(|t| crt::opening(t, size.width, size.height)) {
                                     Some(frame) => {
-                                        pill::paint_crt(bounds, &frame, &edge, look, rests, window);
+                                        pill::paint_crt(bounds, &frame, &edge, look, window);
                                     }
                                     None => pill::paint(bounds, &edge, look, 1., window),
                                 }
@@ -919,7 +840,7 @@ impl OverlayView {
                             (Some(look), Some(t)) => {
                                 let size = bounds.size.map(f32::from);
                                 if let Some(frame) = crt::at(t, size.width, size.height) {
-                                    pill::paint_crt(bounds, &frame, &edge, look, rests, window);
+                                    pill::paint_crt(bounds, &frame, &edge, look, window);
                                 }
                             }
                             (None, _) => {}
@@ -959,7 +880,7 @@ impl OverlayView {
                     .opacity(content)
                     .child(self.body(theme)),
             )
-            .when(rests && self.failure().is_none(), |this| {
+            .when(self.failure().is_none(), |this| {
                 this.child(discard_button(theme, self.is_recording()).opacity(content))
             })
     }
@@ -1009,16 +930,6 @@ impl OverlayView {
 
 impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.left_behind == Some(window.window_handle()) {
-            // The pill was dropped elsewhere; closing once it shows there.
-            return div();
-        }
-        if let Some(landing) = self.drag.landing() {
-            // The pill is back in this window from this frame on.
-            after_present(window, cx.entity().downgrade(), move |view, cx| {
-                view.land(landing, cx);
-            });
-        }
         if self.life.stage() == Stage::Off {
             // Gone from the screen: clicks go through until the pill comes
             // back to say the insertion failed, or the window closes.
@@ -1028,6 +939,18 @@ impl Render for OverlayView {
             return div();
         }
         self.tick(window, cx);
+        // The pointer's relative motion can come after its position: catch
+        // up with it before drawing.
+        #[cfg(target_os = "linux")]
+        if let (Some(grab), Some(travel), Some(area)) = (
+            self.drag.grab(),
+            self.pointer_travel(),
+            self.area(window, cx),
+        ) && let Some(then) = grab.travel.filter(|&then| then != travel)
+        {
+            self.spot = Some(grab.at + (travel - then) - grab.offset);
+            self.move_layer(area, window);
+        }
         let viewport = window.viewport_size();
         let (area, origin) = match self.area(window, cx) {
             Some(area) => {
@@ -1048,16 +971,14 @@ impl Render for OverlayView {
             .absolute()
             .size_full()
         });
-        if self.drag.is_covered() {
-            return div().size_full().children(follow);
-        }
-        let pill = self.pill(cx.theme(), Role::Rest).when(
-            self.movable() && self.takes_pointer(),
-            |this| {
+        #[cfg(windows)]
+        crate::ui::platform::set_grip(window, self.grip());
+        let pill = self
+            .pill(cx.theme())
+            .when(self.movable() && self.takes_pointer(), |this| {
                 this.cursor(CursorStyle::OpenHand)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::start_drag))
-            },
-        );
+            });
         self.layout(pill, spot, origin, viewport, area)
             .children(follow)
     }
@@ -1182,53 +1103,6 @@ fn follow_drag(view: WeakEntity<OverlayView>, exits: bool, window: &mut Window) 
                 on(&view, Pointer::Exited, event.position, window, cx);
             }
         });
-    }
-}
-
-/// Run `f` on `view` once the frame `window` draws next has been presented:
-/// its next-frame callbacks run before it draws, and a task spawned there
-/// after that frame was handed to the compositor.
-fn after_present<V: 'static>(
-    window: &mut Window,
-    view: WeakEntity<V>,
-    f: impl FnOnce(&mut V, &mut Context<V>) + 'static,
-) {
-    window.on_next_frame(move |_, cx| {
-        cx.spawn(async move |cx| {
-            let _ = view.update(cx, f);
-        })
-        .detach();
-    });
-}
-
-/// Root of the drag surface: the pill at its spot on the usable area, drawn
-/// from the resting window's state (GPUI redraws it whenever that changes).
-#[cfg(target_os = "linux")]
-struct DragView {
-    overlay: Entity<OverlayView>,
-}
-
-#[cfg(target_os = "linux")]
-impl Render for DragView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let viewport = window.viewport_size();
-        let overlay = self.overlay.downgrade();
-        self.overlay.update(cx, |view, cx| {
-            if view.life.stage() == Stage::Off {
-                return div();
-            }
-            if view.drag.is_held() && !view.drag.is_covered() {
-                // Once this shows the pill, its window can leave it out.
-                after_present(window, overlay, |view, cx| {
-                    view.drag.cover();
-                    cx.notify();
-                });
-            }
-            let area = Bounds::new(Point::default(), view.usable.unwrap_or(viewport));
-            let spot = view.current_spot(area, view.origin(area));
-            let pill = view.pill(cx.theme(), Role::Drag);
-            view.layout(pill, spot, Point::default(), area.size, area)
-        })
     }
 }
 
@@ -1395,6 +1269,7 @@ mod tests {
 
     /// Lay a pill `height` tall out at `spot` in a window at `origin` the
     /// way the flex column does, in window coordinates.
+    #[cfg(target_os = "linux")]
     fn laid_out(
         spot: Point<Pixels>,
         height: f32,
@@ -1415,7 +1290,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_dropped_pill_fits_its_window_and_the_screen_as_the_text_grows() {
+    fn a_dragged_pill_fits_its_window_and_the_screen_as_the_text_grows() {
         let area = Bounds::new(Point::default(), screen().size);
         let window = window_size(3);
         let heights = [80., 102., 124.];
@@ -1427,17 +1302,8 @@ mod tests {
                     let pill = size(px(WIDTH), px(dropped));
                     let spot = clamp_spot(home + delta, pill, area, position);
                     let origin = window_origin(spot, window, area, position);
-                    let (edge, left) = match layer_shell::moved_window_options(
-                        position, origin, window, area.size,
-                    )
-                    .kind
-                    {
-                        WindowKind::LayerShell(options) => {
-                            let margin = options.margin.unwrap();
-                            (margin.0.max(margin.2), margin.3)
-                        }
-                        _ => unreachable!(),
-                    };
+                    let (_, margin) = layer_shell::moved(position, origin, window, area.size);
+                    let (edge, left) = (margin.0.max(margin.2), margin.3);
                     assert!(edge >= px(0.) && left >= px(0.), "{position:?} {delta:?}");
                     for height in [dropped, grown] {
                         let spot =
@@ -1455,25 +1321,6 @@ mod tests {
                         );
                         assert_eq!(on_area.origin.x, spot.x);
                     }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_drag_surface_shows_the_pill_where_it_is_on_the_area() {
-        let area = Bounds::new(Point::default(), screen().size);
-        for position in POSITIONS {
-            let home = home_spot(area, position);
-            for delta in drags() {
-                for height in [80., 124.] {
-                    let spot =
-                        clamp_spot(home + delta, size(px(WIDTH), px(height)), area, position);
-                    let at = laid_out(spot, height, Point::default(), area.size, area, position);
-                    let want = pill_at(spot, height, position);
-                    let off =
-                        (at.origin.x - want.origin.x).abs() + (at.origin.y - want.origin.y).abs();
-                    assert!(off < px(1e-3), "{position:?} {height}: {at:?} vs {want:?}");
                 }
             }
         }

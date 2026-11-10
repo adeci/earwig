@@ -93,6 +93,7 @@
     import json
     import re
     import shlex
+    import subprocess
     import time
     from datetime import timedelta as td
 
@@ -137,6 +138,34 @@
         )
 
 
+    def read_overlay() -> str:
+        """OCR of the band the overlay sits in at home (the bottom 35% of
+        the screen), cropped and scaled up: on the whole screen, tesseract
+        often reads little of the pill's 15 px text among windows and
+        panels. One plain pass: the driver's preprocessed variants of an
+        image this size take tens of seconds of the host's CPU, which the
+        VM's decoder needs."""
+        from pathlib import Path
+        from test_driver.machine.ocr import perform_ocr_on_screenshot
+
+        band = Path(machine.out_dir) / "ocr-band.png"
+        # The driver's own raw screenshot (PPM), which its ImageMagick reads.
+        with machine._managed_screenshot() as full:
+            cropped = subprocess.run(
+                ["magick", full, "-gravity", "south", "-crop", "100%x35%+0+0", "+repage",
+                 "-filter", "Catrom", "-resize", "200%", band],
+                capture_output=True,
+                text=True,
+            )
+        if cropped.returncode != 0:
+            raise Exception(f"cropping the screenshot: {cropped.stderr}")
+        try:
+            return perform_ocr_on_screenshot(band)
+        finally:
+            for f in Path(machine.out_dir).glob("ocr-*.png"):
+                f.unlink()
+
+
     def wait_live_text(shot: str) -> str:
         """After the clip ends, OCR the screen until the overlay shows the
         live transcript (CPU decoding trails the audio); returns the text."""
@@ -145,7 +174,7 @@
 
         def shown(_last_try: bool) -> bool:
             nonlocal text
-            text = machine.get_screen_text()
+            text = read_overlay()
             # Any distinctive word of the clip; OCR over a busy background
             # often mangles one or two of them.
             return any(w in text.lower() for w in ("quick", "brown", "fox", "jumps", "lazy"))

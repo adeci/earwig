@@ -1,11 +1,9 @@
-//! Where a drag of the overlay pill stands, from the press on it to the
-//! moment its window shows it again at the drop spot.
-//!
-//! On layer-shell the pill moves on a separate surface while it is held
-//! (see `overlay.rs`), so two surfaces take turns showing it: the drag
-//! surface covers for the resting window once it has drawn the pill, and
-//! after the drop the resting window (reopened at the drop spot) takes it
-//! back before the drag surface closes.
+//! Where a drag of the overlay pill stands: held from the press on it until
+//! the button comes up, another one goes down, or the window loses the
+//! pointer. The pill's own window follows the pointer meanwhile, still
+//! animated (see `overlay`).
+
+use std::cell::Cell;
 
 use gpui_kit::{MouseButton, Pixels, Point};
 
@@ -13,8 +11,101 @@ use gpui_kit::{MouseButton, Pixels, Point};
 pub struct Grab {
     /// The pointer's offset from the spot it grabbed.
     pub offset: Point<Pixels>,
-    /// That spot.
-    pub from: Point<Pixels>,
+    /// The pointer on the area at the press, in the window then at
+    /// `origin`, and how far it had travelled by then (relative motions
+    /// summed, where the compositor reports them).
+    pub at: Point<Pixels>,
+    pub local: Point<Pixels>,
+    pub origin: Point<Pixels>,
+    pub travel: Option<Point<Pixels>>,
+}
+
+/// What a compositor gives the pointer's position in a surface relative to
+/// while that surface moves under a held button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Anchoring {
+    /// Where the surface was at the press (sway, niri).
+    Press,
+    /// Where it is now, as the protocol has it.
+    Current,
+}
+
+thread_local! {
+    /// This compositor's anchoring, once a drag has shown it.
+    static ANCHORING: Cell<Option<Anchoring>> = const { Cell::new(None) };
+}
+
+/// Pointer travel over which a drag tells the anchorings apart.
+const TELLING: f64 = 24.;
+/// How far from where it pressed the pointer may seem to be in the window,
+/// read as the protocol has it, before that is taken as positions anchored
+/// at the press: following the pointer, the window keeps it within one
+/// motion event of there.
+const ADRIFT: f64 = 16.;
+
+impl Grab {
+    /// The pointer on the area now, from its travel since the press where
+    /// the compositor reports relative motion (it does not for absolute
+    /// devices such as tablets), else from `local` in the window at
+    /// `origin` as this compositor anchors it: as the protocol says until a
+    /// drag has shown otherwise. `free`: the window follows the pointer
+    /// rather than resting against an edge of the area.
+    pub fn pointer(
+        self,
+        travel: Option<Point<Pixels>>,
+        local: Point<Pixels>,
+        origin: Point<Pixels>,
+        free: bool,
+    ) -> Point<Pixels> {
+        if let (Some(then), Some(now)) = (self.travel, travel)
+            && now != then
+        {
+            let pointer = self.at + (now - then);
+            self.learn(pointer, local, origin);
+            return pointer;
+        }
+        if ANCHORING.get().is_none() && free && (local - self.local).magnitude() > ADRIFT {
+            learned(Anchoring::Press, "the pointer drifting in the window");
+        }
+        match ANCHORING.get() {
+            Some(Anchoring::Press) => local + self.origin,
+            _ => local + origin,
+        }
+    }
+
+    /// Note which anchoring puts `local` where the travel says the pointer
+    /// is (to within a quarter of the way, as relative motion may come an
+    /// event late); the other one is off by as far as the window went.
+    fn learn(self, pointer: Point<Pixels>, local: Point<Pixels>, origin: Point<Pixels>) {
+        let travel = (pointer - self.at).magnitude();
+        if ANCHORING.get().is_some()
+            || travel < TELLING
+            || (origin - self.origin).magnitude() < TELLING
+        {
+            return;
+        }
+        let near = |guess: Point<Pixels>| (guess - pointer).magnitude() < travel / 4.;
+        match (near(local + self.origin), near(local + origin)) {
+            (true, false) => learned(Anchoring::Press, "relative motion"),
+            (false, true) => learned(Anchoring::Current, "relative motion"),
+            _ => {}
+        }
+    }
+}
+
+fn learned(anchoring: Anchoring, by: &str) {
+    log::debug!(
+        "the compositor anchors pointer positions in a moving surface at {anchoring:?} (seen by {by})"
+    );
+    ANCHORING.set(Some(anchoring));
+}
+
+/// Whether positions are read as relative to where the window is now, so
+/// the window shifts those the compositor sent before it caught up with a
+/// move (see `vendor/gpui-pre-linux/PATCH.md`).
+#[cfg(target_os = "linux")]
+pub fn reads_current() -> bool {
+    ANCHORING.get() != Some(Anchoring::Press)
 }
 
 /// A pointer event in the window holding the pill.
@@ -43,80 +134,30 @@ impl Pointer {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-enum State {
-    #[default]
-    Still,
-    Held(Grab),
-    /// Let go; numbered so that a late signal never ends a later landing.
-    Landing(u32),
-}
-
 #[derive(Debug, Default)]
-pub struct Drag {
-    state: State,
-    landings: u32,
-    /// The drag surface has shown the held pill, so its window leaves it out.
-    covered: bool,
-}
+pub struct Drag(Option<Grab>);
 
 impl Drag {
-    /// Take hold of the pill; refused while a drag lasts or lands.
+    /// Take hold of the pill; refused while a drag lasts.
     pub fn hold(&mut self, grab: Grab) -> bool {
-        if self.state != State::Still {
+        if self.0.is_some() {
             return false;
         }
-        self.state = State::Held(grab);
+        self.0 = Some(grab);
         true
     }
 
     pub fn grab(&self) -> Option<Grab> {
-        match self.state {
-            State::Held(grab) => Some(grab),
-            _ => None,
-        }
+        self.0
     }
 
     pub fn is_held(&self) -> bool {
-        self.grab().is_some()
+        self.0.is_some()
     }
 
-    /// The drag surface shows the held pill (layer-shell only).
-    #[cfg(any(target_os = "linux", test))]
-    pub fn cover(&mut self) {
-        self.covered = self.is_held();
-    }
-
-    /// Whether the resting window leaves the pill to the drag surface.
-    pub fn is_covered(&self) -> bool {
-        self.covered
-    }
-
-    /// Let go of the pill: its grab and the landing that brings it back to
-    /// its window. From now on that window shows it.
-    pub fn let_go(&mut self) -> Option<(Grab, u32)> {
-        let grab = self.grab()?;
-        self.landings = self.landings.wrapping_add(1);
-        self.state = State::Landing(self.landings);
-        self.covered = false;
-        Some((grab, self.landings))
-    }
-
-    pub fn landing(&self) -> Option<u32> {
-        match self.state {
-            State::Landing(landing) => Some(landing),
-            _ => None,
-        }
-    }
-
-    /// The pill is back in its window after `landing`; whether that ended
-    /// it (rather than having ended already).
-    pub fn land(&mut self, landing: u32) -> bool {
-        if self.state != State::Landing(landing) {
-            return false;
-        }
-        self.state = State::Still;
-        true
+    /// Let go of the pill, where it is; whether it was held.
+    pub fn let_go(&mut self) -> bool {
+        self.0.take().is_some()
     }
 }
 
@@ -126,64 +167,86 @@ mod tests {
 
     use super::*;
 
-    fn grab() -> Grab {
+    fn origin() -> Point<Pixels> {
+        point(px(640.), px(860.))
+    }
+
+    fn grab(travel: bool) -> Grab {
         Grab {
             offset: point(px(10.), px(-20.)),
-            from: point(px(400.), px(1000.)),
+            at: origin() + point(px(300.), px(100.)),
+            local: point(px(300.), px(100.)),
+            origin: origin(),
+            travel: travel.then(|| point(px(-30.), px(7.))),
+        }
+    }
+
+    /// Where the window ends up behind a pointer that goes `steps` 5 px to
+    /// the right, relative to where it should be, on a compositor that
+    /// anchors positions as `truth`, with the pointer's travel known or not.
+    fn drive(truth: Anchoring, travel: bool, steps: usize) -> Point<Pixels> {
+        let grab = grab(travel);
+        let mut origin = self::origin();
+        for step in 1..=steps {
+            #[allow(clippy::cast_precision_loss)]
+            let moved = point(px(5. * step as f32), px(0.));
+            let local = grab.at + moved
+                - match truth {
+                    Anchoring::Press => self::origin(),
+                    Anchoring::Current => origin,
+                };
+            let now = grab.travel.map(|then| then + moved);
+            origin = grab.pointer(now, local, origin, true) - grab.local;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let want = self::origin() + point(px(5. * steps as f32), px(0.));
+        origin - want
+    }
+
+    #[test]
+    fn the_window_follows_the_pointer_by_its_travel_and_learns_the_anchoring() {
+        for truth in [Anchoring::Press, Anchoring::Current] {
+            ANCHORING.set(None);
+            for steps in [1, 3, 40] {
+                let off = drive(truth, true, steps);
+                assert!(off.magnitude() < 1e-3, "{truth:?} {steps}: {off:?}");
+            }
+            assert_eq!(ANCHORING.get(), Some(truth));
+            // A tablet's drag (no relative motion) then follows too.
+            let off = drive(truth, false, 40);
+            assert!(off.magnitude() < 1e-3, "{truth:?} without travel: {off:?}");
         }
     }
 
     #[test]
-    fn a_drag_holds_covers_lets_go_and_lands() {
+    fn without_relative_motion_the_drag_tells_the_anchoring_itself() {
+        ANCHORING.set(None);
+        assert!(drive(Anchoring::Current, false, 40).magnitude() < 1e-3);
+        assert_eq!(ANCHORING.get(), None, "as the protocol says");
+        // Read as the protocol says, positions anchored at the press run
+        // ahead; the drift gives it away within a few events.
+        assert!(drive(Anchoring::Press, false, 40).magnitude() < 1e-3);
+        assert_eq!(ANCHORING.get(), Some(Anchoring::Press));
+    }
+
+    #[test]
+    fn a_drag_holds_and_lets_go_any_number_of_times() {
         let mut drag = Drag::default();
-        assert!(drag.hold(grab()));
-        assert_eq!(drag.grab(), Some(grab()));
-        assert!(
-            !drag.is_covered(),
-            "the resting window shows the pill until the surface does"
-        );
-        drag.cover();
-        assert!(drag.is_covered());
-        let (released, landing) = drag.let_go().unwrap();
-        assert_eq!(released, grab());
-        assert!(
-            !drag.is_covered(),
-            "the window at the drop spot shows the pill"
-        );
-        assert!(!drag.is_held());
-        assert_eq!(drag.landing(), Some(landing));
-        assert!(drag.land(landing));
-        assert_eq!(drag.landing(), None);
-        assert!(drag.hold(grab()), "and the pill can be taken again");
+        for _ in 0..5 {
+            assert!(drag.hold(grab(true)));
+            assert_eq!(drag.grab(), Some(grab(true)));
+            assert!(drag.let_go());
+            assert!(!drag.is_held());
+        }
     }
 
     #[test]
     fn one_drag_at_a_time() {
         let mut drag = Drag::default();
-        assert!(drag.hold(grab()));
-        assert!(!drag.hold(grab()));
-        let (_, landing) = drag.let_go().unwrap();
-        assert!(!drag.hold(grab()), "not while landing");
-        assert!(drag.let_go().is_none(), "nothing held");
-        assert!(drag.land(landing));
-        assert!(!drag.land(landing), "landed once");
-    }
-
-    #[test]
-    fn a_late_signal_ends_no_later_landing_and_covers_nothing() {
-        let mut drag = Drag::default();
-        drag.hold(grab());
-        let (_, first) = drag.let_go().unwrap();
-        // The drag surface's first frame came after the drop.
-        drag.cover();
-        assert!(!drag.is_covered());
-        assert!(drag.land(first));
-        drag.hold(grab());
-        let (_, second) = drag.let_go().unwrap();
-        assert_ne!(first, second);
-        assert!(!drag.land(first), "the first landing's fallback fires late");
-        assert_eq!(drag.landing(), Some(second));
-        assert!(drag.land(second));
+        assert!(drag.hold(grab(true)));
+        assert!(!drag.hold(grab(false)));
+        assert!(drag.let_go());
+        assert!(!drag.let_go(), "nothing held");
     }
 
     #[test]

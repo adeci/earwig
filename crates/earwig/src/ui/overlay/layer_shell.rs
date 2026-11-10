@@ -1,10 +1,14 @@
-//! Window options for the overlay on layer-shell, where a surface cannot
-//! move once mapped: the pill's home window, the window it is reopened in
-//! where it was dropped, and the drag surface over the usable area.
+//! The overlay's window on layer-shell: where it opens, and moving it while
+//! the pill is dragged (through the patched GPUI in `vendor/`, as GPUI only
+//! places a layer surface when it opens it).
 
+use anyhow::bail;
 use earwig_core::config::OverlayPosition;
 use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
-use gpui_kit::{Bounds, Pixels, Point, Size, WindowBounds, WindowKind, WindowOptions, point, px};
+use gpui_kit::{
+    Bounds, Pixels, Point, Size, Window, WindowBounds, WindowKind, WindowOptions, point, px,
+};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{WINDOW_MARGIN, base_options};
 
@@ -63,40 +67,41 @@ fn margins(
     }
 }
 
-/// The window at `origin` on the usable `area`, where a pill was dropped.
-pub(super) fn moved_window_options(
+/// Move the window of size `size` from one origin to another on the usable
+/// `area` (see [`moved`]); with `shift`, pointer positions are in its new
+/// frame at once (see `vendor/gpui-pre-linux/PATCH.md`).
+pub(super) fn move_window(
+    window: &Window,
     position: OverlayPosition,
-    origin: Point<Pixels>,
-    window: Size<Pixels>,
+    (from, origin): (Point<Pixels>, Point<Pixels>),
+    size: Size<Pixels>,
     area: Size<Pixels>,
-) -> WindowOptions {
-    let edge = match position {
-        OverlayPosition::Bottom => area.height - origin.y - window.height,
-        OverlayPosition::Top => origin.y,
+    shift: bool,
+) -> anyhow::Result<()> {
+    let RawWindowHandle::Wayland(handle) = HasWindowHandle::window_handle(window)?.as_raw() else {
+        bail!("the overlay is not a Wayland window");
     };
-    layer_options(
-        edge_anchor(position) | Anchor::LEFT,
-        margins(position, edge, origin.x),
-        window,
-    )
+    let (anchor, margin) = moved(position, origin, size, area);
+    if !gpui_linux::move_layer_surface(handle.surface, anchor, margin, origin - from, shift) {
+        bail!("the overlay is not a layer surface");
+    }
+    Ok(())
 }
 
-/// The surface over the whole usable `area` that shows the pill during a
-/// drag; it takes no input.
-pub(super) fn drag_window_options(position: OverlayPosition, area: Size<Pixels>) -> WindowOptions {
-    // Anchored like the home window, so the two share the area's frame:
-    // centred along the edge, the surface fills the area's width.
-    let options = layer_options(
-        edge_anchor(position),
-        margins(position, px(0.), px(0.)),
-        area,
-    );
-    // The pill follows the pointer at display rate: the surface never has
-    // focus or input of its own, which GPUI would otherwise hold to 30 fps
-    // (and to 30 fps in power-saver mode). Drawn with quads only, its
-    // frames are cheap.
-    WindowOptions {
-        low_power_frame_interval: None,
-        ..options
-    }
+/// Anchor and margins of a window of size `size` at `origin` on the usable
+/// `area`: from the edge at `position` and the left one.
+pub(super) fn moved(
+    position: OverlayPosition,
+    origin: Point<Pixels>,
+    size: Size<Pixels>,
+    area: Size<Pixels>,
+) -> (Anchor, (Pixels, Pixels, Pixels, Pixels)) {
+    let edge = match position {
+        OverlayPosition::Bottom => area.height - origin.y - size.height,
+        OverlayPosition::Top => origin.y,
+    };
+    (
+        edge_anchor(position) | Anchor::LEFT,
+        margins(position, edge, origin.x),
+    )
 }

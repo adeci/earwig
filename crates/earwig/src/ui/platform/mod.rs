@@ -13,7 +13,8 @@
 //!   change of it, to `tx`.
 //!
 //! Windows also has `set_input_region`, as GPUI does not implement
-//! `Window::set_input_region` there, and `autostart`/`set_autostart`.
+//! `Window::set_input_region` there, `set_grip` for the hand cursors GPUI
+//! shows as arrows there, and `autostart`/`set_autostart`.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -33,8 +34,8 @@ use windows as os;
 
 #[cfg(target_os = "linux")]
 pub(crate) use os::usable_area;
+#[cfg(windows)]
+pub(crate) use os::{Grip, autostart, set_autostart, set_grip, set_input_region};
 pub(crate) use os::{
     Popup, TrayHandle, application, follow_accent, home_display, overlay_surface, spawn_tray,
 };
-#[cfg(windows)]
-pub(crate) use os::{autostart, set_autostart, set_input_region};

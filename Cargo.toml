@@ -6,6 +6,7 @@ members = [
   "crates/earwig-transcribe",
   "crates/earwigw",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -80,6 +81,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Pipes",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_UI_HiDpi",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
@@ -89,8 +91,9 @@ x11rb = "0.13"
 xkbcommon = "0.9"
 
 # GPUI comes from the `gpui-pre` snapshot that gpui-component is pinned to;
-# bump them together.
+# bump them together (and rebase `vendor/gpui-pre-linux`).
 gpui-kit = "=0.9.0"
+gpui-pre-linux = "=0.3.11"
 ksni = { version = "0.3", default-features = false, features = [
   "async-io",
   "blocking",
@@ -106,6 +109,12 @@ ttf-parser = "0.25"
 # runtime-loaded backend modules to stage next to the binary). Each target
 # picks its backend in earwig-transcribe: Metal on macOS, Vulkan elsewhere.
 transcribe-cpp = { version = "0.4.1", default-features = false }
+
+# GPUI's Linux platform with one addition: moving a layer surface while it
+# is mapped, which the overlay's drag needs (`move_layer_surface`; see
+# vendor/gpui-pre-linux/PATCH.md).
+[patch.crates-io]
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
