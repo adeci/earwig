@@ -29,6 +29,7 @@ let
       (root + "/Cargo.toml")
       (root + "/Cargo.lock")
       (root + "/crates")
+      (root + "/vendor")
       (root + "/assets")
       (root + "/tests/fixtures")
     ];
@@ -71,7 +72,20 @@ let
     dontUseCmakeConfigure = true;
   };
 
-  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+  cargoArtifacts = craneLib.buildDepsOnly (
+    removeAttrs commonArgs [ "src" ]
+    // {
+      # The patched GPUI crate is a path dependency, which the dependency
+      # build would otherwise stub out like the workspace's own crates.
+      dummySrc = craneLib.mkDummySrc {
+        inherit src;
+        extraDummyScript = ''
+          rm -rf $out/vendor
+          cp -r --no-preserve=mode ${src}/vendor $out/vendor
+        '';
+      };
+    }
+  );
 in
 craneLib.buildPackage (
   commonArgs

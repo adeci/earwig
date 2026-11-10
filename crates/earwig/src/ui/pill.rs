@@ -344,15 +344,12 @@ pub fn paint(bounds: Bounds<Pixels>, edge: &Edge, look: Look, scale: f32, window
 /// The pill at `bounds` switched off as far as `frame` (see [`crt`]): the
 /// pill itself squeezing, its ripples and wide shadow shrinking with it
 /// while the tight one stays under the line and the dot, then the ring the
-/// closing dot releases. With `paths` edges are smooth at any size; without
-/// (an output-sized surface, where paths cost too much) the pill is quads,
-/// snapped to pixels, and no ring.
+/// closing dot releases.
 pub fn paint_crt(
     bounds: Bounds<Pixels>,
     frame: &crt::Frame,
     edge: &Edge,
     look: Look,
-    paths: bool,
     window: &mut Window,
 ) {
     let centre = bounds.center();
@@ -363,13 +360,9 @@ pub fn paint_crt(
         let depth = (off.depth * frame.picture.powf(1.5), off.depth);
         paint_shadow(pill, edge.inward, off, depth, 1., window);
         paint_halo(pill, &look, frame, window);
-        if paths {
-            paint_wave(pill, &edge, off, 1., window);
-        } else {
-            paint_body(pill, off, 1., window);
-        }
+        paint_wave(pill, &edge, off, 1., window);
     }
-    if let Some(ripple) = frame.ripple.filter(|_| paths) {
+    if let Some(ripple) = frame.ripple {
         let ring = Bounds::centered_at(centre, size(px(ripple.diameter), px(ripple.diameter)));
         let mut line = PathBuilder::stroke(px(RIPPLE_STROKE));
         line.add_polygon(&wave_outline(ring, &Edge::default(), 1.), true);

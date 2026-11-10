@@ -1,5 +1,7 @@
 {
   projectRootFile = "flake.nix";
+  # Upstream code, kept as published so its patch stays readable.
+  settings.global.excludes = [ "vendor/**" ];
   programs = {
     rustfmt = {
       enable = true;
