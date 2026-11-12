@@ -1,6 +1,6 @@
 # AGENTS.md
 
-earwig is a local dictation daemon for Linux desktops: hold or tap a hotkey,
+earwig is a local dictation daemon for Linux desktops and macOS: hold or tap a hotkey,
 speak, and the text lands in the focused app. Rust, GPUI for the overlay and
 settings window, transcribe.cpp for speech. NixOS first.
 
@@ -13,10 +13,12 @@ settings window, transcribe.cpp for speech. NixOS first.
 - `crates/earwig`: the binary: CLI, daemon wiring, GPUI overlay, settings
   window, tray.
 - `crates/earwig-core/models.toml`: the curated model catalog.
-- `nix/`: package, NixOS module, model fetchers, dev shell, treefmt, VM tests.
+- `nix/`: package, NixOS module, model fetchers, dev shell, treefmt, VM tests;
+  `nix/darwin/`: earwig.app and the nix-darwin module.
 - `tests/fixtures/`: speech clips for engine and VM tests.
 - `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on macOS
-  and Windows; Linux is the flake's checks.
+  and Windows; Linux is the flake's checks. `macos-app.yml` builds earwig.app
+  from the flake and screenshots the overlay over a dictation.
 
 Per-OS code lives in `linux`, `macos` and `windows` modules behind one
 signature each: `audio/`, `desktop/`, `hotkey/`, `insert/` and `paths/` in

@@ -992,6 +992,8 @@ fn set_pointer_region(window: &Window, pill: Option<Bounds<Pixels>>) {
     // clips on Windows.
     #[cfg(windows)]
     crate::ui::platform::set_input_region(window, pill.map(|pill| pill.dilate(px(INSET))));
+    #[cfg(target_os = "macos")]
+    crate::ui::platform::set_input_region(window, pill);
 }
 
 /// The pill's header: the recording dot, the time recorded, the word count

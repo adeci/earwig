@@ -135,11 +135,15 @@ impl Handle {
     }
 
     pub fn status(&self) -> Status {
-        self.shared
+        let mut status = self
+            .shared
             .status
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .clone();
+        // The user grants these in System Settings, not through earwig.
+        status.permissions = crate::permissions::check();
+        status
     }
 
     /// Settings. Edit through [`ConfigStore::update`], then send
@@ -185,6 +189,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
             },
             insert_methods: inserter.methods(),
             hotkey_sources,
+            permissions: Vec::new(),
         }),
         config: Arc::new(RwLock::new(config)),
         models,

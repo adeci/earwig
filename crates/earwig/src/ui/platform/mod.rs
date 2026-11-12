@@ -12,9 +12,10 @@
 //! - `follow_accent(tx, cx)`: sends the desktop's accent colour, and every
 //!   change of it, to `tx`.
 //!
-//! Windows also has `set_input_region`, as GPUI does not implement
-//! `Window::set_input_region` there, `set_grip` for the hand cursors GPUI
-//! shows as arrows there, and `autostart`/`set_autostart`.
+//! macOS and Windows also have `set_input_region`, as GPUI does not
+//! implement `Window::set_input_region` there, and `autostart`/
+//! `set_autostart`; Windows has `set_grip` for the hand cursors GPUI shows
+//! as arrows there.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -39,3 +40,5 @@ pub(crate) use os::{Grip, autostart, set_autostart, set_grip, set_input_region};
 pub(crate) use os::{
     Popup, TrayHandle, application, follow_accent, home_display, overlay_surface, spawn_tray,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use os::{autostart, set_autostart, set_input_region};
