@@ -29,8 +29,9 @@ imports = [ inputs.earwig.darwinModules.default ];
 services.earwig.enable = true;
 ```
 
-When it first starts, allow earwig in System Settings → Privacy & Security
-under Microphone and Accessibility.
+When it first starts, and again after an update (macOS ties the permissions to
+the exact build), earwig asks for Microphone and Accessibility: allow both in
+System Settings → Privacy & Security.
 
 Elsewhere, `nix profile install github:adeci/earwig` and start `earwig daemon`
 with your session.
@@ -41,10 +42,10 @@ zip) and start earwig from the Start menu.
 
 ## Hotkey
 
-Hold or tap the hotkey: Right Command on macOS, Right Ctrl on Windows (pick
-another in the settings), Ctrl+Space on Linux. GNOME and KDE set it up when
-earwig first starts; elsewhere, bind it as [docs/desktops.md](docs/desktops.md)
-shows.
+Hold or tap the hotkey: Super+Space on Linux, Option+Space on macOS,
+Ctrl+Space on Windows; record another in the settings. On Linux earwig reads
+the keyboard itself once allowed, as [docs/desktops.md](docs/desktops.md)
+explains.
 
 ## Models
 

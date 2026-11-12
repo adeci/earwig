@@ -102,6 +102,16 @@ pub struct Motion {
 }
 
 impl Motion {
+    /// Motion whose water ripples the same way every time, for tests.
+    #[cfg(test)]
+    pub fn seeded(seed: u64) -> Self {
+        Self {
+            heights: [0.; BANDS],
+            falling: [0.; BANDS],
+            water: Ring::seeded(seed),
+        }
+    }
+
     /// Advance by `dt` seconds. `voice` is the latest reading while
     /// recording, `None` once recording stopped, which lets the pill settle.
     pub fn step(&mut self, dt: f32, voice: Option<&Spectrum>) -> Edge {

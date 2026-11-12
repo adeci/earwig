@@ -229,6 +229,7 @@ mod tests {
             },
             insert_methods: Vec::new(),
             hotkey_sources: vec!["socket".into()],
+            hotkey: crate::events::HotkeyStatus::default(),
             permissions: Vec::new(),
         };
         let shared = Arc::new(Shared {

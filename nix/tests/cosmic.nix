@@ -20,6 +20,9 @@ in
     {
       imports = [ common.machine ];
 
+      # The fallback without keyboard access: a compositor shortcut.
+      services.earwig.keyboardAccess = false;
+
       services.getty.autologinUser = lib.mkForce null;
 
       services.displayManager.cosmic-greeter.enable = true;

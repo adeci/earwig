@@ -30,7 +30,7 @@
 [[model]]
 id = "parakeet-unified-en-0.6b"
 name = "Parakeet Unified 0.6B"
-summary = "The best all-round model for English; the text is ready the moment you stop."
+summary = "The best all-round model for English."
 repo = "handy-computer/parakeet-unified-en-0.6b-gguf"
 file = "parakeet-unified-en-0.6b-Q8_0.gguf"
 revision = "7e948f21b7bdbac698d3318db9d350f1096f3b6c"
@@ -50,7 +50,7 @@ cpu_speed = 13.955
 [[model]]
 id = "parakeet-tdt-ctc-110m"
 name = "Parakeet TDT-CTC 110M"
-summary = "Tiny English model, nearly instant even on a slow processor."
+summary = "Tiny and fast, for English."
 repo = "handy-computer/parakeet-tdt_ctc-110m-gguf"
 file = "parakeet-tdt_ctc-110m-Q8_0.gguf"
 revision = "1c3f0d5378fdd358905cc410a93ed9e64f52d170"
@@ -69,7 +69,7 @@ cpu_speed = 50.03
 [[model]]
 id = "Qwen3-ASR-1.7B"
 name = "Qwen3-ASR 1.7B"
-summary = "Top accuracy in 30 languages; slow without a graphics card."
+summary = "Top accuracy in 30 languages."
 repo = "handy-computer/Qwen3-ASR-1.7B-gguf"
 file = "Qwen3-ASR-1.7B-Q8_0.gguf"
 revision = "0e0a596e3959c3f3f2ab7d443a5b6f0f4a4bba6f"
@@ -120,7 +120,7 @@ cpu_speed = 2.47
 [[model]]
 id = "parakeet-ultra"
 name = "Parakeet Ultra"
-summary = "The most accurate in 25 European languages; it detects which one you speak."
+summary = "The most accurate in 25 European languages."
 repo = "handy-computer/parakeet-ultra-gguf"
 file = "parakeet-ultra-Q8_0.gguf"
 revision = "a1539be1b849ea7463b88343e5277b373d0c4ea9"
@@ -164,7 +164,7 @@ cpu_speed = 13.29
 [[model]]
 id = "nemotron-3.5-asr-streaming-0.6b"
 name = "Nemotron Streaming 3.5"
-summary = "Streams in 28 languages, from English to Japanese and Arabic."
+summary = "Streams in 28 languages."
 repo = "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf"
 file = "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
 revision = "53ce288f69326b415aeef030cfcb02a08a8096dd"

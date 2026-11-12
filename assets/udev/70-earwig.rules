@@ -1,0 +1,5 @@
+# earwig: the user at the seat may read keyboards, to see the dictation key
+# on any desktop, and make virtual keyboards, to keep that key from other
+# apps. uaccess must be tagged before 73-seat-late.rules applies it.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

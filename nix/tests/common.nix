@@ -293,13 +293,25 @@
         print(machine.succeed("journalctl _UID=1000 _SYSTEMD_USER_UNIT=earwig.service -o cat --no-pager | grep -E 'final text|done [0-9]+ ms' || true"))
 
 
+    # The keys QEMU taps for the hotkey where earwig reads the keyboard
+    # itself; None drives it through the CLI, as a compositor bind would.
+    HOTKEY_KEYS: str | None = None
+
+
     def dictate() -> str:
-        """Hold the hotkey (via the CLI, like a compositor bind) over the clip;
-        returns the OCR'd screen while recording."""
-        as_alice("earwig press")
+        """Hold the hotkey over the clip (or tap `HOTKEY_KEYS` before and
+        after it); returns the OCR'd screen while recording."""
+        if HOTKEY_KEYS:
+            machine.send_key(HOTKEY_KEYS)
+            wait_status(lambda s: s["state"]["state"] == "recording", "recording", timeout=30)
+        else:
+            as_alice("earwig press")
         play_clip()
         text = wait_live_text("overlay_recording")
-        as_alice("earwig release")
+        if HOTKEY_KEYS:
+            machine.send_key(HOTKEY_KEYS)
+        else:
+            as_alice("earwig release")
         return text
   '';
 

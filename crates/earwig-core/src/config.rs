@@ -45,24 +45,35 @@ pub struct HotkeyConfig {
     pub mode: ActivationMode,
     /// A release this soon after the press counts as a tap.
     pub hold_threshold_ms: u64,
-    /// The key earwig watches for itself on macOS and Windows, in the syntax
-    /// of [`crate::hotkey::trigger`]: a lone modifier (`RightCtrl`) or a
-    /// chord (`Ctrl+Space`).
+    /// The key earwig watches itself (on Linux by reading the keyboards,
+    /// which needs keyboard access), in the syntax of
+    /// [`crate::hotkey::Hotkey`]: a key with modifiers (`Super+Space`) or
+    /// modifiers alone (`RightCtrl`). Empty for none: compositor binds
+    /// (`earwig press`) or the GlobalShortcuts portal only.
     pub key: String,
-    /// Register with the GlobalShortcuts portal when the desktop offers it.
+    /// Linux: keep a key with modifiers from other apps and the compositor
+    /// by holding the keyboards that have it (every other key passes on
+    /// through a virtual keyboard). macOS and Windows always do.
+    pub block: bool,
+    /// Register with the GlobalShortcuts portal when the desktop offers it
+    /// and earwig cannot watch the key itself.
     pub portal: bool,
     /// Trigger suggested to the portal, in XDG shortcut syntax.
     pub portal_trigger: String,
 }
 
 impl HotkeyConfig {
-    /// Right Ctrl on Windows: alone it does nothing in Windows or in common
-    /// apps, and a one-key hold is easy to do without looking.
-    #[cfg(not(target_os = "macos"))]
-    pub const DEFAULT_KEY: &str = "RightCtrl";
-    /// Right Command: alone it does nothing in macOS or in common apps.
+    /// Super+Space. Where earwig may hold the keyboards the compositor never
+    /// sees it (GNOME switches input sources with it, sway's sample config
+    /// toggles floating focus).
+    #[cfg(target_os = "linux")]
+    pub const DEFAULT_KEY: &str = "Super+Space";
+    /// Option+Space: macOS keeps Command+Space for Spotlight and
+    /// Control+Space for input sources.
     #[cfg(target_os = "macos")]
-    pub const DEFAULT_KEY: &str = "RightCmd";
+    pub const DEFAULT_KEY: &str = "Option+Space";
+    #[cfg(windows)]
+    pub const DEFAULT_KEY: &str = "Ctrl+Space";
 }
 
 impl Default for HotkeyConfig {
@@ -71,6 +82,7 @@ impl Default for HotkeyConfig {
             mode: ActivationMode::HoldOrToggle,
             hold_threshold_ms: 300,
             key: Self::DEFAULT_KEY.into(),
+            block: true,
             portal: true,
             portal_trigger: "CTRL+space".into(),
         }
@@ -521,6 +533,18 @@ mod tests {
         assert_eq!(written.trim(), "[history]\nlimit = 10");
         assert_eq!(store.config().history.limit, 10);
         assert_eq!(store.config().overlay.position, OverlayPosition::Top);
+    }
+
+    #[test]
+    fn a_setting_set_back_to_its_default_leaves_the_user_file() {
+        let (_dir, mut store) = store("", "");
+        store.update(|c| c.hotkey.key = "RightCtrl".into()).unwrap();
+        store
+            .update(|c| c.hotkey.key = HotkeyConfig::DEFAULT_KEY.into())
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "");
+        assert_eq!(store.config().hotkey.key, HotkeyConfig::DEFAULT_KEY);
     }
 
     #[test]

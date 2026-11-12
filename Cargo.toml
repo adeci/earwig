@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/earwig",
   "crates/earwig-core",
+  "crates/earwig-keys",
   "crates/earwig-transcribe",
   "crates/earwigw",
 ]
@@ -17,6 +18,7 @@ rust-version = "1.92"
 
 [workspace.dependencies]
 earwig-core = { path = "crates/earwig-core" }
+earwig-keys = { path = "crates/earwig-keys" }
 earwig-transcribe = { path = "crates/earwig-transcribe" }
 
 anyhow = "1"
@@ -96,7 +98,8 @@ x11rb = "0.13"
 xkbcommon = "0.9"
 
 # GPUI comes from the `gpui-pre` snapshot that gpui-component is pinned to;
-# bump them together (and rebase `vendor/gpui-pre-linux`).
+# bump them together (and rebase `vendor/gpui-pre-linux` and
+# `vendor/gpui-pre-macos`).
 gpui-kit = "=0.9.0"
 gpui-pre-linux = "=0.3.11"
 ksni = { version = "0.3", default-features = false, features = [
@@ -117,9 +120,12 @@ transcribe-cpp = { version = "0.4.1", default-features = false }
 
 # GPUI's Linux platform with one addition: moving a layer surface while it
 # is mapped, which the overlay's drag needs (`move_layer_surface`; see
-# vendor/gpui-pre-linux/PATCH.md).
+# vendor/gpui-pre-linux/PATCH.md). Its macOS platform with one fix: a live
+# resize no longer shows display-link frames stretched to the window's next
+# size (vendor/gpui-pre-macos/PATCH.md).
 [patch.crates-io]
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

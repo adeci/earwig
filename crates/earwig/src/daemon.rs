@@ -95,7 +95,8 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     log::info!("listening on {}", socket.display());
 
     // Privacy permissions (macOS): the system asks for what is missing
-    // once; until it is all granted, the settings window says what is.
+    // once per build; until it is all granted, the settings window says
+    // what is.
     let missing = permissions::ask_once(&paths::state_dir());
     for permission in &missing {
         log::warn!("{}", permissions::missing_message(*permission));

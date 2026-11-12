@@ -143,6 +143,8 @@ impl Handle {
             .clone();
         // The user grants these in System Settings, not through earwig.
         status.permissions = crate::permissions::check();
+        // Access and the keyboards plugged in change on their own too.
+        status.hotkey = crate::hotkey::status();
         status
     }
 
@@ -189,6 +191,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
             },
             insert_methods: inserter.methods(),
             hotkey_sources,
+            hotkey: crate::events::HotkeyStatus::default(),
             permissions: Vec::new(),
         }),
         config: Arc::new(RwLock::new(config)),

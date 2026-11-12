@@ -8,6 +8,7 @@
 //! per app id, which is why [`register_app_id`] runs first. When the portal
 //! does not work, [`HotkeySource::run`] logs at info and returns `Ok`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::bail;
@@ -25,6 +26,9 @@ const CANCEL: &str = "cancel";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Binding may wait for the user to confirm in a dialog.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The shortcut is bound and the portal sends its edges.
+pub(super) static BOUND: AtomicBool = AtomicBool::new(false);
 
 pub struct PortalShortcuts {
     trigger: String,
@@ -94,6 +98,7 @@ impl PortalShortcuts {
                 shortcut.trigger_description()
             );
         }
+        BOUND.store(true, Ordering::Relaxed);
 
         loop {
             let edge = future::or(
@@ -131,7 +136,9 @@ impl HotkeySource for PortalShortcuts {
 
     fn run(self: Box<Self>, commands: flume::Sender<Command>) -> anyhow::Result<()> {
         register_app_id();
-        async_io::block_on(self.serve(commands))
+        let result = async_io::block_on(self.serve(commands));
+        BOUND.store(false, Ordering::Relaxed);
+        result
     }
 }
 

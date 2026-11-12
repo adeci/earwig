@@ -2,16 +2,17 @@
 
 use earwig_core::config::Config;
 use earwig_core::history::HistoryEntry;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, ClickEvent, Entity, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, div,
 };
 
-use super::{item, spaced};
+use super::{SIDEBAR_WIDTH, item, spaced};
 use crate::ui::{UiState, config, edit_config, now_ms};
 
 /// The choices for Entries kept.
@@ -47,7 +48,7 @@ pub fn page(view: &Entity<HistoryPage>, settings: &Config, cx: &App) -> SettingP
     SettingPage::new("History")
         .icon(IconName::Inbox)
         .resettable(false)
-        .title_suffix(move |_, cx| clear_all(&view, cx))
+        .title_suffix(move |window, cx| clear_all(&view, window, cx))
         .groups(spaced(vec![
             SettingGroup::new().items([
                 item(
@@ -81,8 +82,12 @@ pub fn page(view: &Entity<HistoryPage>, settings: &Config, cx: &App) -> SettingP
         ]))
 }
 
-/// Clear all beside the title; once clicked, its question in its place.
-fn clear_all(view: &Entity<HistoryPage>, cx: &App) -> AnyElement {
+/// Clear all at the right end of the header, and once clicked its question
+/// in its place; nothing while there is nothing to clear. gpui-kit puts the
+/// header's suffix right after the title, so this one spans the rest of the
+/// header: the page (the window less the sidebar) less the header's padding
+/// of a rem on each side.
+fn clear_all(view: &Entity<HistoryPage>, window: &Window, cx: &App) -> AnyElement {
     let count = UiState::handle(cx).history().len();
     if count == 0 {
         return div().into_any_element();
@@ -96,52 +101,65 @@ fn clear_all(view: &Entity<HistoryPage>, cx: &App) -> AnyElement {
             });
         }
     };
-    if !view.read(cx).asking {
-        return Button::new("clear-history")
+    let controls = if view.read(cx).asking {
+        let delete = {
+            let view = view.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if view.update(cx, |page, _| page.confirm()) {
+                    if let Err(e) = UiState::handle(cx).history().clear() {
+                        log::error!("clearing history: {e}");
+                    }
+                    cx.refresh_windows();
+                }
+            }
+        };
+        h_flex()
+            .gap_2()
+            .child(div().text_sm().child(question(count)))
+            .child(
+                Button::new("keep-history")
+                    .label("Cancel")
+                    .ghost()
+                    .small()
+                    .on_click(answer(HistoryPage::keep)),
+            )
+            .child(
+                Button::new("delete-history")
+                    .label("Delete")
+                    .danger()
+                    .small()
+                    .on_click(delete),
+            )
+            .into_any_element()
+    } else {
+        Button::new("clear-history")
             .label("Clear all")
-            .icon(IconName::Delete)
+            .icon(IconName::Trash)
             .ghost()
             .small()
             .on_click(answer(HistoryPage::ask))
-            .into_any_element();
-    }
-    let delete = {
-        let view = view.clone();
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            if view.update(cx, |page, _| page.confirm()) {
-                if let Err(e) = UiState::handle(cx).history().clear() {
-                    log::error!("clearing history: {e}");
-                }
-                cx.refresh_windows();
-            }
-        }
+            .into_any_element()
     };
-    h_flex()
-        .gap_2()
-        .child(div().pl_2().text_sm().child(question(count)))
-        .child(
-            Button::new("keep-history")
-                .label("Cancel")
-                .ghost()
-                .small()
-                .on_click(answer(HistoryPage::keep)),
-        )
-        .child(
-            Button::new("delete-history")
-                .label("Delete")
-                .danger()
-                .small()
-                .on_click(delete),
-        )
+    let width = window.viewport_size().width - SIDEBAR_WIDTH - window.rem_size() * 2.;
+    div()
+        .absolute()
+        .left_0()
+        .top_0()
+        .bottom_0()
+        .w(width)
+        .flex()
+        .items_center()
+        .justify_end()
+        .child(controls)
         .into_any_element()
 }
 
 /// What Clear all asks before deleting `count` transcripts.
 fn question(count: usize) -> String {
     if count == 1 {
-        "Delete 1 transcript? This can't be undone.".into()
+        "Delete 1 transcript?".into()
     } else {
-        format!("Delete all {count} transcripts? This can't be undone.")
+        format!("Delete all {count} transcripts?")
     }
 }
 
@@ -166,9 +184,9 @@ fn entries(cx: &App) -> impl IntoElement + use<> {
     let entries = handle.history().entries();
     let muted = cx.theme().muted_foreground;
     let empty = if !config(handle).history.enabled {
-        Some("History is off: new transcripts are not kept.")
+        Some("History is off.")
     } else if entries.is_empty() {
-        Some("Nothing yet. Transcripts show up here after you dictate.")
+        Some("Transcripts show up here after you dictate.")
     } else {
         None
     };
@@ -278,10 +296,7 @@ mod tests {
 
     #[test]
     fn clear_all_says_how_many_go() {
-        assert_eq!(
-            question(12),
-            "Delete all 12 transcripts? This can't be undone."
-        );
-        assert_eq!(question(1), "Delete 1 transcript? This can't be undone.");
+        assert_eq!(question(12), "Delete all 12 transcripts?");
+        assert_eq!(question(1), "Delete 1 transcript?");
     }
 }
