@@ -21,8 +21,11 @@ pub mod hooks;
 pub mod hotkey;
 pub mod insert;
 pub mod ipc;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod models;
 pub mod paths;
+pub mod permissions;
 pub mod session;
 pub mod spectrum;
 #[cfg(windows)]

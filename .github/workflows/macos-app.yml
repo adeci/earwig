@@ -1,0 +1,68 @@
+# earwig.app from the flake on Apple silicon: the bundle's signature, and the
+# overlay over a real dictation (a speech clip stands in for the microphone).
+name: macOS app
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - name: Build earwig.app
+        run: nix build .#packages.aarch64-darwin.default -L
+
+      - name: Check the bundle
+        run: |
+          codesign --verify --deep --strict --verbose=2 result/Applications/earwig.app
+          codesign -dv result/Applications/earwig.app 2>&1 | grep -E 'Identifier|Signature'
+          plutil -lint result/Applications/earwig.app/Contents/Info.plist
+          test "$(defaults read "$PWD/result/Applications/earwig.app/Contents/Info" LSUIElement)" = 1
+
+      - name: Fetch the default model
+        run: |
+          rev=7e948f21b7bdbac698d3318db9d350f1096f3b6c
+          dir="$HOME/Library/Application Support/earwig/models/handy-computer/parakeet-unified-en-0.6b-gguf/$rev"
+          mkdir -p "$dir"
+          curl -sSfL -o "$dir/parakeet-unified-en-0.6b-Q8_0.gguf" \
+            "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf/resolve/$rev/parakeet-unified-en-0.6b-Q8_0.gguf"
+
+      - name: Dictate with the overlay up
+        run: |
+          mkdir -p shots
+          # The pill holds still when the system asks for reduced motion.
+          defaults read com.apple.universalaccess reduceMotion || true
+          defaults write com.apple.universalaccess reduceMotion -bool false || true
+          echo 'overlay.max_lines = 2' > "$HOME/Library/Application Support/earwig/config.toml"
+          EARWIG_AUDIO_FILE=tests/fixtures/dictation-sentences.wav RUST_LOG=info \
+            result/Applications/earwig.app/Contents/MacOS/earwig daemon 2> shots/daemon.log &
+          for _ in $(seq 60); do result/bin/earwig status 2>/dev/null | grep -q '"state": "ready"' && break; sleep 2; done
+          result/bin/earwig status | tee shots/status.json
+          result/bin/earwig toggle
+          for shot in 1 2 3; do
+            sleep 3
+            screencapture -x shots/overlay-$shot.png
+          done
+          result/bin/earwig toggle
+          for _ in $(seq 30); do sleep 1; result/bin/earwig status | grep -q '"state": "idle"' && break; done
+          pbpaste > shots/clipboard.txt
+          cat shots/clipboard.txt
+          result/bin/earwig quit || kill %1
+          wait
+          grep -qi "dictation" shots/clipboard.txt
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: macos-app
+          path: shots

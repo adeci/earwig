@@ -19,6 +19,12 @@ pub(super) fn input_devices(_configured: Option<&str>) -> anyhow::Result<InputDe
 }
 
 pub(super) fn open(device: Option<&str>, tx: flume::Sender<Raw>) -> anyhow::Result<Opened> {
+    // Without Microphone access macOS hands out silence, not an error.
+    if crate::macos::microphone_allowed() == Some(false) {
+        anyhow::bail!(crate::permissions::missing_message(
+            crate::permissions::Permission::Microphone
+        ));
+    }
     let (device, id) = super::cpal_input(device, uid)?;
     let (stream, rate) = super::open_cpal(&device, &id, tx)?;
     Ok(Opened {

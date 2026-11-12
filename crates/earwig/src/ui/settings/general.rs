@@ -33,8 +33,17 @@ use crate::ui::{UiState, apply_appearance, config, edit_config};
 /// Search words for the Hotkey group's rows, whose titles do not say them.
 const HOTKEY_KEYWORDS: [&str; 4] = ["hotkey", "shortcut", "key", "bind"];
 
-/// The keys offered on Windows, which do nothing there on their own, by
-/// their config names.
+/// The keys offered on macOS and Windows, which do nothing there on their
+/// own, by their config names.
+#[cfg(target_os = "macos")]
+const KEYS: [(&str, &str); 5] = [
+    ("RightCmd", "Right Command"),
+    ("RightAlt", "Right Option"),
+    ("RightShift", "Right Shift"),
+    ("RightCtrl", "Right Control"),
+    ("Ctrl+Space", "Control+Space"),
+];
+#[cfg(not(target_os = "macos"))]
 const KEYS: [(&str, &str); 5] = [
     ("RightCtrl", "Right Ctrl"),
     ("RightAlt", "Right Alt"),
@@ -60,6 +69,16 @@ pub fn page(pill: &Entity<PillPreview>, settings: &Config, cx: &App) -> SettingP
             })],
         ));
     }
+    #[cfg(target_os = "macos")]
+    let permissions = earwig_core::permissions::check();
+    #[cfg(target_os = "macos")]
+    let missing = permissions
+        .iter()
+        .any(|status| status.access != earwig_core::permissions::Access::Granted);
+    #[cfg(target_os = "macos")]
+    if missing {
+        groups.push(permissions_group(&permissions));
+    }
     groups.extend([
         hotkey(settings, cx),
         microphone(settings, cx),
@@ -67,18 +86,22 @@ pub fn page(pill: &Entity<PillPreview>, settings: &Config, cx: &App) -> SettingP
     ]);
     #[cfg(target_os = "linux")]
     groups.push(typing(cx));
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     groups.push(startup());
+    #[cfg(target_os = "macos")]
+    if !missing {
+        groups.push(permissions_group(&permissions));
+    }
     SettingPage::new("General")
         .icon(IconName::Settings2)
         .resettable(false)
         .groups(spaced(groups))
 }
 
-/// The hotkey: the key, where earwig watches one itself (Windows); what a
+/// The hotkey: the key, where earwig watches one itself (macOS, Windows); what a
 /// press does; and a line on where the key is set.
 fn hotkey(settings: &Config, cx: &App) -> SettingGroup {
-    let key = cfg!(windows).then(|| key_label(&settings.hotkey.key));
+    let key = cfg!(any(windows, target_os = "macos")).then(|| key_label(&settings.hotkey.key));
     let mode = item(
         cx,
         "hotkey.mode",
@@ -97,7 +120,7 @@ fn hotkey(settings: &Config, cx: &App) -> SettingGroup {
     .keywords(HOTKEY_KEYWORDS);
     let help = hotkey_help(&UiState::caps(cx).desktop, &settings.hotkey.key);
     let help = SettingItem::render(move |_, _, cx| help_line(&help, cx)).keywords(HOTKEY_KEYWORDS);
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let items = [
         item(
             cx,
@@ -110,13 +133,13 @@ fn hotkey(settings: &Config, cx: &App) -> SettingGroup {
         mode,
         help,
     ];
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     let items = [mode, help];
     section("Hotkey", None, items)
 }
 
 /// [`KEYS`], and whatever key is configured besides.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn key_dropdown(settings: &Config) -> SettingField<SharedString> {
     let mut options: Vec<(SharedString, SharedString)> = KEYS
         .iter()
@@ -166,7 +189,7 @@ enum HotkeyHelp {
 fn hotkey_help(desktop: &str, key: &str) -> HotkeyHelp {
     let desktops: Vec<&str> = desktop.split(':').collect();
     let is = |name: &str| desktops.iter().any(|d| d.eq_ignore_ascii_case(name));
-    if is("windows") {
+    if is("windows") || is("macos") {
         HotkeyHelp::Text(key_help(key).into())
     } else if is("kde") {
         HotkeyHelp::Text("Change the key in System Settings → Keyboard → Shortcuts.".into())
@@ -424,14 +447,19 @@ fn insert_method_label(method: InsertMethod) -> &'static str {
     }
 }
 
-/// Starting with the session: the per-user sign-in entry on Windows.
-#[cfg(windows)]
+/// Starting with the session: the per-user sign-in entry on Windows, a
+/// launch agent on macOS.
+#[cfg(any(windows, target_os = "macos"))]
 fn startup() -> SettingGroup {
     section(
         "Startup",
         None,
         [SettingItem::new(
-            "Start at sign-in",
+            if cfg!(windows) {
+                "Start at sign-in"
+            } else {
+                "Start at login"
+            },
             SettingField::switch(
                 |_: &App| crate::ui::platform::autostart(),
                 |enabled, cx: &mut App| {
@@ -442,6 +470,68 @@ fn startup() -> SettingGroup {
                 },
             ),
         )],
+    )
+}
+
+/// Microphone and Accessibility, each granted or with a way to System
+/// Settings.
+#[cfg(target_os = "macos")]
+fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) -> SettingGroup {
+    use earwig_core::permissions::{self, Access};
+    use gpui_kit::IntoElement as _;
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    let items: Vec<SettingItem> = statuses
+        .iter()
+        .map(|status| {
+            let permission = status.permission;
+            let granted = status.access == Access::Granted;
+            SettingItem::render(move |_, _, cx| {
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .child(div().text_sm().child(permission.label()))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("To {}.", permission.purpose())),
+                            ),
+                    )
+                    .child(if granted {
+                        div().text_sm().child("Allowed").into_any_element()
+                    } else {
+                        h_flex()
+                            .gap_3()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child("Not allowed"),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("allow-{permission:?}")))
+                                    .primary()
+                                    .small()
+                                    .label("Open System Settings")
+                                    .on_click(move |_, _, _| {
+                                        permissions::request(permission);
+                                        permissions::open_settings(permission);
+                                    }),
+                            )
+                            .into_any_element()
+                    })
+            })
+        })
+        .collect();
+    section(
+        "Permissions",
+        Some("macOS lets earwig hear you, see the hotkey and paste only once you allow it."),
+        items,
     )
 }
 
@@ -625,6 +715,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_help_names_the_key_as_a_mac_keyboard_does() {
+        let HotkeyHelp::Text(alt) = hotkey_help("macos", "RightAlt") else {
+            panic!("macOS points to no setup guide");
+        };
+        assert!(alt.contains("Right Option"), "{alt}");
+        assert_eq!(
+            mode_description(ActivationMode::HoldOrToggle, Some(key_label("RightCmd"))),
+            "Hold Right Command to talk, or tap it to toggle."
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
     fn windows_help_describes_the_configured_key() {
         let help = |key| match hotkey_help("windows", key) {
             HotkeyHelp::Text(text) => text.to_string(),

@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::models::ModelSpec;
+use crate::permissions::PermissionStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
@@ -138,4 +139,8 @@ pub struct Status {
     pub insert_methods: Vec<InsertMethod>,
     /// Hotkey sources running in this session, e.g. `socket`, `portal`.
     pub hotkey_sources: Vec<String>,
+    /// Privacy permissions the user grants by hand (macOS), as of this
+    /// snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<PermissionStatus>,
 }

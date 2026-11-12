@@ -33,7 +33,17 @@ impl TrayHandle {
         } else {
             (&self.busy, "Stop dictation", "earwig: finishing")
         };
-        if let Err(e) = self.tray.set_icon(Some(icon.clone())) {
+        // On macOS the idle icon is a template, drawn in the menu bar's own
+        // colour; the dictating one stays red.
+        #[cfg(target_os = "macos")]
+        let set = if idle {
+            self.tray.set_icon_templated(Some(icon.clone()))
+        } else {
+            self.tray.set_icon(Some(icon.clone()))
+        };
+        #[cfg(not(target_os = "macos"))]
+        let set = self.tray.set_icon(Some(icon.clone()));
+        if let Err(e) = set {
             log::debug!("updating the tray icon: {e}");
         }
         let _ = self.tray.set_tooltip(Some(tooltip));
@@ -91,10 +101,14 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
             let _ = local.send(Local::ShowSettings);
         }
     }));
-    let tray = TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         .with_id("earwig")
-        .with_tooltip("earwig: ready")
-        .with_icon(idle.clone())
+        .with_tooltip("earwig: ready");
+    #[cfg(target_os = "macos")]
+    let builder = builder.with_icon_templated(idle.clone());
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.with_icon(idle.clone());
+    let tray = builder
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(cfg!(target_os = "macos"))
         .build()?;
