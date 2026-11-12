@@ -320,7 +320,12 @@ mod tests {
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn preview_speaks_while_a_slider_moves_then_settles() {
-        let mut demo = Demo::default();
+        // How long the pill takes to settle depends on how the water's
+        // kicks happen to vary: the same way every run.
+        let mut demo = Demo {
+            motion: Motion::seeded(1),
+            ..Demo::default()
+        };
         // A slider dragged a step every frame for a second, then let go.
         let frames = run(&mut demo, Instant::now(), 200, |i| {
             look(0.5 + 0.005 * i.min(60) as f32)

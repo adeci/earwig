@@ -20,6 +20,9 @@ in
     {
       imports = [ common.machine ];
 
+      # The fallback without keyboard access: the GlobalShortcuts portal.
+      services.earwig.keyboardAccess = false;
+
       # The display manager logs alice in; a second autologin on tty1 would
       # only add a console session.
       services.getty.autologinUser = lib.mkForce null;

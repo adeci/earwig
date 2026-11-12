@@ -3,9 +3,10 @@
 //! [`ipc`] and [`controller::Handle`].
 //!
 //! Each OS fills the same slots: [`audio`] (`input_devices`, `open`),
-//! [`desktop`] (`probe`), [`hotkey`] (`sources`), [`insert`] (`backends`),
-//! [`paths`], [`ipc`] (transport) and [`hooks`] (process tree), each with a
-//! `linux`, `macos` and `windows` module behind one signature.
+//! [`desktop`] (`probe`), [`insert`] (`backends`), [`paths`], [`ipc`]
+//! (transport) and [`hooks`] (process tree), each with a `linux`, `macos`
+//! and `windows` module behind one signature. [`hotkey`] watches the
+//! keyboard through earwig-keys, which does the same per OS.
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("earwig runs on Linux, macOS and Windows");

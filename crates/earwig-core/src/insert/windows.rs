@@ -10,6 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
+use earwig_keys::SYNTHETIC;
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GlobalFree, HANDLE, HWND};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
@@ -32,7 +33,6 @@ use super::{InsertError, Inserter};
 use crate::config::{InsertConfig, InsertSetting};
 use crate::desktop::DesktopCaps;
 use crate::events::InsertMethod;
-use crate::hotkey::INJECTED;
 use crate::win32::{is, owned, scan_code};
 
 /// Executables (without `.exe`, compared ASCII case-insensitively) that
@@ -183,7 +183,7 @@ fn paste(shift: bool) -> anyhow::Result<()> {
                     wScan: scan_code(vk),
                     dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
                     time: 0,
-                    dwExtraInfo: INJECTED,
+                    dwExtraInfo: SYNTHETIC,
                 },
             },
         })

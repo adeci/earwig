@@ -17,16 +17,27 @@ in
       earwig, local dictation for the graphical session.
 
       This installs the `earwig` command and a systemd user service that
-      starts with `graphical-session.target`. The desktop must provide the
-      rest:
-      - niri, sway, Hyprland: bind keys to `earwig press` / `earwig release`
-        (or `earwig toggle`) and `earwig cancel` in the compositor config;
-        text is inserted through the input-method and virtual-keyboard
-        protocols the compositor already offers.
-      - GNOME, KDE: enable `xdg.portal` with the desktop's backend
-        (`xdg-desktop-portal-gnome` / `-kde`); earwig registers its shortcut
-        through the GlobalShortcuts portal and types through RemoteDesktop.
+      starts with `graphical-session.target`. earwig watches its hotkey itself
+      (see `keyboardAccess`); the desktop must provide the rest:
+      - text is inserted through the input-method and virtual-keyboard
+        protocols of niri, sway or Hyprland, or on GNOME and KDE through the
+        RemoteDesktop portal (enable `xdg.portal` with the desktop's backend,
+        `xdg-desktop-portal-gnome` / `-kde`)
       - an audio server (PipeWire) for the microphone'';
+
+    keyboardAccess = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Let the user at the seat read keyboards and make virtual ones (a udev
+        `uaccess` rule), so earwig sees its hotkey on any desktop and keeps it
+        from other apps. Any program of that user can then read what is
+        typed. Without it, GNOME and KDE deliver the hotkey through the
+        GlobalShortcuts portal; elsewhere bind keys to `earwig press` /
+        `earwig release` (or `earwig toggle`) and `earwig cancel` in the
+        compositor.
+      '';
+    };
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -89,6 +100,15 @@ in
     environment.etc."xdg/earwig/config.toml" = lib.mkIf (cfg.settings != { }) {
       source = configFile;
     };
+
+    # The rule must sort before 73-seat-late.rules, which applies uaccess;
+    # services.udev.extraRules lands in 99-local.rules, too late.
+    services.udev.packages = lib.mkIf cfg.keyboardAccess [
+      (pkgs.writeTextDir "lib/udev/rules.d/70-earwig.rules" (
+        builtins.readFile ../assets/udev/70-earwig.rules
+      ))
+    ];
+    boot.kernelModules = lib.mkIf cfg.keyboardAccess [ "uinput" ];
 
     # Insertion through the RemoteDesktop portal tells terminals apart by the
     # accessibility role of the focused widget, and Qt apps only export that

@@ -8,6 +8,8 @@ settings window, transcribe.cpp for speech. NixOS first.
 
 - `crates/earwig-core`: everything but pixels (config, controller, audio,
   models, insertion, hotkeys, control socket). No GPUI, so tests are fast.
+- `crates/earwig-keys`: the hotkey on its own: parse and check it, watch the
+  keyboard (evdev, an event tap, a keyboard hook) and record a new one.
 - `crates/earwig-transcribe`: the transcribe.cpp `EngineFactory` (GGUF,
   CPU plus Vulkan, or Metal on macOS).
 - `crates/earwig`: the binary: CLI, daemon wiring, GPUI overlay, settings
@@ -21,9 +23,9 @@ settings window, transcribe.cpp for speech. NixOS first.
   from the flake and screenshots the overlay over a dictation.
 
 Per-OS code lives in `linux`, `macos` and `windows` modules behind one
-signature each: `audio/`, `desktop/`, `hotkey/`, `insert/` and `paths/` in
-earwig-core, `ui/platform/` in earwig; `ipc/` and `hooks/` split `unix`
-from `windows`.
+signature each: `audio/`, `desktop/`, `insert/` and `paths/` in earwig-core,
+the keyboard backends in earwig-keys, `ui/platform/` in earwig; `ipc/` and
+`hooks/` split `unix` from `windows`.
 
 Contracts every front end depends on: `earwig-core/src/{events,engine,
 config}.rs`, `desktop/mod.rs`, `models/mod.rs`, `insert/mod.rs`,
@@ -38,7 +40,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 nix fmt
 nix flake check -L                                # package, clippy, tests, VM tests (KVM)
-nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway gnome kde cosmic models
+nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome kde cosmic models
 ```
 
 ## Rules

@@ -99,6 +99,7 @@
         // lib.optionalAttrs (system == "x86_64-linux") {
           vm-niri = vmTest ./nix/tests/niri.nix;
           vm-sway = vmTest ./nix/tests/sway.nix;
+          vm-keyd = vmTest ./nix/tests/keyd.nix;
           vm-kde = vmTest ./nix/tests/kde.nix;
           vm-cosmic = vmTest ./nix/tests/cosmic.nix;
           vm-models = vmTest ./nix/tests/models.nix;

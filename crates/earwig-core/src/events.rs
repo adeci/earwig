@@ -137,10 +137,47 @@ pub struct Status {
     pub model: ModelStatus,
     /// Insertion backends usable in this session, best first.
     pub insert_methods: Vec<InsertMethod>,
-    /// Hotkey sources running in this session, e.g. `socket`, `portal`.
+    /// Hotkey sources running in this session: `socket` always, `keyboard`
+    /// (earwig watching the key itself), `portal`.
     pub hotkey_sources: Vec<String>,
+    /// Which of them delivers the hotkey now, and why.
+    #[serde(default)]
+    pub hotkey: HotkeyStatus,
     /// Privacy permissions the user grants by hand (macOS), as of this
     /// snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<PermissionStatus>,
+}
+
+/// How the hotkey reaches earwig.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HotkeyStatus {
+    /// What delivers it: `keyboard` (earwig watches `key` itself),
+    /// `portal` (the desktop's shortcut) or `socket` (only `earwig press`
+    /// and the like, from compositor binds or scripts).
+    pub source: String,
+    /// The key earwig watches, as `[hotkey] key` writes it; empty for none.
+    pub key: String,
+    pub keyboard: KeyboardState,
+    /// Other apps do not get the key.
+    pub blocking: bool,
+    /// Why the source is not the keyboard, or why other apps get the key
+    /// too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Whether earwig sees the keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeyboardState {
+    Watching,
+    /// The system does not let earwig see keys: Accessibility (macOS),
+    /// keyboard access (Linux, `/dev/input`).
+    NoAccess,
+    /// Linux: no keyboard is plugged in.
+    NoKeyboard,
+    /// Not watching (yet).
+    #[default]
+    Stopped,
 }

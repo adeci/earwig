@@ -51,6 +51,25 @@ in
     check_typing_reaches_target()
     machine.screenshot("target_terminal")
 
+    with machine.nested("EARWIG: earwig watches the keyboard and keeps the hotkey from sway"):
+        st = wait_status(
+            lambda s: s["hotkey"]["source"] == "keyboard" and s["hotkey"]["blocking"],
+            "the keyboard watched, the hotkey held back",
+        )
+        print(st["hotkey"])
+        # Typing now goes through earwig's clones of the keyboards.
+        check_typing_reaches_target()
+
+
+    HOTKEY_KEYS = "meta_l-spc"
+
+
     ${common.dictation}
+
+    with machine.nested("EARWIG: neither tap reached foot or sway"):
+        out = machine.succeed("cat /tmp/out")
+        # A leaked Space would be in the text; sway's Mod4+space would have
+        # taken focus from foot, and the text would have gone elsewhere.
+        assert out == wait_insertion(events)["text"], out
   '';
 }

@@ -91,8 +91,9 @@ let
   cargoArtifacts = craneLib.buildDepsOnly (
     removeAttrs commonArgs [ "src" ]
     // {
-      # The patched GPUI crate is a path dependency, which the dependency
-      # build would otherwise stub out like the workspace's own crates.
+      # The patched GPUI crates (vendor/) are path dependencies, which the
+      # dependency build would otherwise stub out like the workspace's own
+      # crates.
       dummySrc = craneLib.mkDummySrc {
         inherit src;
         extraDummyScript = ''

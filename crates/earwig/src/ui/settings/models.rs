@@ -37,6 +37,7 @@ use gpui_kit::{
 };
 
 use super::{LOCKED_HINT, is_locked, spaced};
+use crate::ui::marquee::marquee;
 use crate::ui::{UiState, edit_config};
 use crate::{human_size, human_size_of};
 
@@ -904,10 +905,7 @@ fn render(
         v_flex()
             .child(section_title("Yours", Some(frame.tier), cx))
             .when(table.yours.is_empty(), |this| {
-                this.child(note(
-                    "No models yet. Click one below to download it and use it.",
-                    muted,
-                ))
+                this.child(note("Click a model below to download and use it.", muted))
             })
             .children(rows(&table.yours))
     });
@@ -1038,12 +1036,9 @@ fn hub_row(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> Option<Any
                 .child(mark),
         )
         .child(
-            div()
-                .min_w_0()
-                .truncate()
+            marquee("hub-search-text", text)
                 .text_sm()
-                .when(running, |this| this.text_color(theme.muted_foreground))
-                .child(text),
+                .when(running, |this| this.text_color(theme.muted_foreground)),
         );
     Some(
         v_flex()
@@ -1063,8 +1058,7 @@ fn untested_note(query: &str, found: bool, empty: bool) -> SharedString {
     } else if empty {
         format!("Nothing on Hugging Face matches “{query}”.").into()
     } else {
-        "From Hugging Face, not tested with earwig: they may be slower or make more mistakes."
-            .into()
+        "From Hugging Face, not tested with earwig.".into()
     }
 }
 
@@ -1217,15 +1211,12 @@ fn render_row(frame: &Frame, row: &Row, cx: &App) -> AnyElement {
                         .my_1()
                 }))
                 .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
+                    marquee("line", line)
                         .text_xs()
                         .text_color(line_color)
                         .when(download.is_some(), |this| {
                             this.font_features(TABULAR.clone())
-                        })
-                        .child(line),
+                        }),
                 )
                 .children(language),
         )
@@ -1243,7 +1234,7 @@ fn row_line(frame: &Frame, row: &Row, asking: bool, cx: &App) -> (String, Hsla) 
     let page = frame.page;
     if asking {
         return (
-            format!("Delete? It frees {}.", human_size(row.size)),
+            format!("Delete it to free {}?", human_size(row.size)),
             theme.foreground,
         );
     }
@@ -1327,19 +1318,11 @@ fn row_mark(frame: &Frame, row: &Row, in_use: bool, cx: &App) -> AnyElement {
 
 /// The bold name, the pick's tag and the ability icons.
 fn row_name(row: &Row, asking: bool, cx: &App) -> impl IntoElement {
-    let streams =
-        "Streams: the words show as you speak, and the text is ready the moment you stop.";
+    let streams = "Streams the words as you speak.";
     h_flex()
         .min_w_0()
         .gap_1p5()
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .font_semibold()
-                .child(row.name.clone()),
-        )
+        .child(marquee("name", row.name.clone()).text_sm().font_semibold())
         .when_some(row.role.filter(|_| !asking), |this, role| {
             this.child(
                 div()

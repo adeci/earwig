@@ -21,6 +21,9 @@ in
     {
       imports = [ common.machine ];
 
+      # The fallback without keyboard access: the GlobalShortcuts portal.
+      services.earwig.keyboardAccess = false;
+
       virtualisation.memorySize = lib.mkForce 6144;
 
       # GDM logs alice in, not the tty.

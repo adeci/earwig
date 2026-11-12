@@ -107,6 +107,12 @@ impl Ring {
         }
     }
 
+    /// A ring whose kicks vary the same way every time, for tests.
+    #[cfg(test)]
+    pub fn seeded(seed: u64) -> Self {
+        Self::with(Variety::seeded(seed))
+    }
+
     /// Advance by `dt` seconds while the bands stand at `levels` (0..1),
     /// having risen by `rises` since the last frame.
     #[allow(clippy::cast_precision_loss)]

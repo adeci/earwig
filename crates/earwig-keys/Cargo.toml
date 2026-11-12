@@ -1,0 +1,21 @@
+[package]
+name = "earwig-keys"
+description = "A global hotkey for earwig: parse and check it, watch it (evdev on Linux, an event tap on macOS, a keyboard hook on Windows) and record a new one"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+log.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[lints]
+workspace = true

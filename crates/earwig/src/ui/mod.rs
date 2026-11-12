@@ -13,6 +13,7 @@ mod drag;
 mod font;
 mod icon;
 mod lifecycle;
+mod marquee;
 mod overlay;
 mod pill;
 mod platform;
@@ -55,6 +56,13 @@ pub(crate) enum OverlaySurface {
 }
 
 /// Run the GPUI application on the main thread until the daemon quits.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        clippy::needless_pass_by_value,
+        reason = "only Linux keeps the capabilities, for the settings window"
+    )
+)]
 pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
     let events = handle.subscribe();
     let voice = handle.spectrum();
@@ -85,6 +93,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
             cx.set_global(UiState {
                 status: handle.status(),
                 handle,
+                #[cfg(target_os = "linux")]
                 caps,
                 surface,
                 tray,
@@ -144,6 +153,7 @@ pub(crate) fn now_ms() -> u64 {
 /// Everything the windows render from, owned by the main thread.
 pub(crate) struct UiState {
     handle: Handle,
+    #[cfg(target_os = "linux")]
     caps: DesktopCaps,
     surface: OverlaySurface,
     status: Status,
@@ -165,6 +175,7 @@ impl UiState {
         &cx.global::<Self>().handle
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn caps(cx: &App) -> &DesktopCaps {
         &cx.global::<Self>().caps
     }
@@ -176,13 +187,6 @@ impl UiState {
     /// Microphones as of the last time settings opened.
     pub(crate) fn input_devices(cx: &App) -> &[InputDevice] {
         &cx.global::<Self>().input_devices.devices
-    }
-
-    /// The name of the microphone the system default records from, as of
-    /// the same listing.
-    pub(crate) fn default_input_device(cx: &App) -> Option<&str> {
-        let default = cx.global::<Self>().input_devices.default.as_ref();
-        default.map(|device| device.name.as_str())
     }
 
     /// Why the microphone last failed, until it delivers audio again.

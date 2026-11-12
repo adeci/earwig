@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, SharedString};
 
-gpui_kit::assets::icon_assets!(Extra, [Languages, Radio, Trash]);
+gpui_kit::assets::icon_assets!(Extra, [Languages, Radio, RotateCcw, Trash]);
 
 /// gpui-kit's default icons and [`Extra`].
 pub(crate) struct Assets;

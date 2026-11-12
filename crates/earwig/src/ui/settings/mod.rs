@@ -4,6 +4,7 @@ mod general;
 mod history;
 mod models;
 mod pill_preview;
+mod shortcut;
 
 use std::iter;
 use std::sync::PoisonError;
@@ -17,7 +18,7 @@ use gpui_kit::component::{ActiveTheme as _, TitleBar, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Render, SharedString, Styled as _, Window,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, Size, Styled as _, Window,
     WindowBounds, WindowOptions, div, px, relative, size,
 };
 
@@ -25,15 +26,21 @@ use crate::ui::{UiState, config, theme};
 use history::HistoryPage;
 use models::ModelsPage;
 use pill_preview::PillPreview;
+use shortcut::ShortcutField;
 
 const LOCKED_HINT: &str = "Set by system configuration.";
-const SIDEBAR_WIDTH: Pixels = px(200.);
+/// Room for the search box's placeholder and the page names, no more.
+const SIDEBAR_WIDTH: Pixels = px(152.);
+/// The smallest window in which every page still lays out as at the default
+/// size: each curated model's name beside its tag, the Opacity description
+/// on one line, Clear all's question in the History header.
+const MIN_SIZE: Size<Pixels> = size(px(760.), px(540.));
 
 pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
     let bounds = Bounds::centered(None, size(px(900.), px(680.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        window_min_size: Some(size(px(600.), px(420.))),
+        window_min_size: Some(MIN_SIZE),
         app_id: Some(earwig_core::APP_ID.into()),
         focus: true,
         ..TitleBar::window_options()
@@ -42,21 +49,26 @@ pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
         window.set_window_title("earwig settings");
         cx.new(|cx| SettingsView::new(window, cx))
     })?;
-    #[cfg(target_os = "macos")]
-    follow_permissions(window, cx);
+    follow_system(window, cx);
     Ok(window)
 }
 
-/// Permissions are granted in System Settings, not here: re-render the
-/// window when one changes, for as long as it is open.
-#[cfg(target_os = "macos")]
-fn follow_permissions(window: AnyWindowHandle, cx: &App) {
+/// Permissions (macOS) are granted in System Settings and keyboard access
+/// (Linux) by a helper; keyboards come and go: re-render the window when
+/// what earwig may see changes, for as long as it is open.
+fn follow_system(window: AnyWindowHandle, cx: &App) {
     const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+    let check = || {
+        (
+            earwig_core::permissions::check(),
+            earwig_core::hotkey::status(),
+        )
+    };
     cx.spawn(async move |cx| {
-        let mut last = earwig_core::permissions::check();
+        let mut last = check();
         loop {
             cx.background_executor().timer(EVERY).await;
-            let now = earwig_core::permissions::check();
+            let now = check();
             let open = if now == last {
                 cx.update(|cx| window.update(cx, |_, _, _| ()).is_ok())
             } else {
@@ -75,14 +87,18 @@ struct SettingsView {
     models: Entity<ModelsPage>,
     history: Entity<HistoryPage>,
     pill: Entity<PillPreview>,
+    shortcut: Entity<ShortcutField>,
 }
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let shortcut = cx.new(|_| ShortcutField::default());
+        cx.observe(&shortcut, |_, _, cx| cx.notify()).detach();
         Self {
             models: cx.new(|cx| ModelsPage::new(window, cx)),
             history: cx.new(|_| HistoryPage::default()),
             pill: cx.new(PillPreview::new),
+            shortcut,
         }
     }
 }
@@ -102,17 +118,36 @@ impl Render for SettingsView {
             .capture_any_mouse_down(|_, window, cx| window.blur(cx))
             .child(TitleBar::new().child(div().text_sm().child("earwig settings")))
             .child(
-                div().flex_1().min_h_0().child(
-                    Settings::new("earwig-settings")
-                        .sidebar_width(SIDEBAR_WIDTH)
-                        // A wider window widens the page, not the sidebar.
-                        .sidebar_size_range(SIDEBAR_WIDTH..SIDEBAR_WIDTH)
-                        .pages([
-                            general::page(&self.pill, &settings, cx),
-                            models::page(&self.models, &settings, cx),
-                            history::page(&self.history, &settings, cx),
-                        ]),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(
+                        Settings::new("earwig-settings")
+                            .sidebar_width(SIDEBAR_WIDTH)
+                            // A wider window widens the page, not the sidebar.
+                            .sidebar_size_range(SIDEBAR_WIDTH..SIDEBAR_WIDTH)
+                            .pages([
+                                general::page(&self.pill, &self.shortcut, &settings, cx),
+                                models::page(&self.models, &settings, cx),
+                                history::page(&self.history, &settings, cx),
+                            ]),
+                    )
+                    // gpui-kit's Settings always edges its sidebar with a
+                    // resize handle, whose cursor promises a drag that a
+                    // fixed width ignores: cover its band (the 1 px line
+                    // and 4 px on each side) so neither cursor nor drag
+                    // reach it.
+                    .child(
+                        div()
+                            .id("sidebar-edge")
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(SIDEBAR_WIDTH - px(4.))
+                            .w(px(9.))
+                            .occlude(),
+                    ),
             )
     }
 }

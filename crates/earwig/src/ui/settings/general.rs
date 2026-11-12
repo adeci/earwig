@@ -11,51 +11,37 @@ use earwig_core::config::{
     ActivationMode, Config, OverlayAnimation, OverlayPosition, ThemeSetting,
 };
 #[cfg(target_os = "linux")]
-use earwig_core::events::InsertMethod;
-use earwig_core::hotkey::trigger::Trigger;
+use earwig_core::events::KeyboardState;
 use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
 use gpui_kit::component::{ActiveTheme as _, IconName, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::{
-    App, Axis, Entity, HighlightStyle, InteractiveText, IntoElement, ParentElement as _,
-    SharedString, Styled as _, StyledText, UnderlineStyle, div, px,
-};
+use gpui_kit::{App, Axis, Entity, ParentElement as _, SharedString, Styled as _, div, px};
+#[cfg(target_os = "linux")]
+use gpui_kit::{HighlightStyle, InteractiveText, IntoElement, StyledText, UnderlineStyle};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::pill_preview::PillPreview;
+use super::shortcut::{self, ShortcutField};
 use super::{hinted, is_locked, item, section, spaced};
 use crate::ui::{UiState, apply_appearance, config, edit_config};
 
 /// Search words for the Hotkey group's rows, whose titles do not say them.
-const HOTKEY_KEYWORDS: [&str; 4] = ["hotkey", "shortcut", "key", "bind"];
-
-/// The keys offered on macOS and Windows, which do nothing there on their
-/// own, by their config names.
-#[cfg(target_os = "macos")]
-const KEYS: [(&str, &str); 5] = [
-    ("RightCmd", "Right Command"),
-    ("RightAlt", "Right Option"),
-    ("RightShift", "Right Shift"),
-    ("RightCtrl", "Right Control"),
-    ("Ctrl+Space", "Control+Space"),
-];
-#[cfg(not(target_os = "macos"))]
-const KEYS: [(&str, &str); 5] = [
-    ("RightCtrl", "Right Ctrl"),
-    ("RightAlt", "Right Alt"),
-    ("RightShift", "Right Shift"),
-    ("Ctrl+Space", "Ctrl+Space"),
-    ("Ctrl+Alt+Space", "Ctrl+Alt+Space"),
-];
+const HOTKEY_KEYWORDS: [&str; 6] = ["hotkey", "shortcut", "key", "bind", "record", "keyboard"];
 
 /// How to bind the hotkey on each Linux desktop.
+#[cfg(target_os = "linux")]
 const SETUP_GUIDE: &str = "https://github.com/adeci/earwig/blob/main/docs/desktops.md";
 
-pub fn page(pill: &Entity<PillPreview>, settings: &Config, cx: &App) -> SettingPage {
+pub fn page(
+    pill: &Entity<PillPreview>,
+    shortcut: &Entity<ShortcutField>,
+    settings: &Config,
+    cx: &App,
+) -> SettingPage {
     let mut groups = Vec::new();
     if let Some(error) = user_error(cx) {
         groups.push(section(
@@ -63,8 +49,8 @@ pub fn page(pill: &Entity<PillPreview>, settings: &Config, cx: &App) -> SettingP
             None,
             [SettingItem::render(move |_, _, cx| {
                 div().text_sm().text_color(cx.theme().danger).child(format!(
-                    "Your settings file was ignored because it has an error; \
-                     changing a setting here rewrites it.\n{error}"
+                    "Your settings file has an error, so earwig ignores it and saves no \
+                     changes.\n{error}"
                 ))
             })],
         ));
@@ -80,7 +66,7 @@ pub fn page(pill: &Entity<PillPreview>, settings: &Config, cx: &App) -> SettingP
         groups.push(permissions_group(&permissions));
     }
     groups.extend([
-        hotkey(settings, cx),
+        hotkey(settings, shortcut, cx),
         microphone(settings, cx),
         appearance(pill, cx),
     ]);
@@ -98,15 +84,17 @@ pub fn page(pill: &Entity<PillPreview>, settings: &Config, cx: &App) -> SettingP
         .groups(spaced(groups))
 }
 
-/// The hotkey: the key, where earwig watches one itself (macOS, Windows); what a
-/// press does; and a line on where the key is set.
-fn hotkey(settings: &Config, cx: &App) -> SettingGroup {
-    let key = cfg!(any(windows, target_os = "macos")).then(|| key_label(&settings.hotkey.key));
+/// The hotkey: the shortcut earwig watches, recorded by pressing it, and
+/// what a press does. On Linux, where earwig may not read the keyboard yet,
+/// how to let it and what works meanwhile.
+fn hotkey(settings: &Config, shortcut: &Entity<ShortcutField>, cx: &App) -> SettingGroup {
+    let status = earwig_core::hotkey::status();
+    let label = (status.source == "keyboard").then(|| shortcut::label(&settings.hotkey.key));
     let mode = item(
         cx,
         "hotkey.mode",
         "Mode",
-        &mode_description(settings.hotkey.mode, key),
+        &mode_description(settings.hotkey.mode, label.as_deref()),
         enum_dropdown(
             &[
                 (ActivationMode::Hold, "Push to talk"),
@@ -116,51 +104,34 @@ fn hotkey(settings: &Config, cx: &App) -> SettingGroup {
             |c| c.hotkey.mode,
             |c, v| c.hotkey.mode = v,
         ),
-    )
-    .keywords(HOTKEY_KEYWORDS);
-    let help = hotkey_help(&UiState::caps(cx).desktop, &settings.hotkey.key);
-    let help = SettingItem::render(move |_, _, cx| help_line(&help, cx)).keywords(HOTKEY_KEYWORDS);
-    #[cfg(any(windows, target_os = "macos"))]
-    let items = [
-        item(
-            cx,
-            "hotkey.key",
-            "Key",
-            "The key you dictate with.",
-            key_dropdown(settings),
-        )
-        .keywords(HOTKEY_KEYWORDS),
-        mode,
-        help,
-    ];
+    );
+    let rows = [shortcut::item(shortcut, &settings.hotkey.key, cx), mode].into_iter();
     #[cfg(target_os = "linux")]
-    let items = [mode, help];
-    section("Hotkey", None, items)
-}
-
-/// [`KEYS`], and whatever key is configured besides.
-#[cfg(any(windows, target_os = "macos"))]
-fn key_dropdown(settings: &Config) -> SettingField<SharedString> {
-    let mut options: Vec<(SharedString, SharedString)> = KEYS
-        .iter()
-        .map(|&(key, label)| (key.into(), label.into()))
-        .collect();
-    let key = &settings.hotkey.key;
-    if !options.iter().any(|(id, _)| id == key) {
-        options.push((key.clone().into(), key.clone().into()));
-    }
-    SettingField::dropdown(
-        options,
-        |cx: &App| config(UiState::handle(cx)).hotkey.key.into(),
-        |key: SharedString, cx: &mut App| edit_config(cx, |c| c.hotkey.key = key.to_string()),
+    let rows = rows.chain(linux_rows(&status, shortcut, cx));
+    section(
+        "Hotkey",
+        None,
+        rows.map(|row| row.keywords(HOTKEY_KEYWORDS)),
     )
 }
 
-/// How the Key row names `key`.
-fn key_label(key: &str) -> &str {
-    KEYS.iter()
-        .find(|(id, _)| *id == key)
-        .map_or(key, |&(_, label)| label)
+/// Without keyboard access, how to give it; while earwig does not watch the
+/// shortcut itself, what works meanwhile.
+#[cfg(target_os = "linux")]
+fn linux_rows(
+    status: &earwig_core::events::HotkeyStatus,
+    shortcut: &Entity<ShortcutField>,
+    cx: &App,
+) -> Vec<SettingItem> {
+    let mut rows = Vec::new();
+    if status.keyboard == KeyboardState::NoAccess {
+        rows.push(shortcut::access_item(shortcut));
+    }
+    if status.source != "keyboard" {
+        let help = fallback(&UiState::caps(cx).desktop, status.source == "portal");
+        rows.push(SettingItem::render(move |_, _, cx| help_line(&help, cx)));
+    }
+    rows
 }
 
 /// What a press does in `mode`, naming the key where earwig watches it.
@@ -168,45 +139,49 @@ fn mode_description(mode: ActivationMode, key: Option<&str>) -> String {
     let key = key.unwrap_or("the hotkey");
     match mode {
         ActivationMode::Hold => format!("Hold {key} while you talk."),
-        ActivationMode::Toggle => format!("Press {key} once to start, and again to stop."),
-        ActivationMode::HoldOrToggle => format!("Hold {key} to talk, or tap it to toggle."),
+        ActivationMode::Toggle => format!("Press {key} to start and stop."),
+        ActivationMode::HoldOrToggle => format!("Hold or tap {key} to talk."),
     }
 }
 
-/// What the line under Mode says.
+/// What works on Linux while earwig does not watch the shortcut itself.
+#[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq)]
-enum HotkeyHelp {
+enum Fallback {
     Text(SharedString),
     /// "Bind a key in your compositor", linking the setup guide.
     SetupGuide,
 }
 
-/// The line under Mode on `desktop`. Windows: what `key`, which earwig
-/// watches itself, still does for other apps. GNOME and KDE: where their
-/// settings change the shortcut earwig registers through the portal.
-/// Anywhere else a key is bound in the compositor's config, as the setup
-/// guide shows.
-fn hotkey_help(desktop: &str, key: &str) -> HotkeyHelp {
+/// The shortcut the desktop's GlobalShortcuts portal bound for earwig
+/// (`portal`), changed in the desktop's settings; anywhere else a key bound
+/// in the compositor's config, as the setup guide shows.
+#[cfg(target_os = "linux")]
+fn fallback(desktop: &str, portal: bool) -> Fallback {
     let desktops: Vec<&str> = desktop.split(':').collect();
     let is = |name: &str| desktops.iter().any(|d| d.eq_ignore_ascii_case(name));
-    if is("windows") || is("macos") {
-        HotkeyHelp::Text(key_help(key).into())
+    let works = |place: &str| {
+        Fallback::Text(format!("Meanwhile, the shortcut set in {place} works.").into())
+    };
+    if !portal {
+        Fallback::SetupGuide
     } else if is("kde") {
-        HotkeyHelp::Text("Change the key in System Settings → Keyboard → Shortcuts.".into())
+        works("System Settings → Keyboard → Shortcuts")
     } else if is("gnome") {
-        HotkeyHelp::Text("Change the key in Settings → Keyboard → Shortcuts.".into())
+        works("Settings → Keyboard → Shortcuts")
     } else {
-        HotkeyHelp::SetupGuide
+        works("the desktop's keyboard settings")
     }
 }
 
 /// `help` as a line of small text, the setup guide a link.
-fn help_line(help: &HotkeyHelp, cx: &App) -> impl IntoElement + use<> {
+#[cfg(target_os = "linux")]
+fn help_line(help: &Fallback, cx: &App) -> impl IntoElement + use<> {
     let line = div().text_sm().text_color(cx.theme().muted_foreground);
     match help {
-        HotkeyHelp::Text(text) => line.child(text.clone()),
-        HotkeyHelp::SetupGuide => {
-            const LEAD: &str = "Bind a key in your compositor: see the ";
+        Fallback::Text(text) => line.child(text.clone()),
+        Fallback::SetupGuide => {
+            const LEAD: &str = "Meanwhile, bind a key in your compositor as the ";
             const LINK: &str = "setup guide";
             let guide = LEAD.len()..LEAD.len() + LINK.len();
             let style = HighlightStyle {
@@ -218,30 +193,11 @@ fn help_line(help: &HotkeyHelp, cx: &App) -> impl IntoElement + use<> {
                 }),
                 ..HighlightStyle::default()
             };
-            let text =
-                StyledText::new(format!("{LEAD}{LINK}.")).with_highlights([(guide.clone(), style)]);
+            let text = StyledText::new(format!("{LEAD}{LINK} shows."))
+                .with_highlights([(guide.clone(), style)]);
             line.child(
                 InteractiveText::new("setup-guide", text)
                     .on_click(vec![guide], |_, _, cx| cx.open_url(SETUP_GUIDE)),
-            )
-        }
-    }
-}
-
-/// What `key` does for other apps while earwig watches it: a lone modifier
-/// still works with other keys; a key combination no longer reaches them.
-fn key_help(key: &str) -> String {
-    let name = key_label(key);
-    match key.parse::<Trigger>() {
-        Ok(trigger) if trigger.held_modifier().is_some() => {
-            format!("Pressed together with another key, {name} works as it always does.")
-        }
-        Ok(_) => format!("Other apps no longer receive {name}."),
-        Err(e) => {
-            let reason = e.to_string();
-            format!(
-                "{name} cannot be the hotkey: {}.",
-                reason.trim_end_matches('.')
             )
         }
     }
@@ -252,7 +208,7 @@ fn microphone(settings: &Config, cx: &App) -> SettingGroup {
         cx,
         "audio.device",
         "Input device",
-        &device_description(UiState::default_input_device(cx)),
+        "The microphone earwig records from.",
         device_dropdown(settings, cx),
     );
     let error = UiState::mic_error(cx).map(|error| {
@@ -308,18 +264,6 @@ fn device_dropdown(settings: &Config, cx: &App) -> SettingField<SharedString> {
     .max_w(px(MAX_WIDTH))
 }
 
-/// The Input device row's description, naming the device the system default
-/// is now when the audio backend knows it. The dropdown says only "System
-/// default", so a long device name never widens it.
-fn device_description(default: Option<&str>) -> String {
-    match default {
-        Some(name) => {
-            format!("The microphone earwig records from; the system default is now {name}.")
-        }
-        None => "The microphone earwig records from.".to_owned(),
-    }
-}
-
 /// The look of the overlay and of this window. This window follows at once;
 /// the overlay takes a change from the next dictation.
 fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
@@ -331,7 +275,7 @@ fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
                 cx,
                 "appearance.theme",
                 "Theme",
-                "Colours of this window and the overlay, whatever the desktop uses.",
+                "Colours of this window and the overlay.",
                 enum_dropdown_with(
                     &[(ThemeSetting::Dark, "Dark"), (ThemeSetting::Light, "Light")],
                     |c| c.appearance.theme,
@@ -382,8 +326,7 @@ fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
                 cx,
                 "overlay.animation",
                 "Animation",
-                "How the panel comes and goes: it powers on and off like an old \
-                 TV screen, or appears and is gone at once.",
+                "How the overlay comes and goes.",
                 enum_dropdown(
                     &[
                         (OverlayAnimation::Crt, "CRT"),
@@ -398,7 +341,7 @@ fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
                 pill,
                 "overlay.opacity",
                 "Opacity",
-                "How solid the overlay is; its text stays sharp.",
+                "How solid the overlay is.",
             ),
         ],
     )
@@ -406,16 +349,6 @@ fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
 
 #[cfg(target_os = "linux")]
 fn typing(cx: &App) -> SettingGroup {
-    let available = UiState::status(cx)
-        .insert_methods
-        .iter()
-        .map(|m| insert_method_label(*m))
-        .collect::<Vec<_>>();
-    let available = if available.is_empty() {
-        "none detected".to_owned()
-    } else {
-        available.join(", ")
-    };
     section(
         "Typing",
         None,
@@ -423,7 +356,7 @@ fn typing(cx: &App) -> SettingGroup {
             cx,
             "insert.method",
             "Insert method",
-            &format!("How the final text reaches the focused app. Available here: {available}."),
+            "How the final text reaches the focused app.",
             enum_dropdown(
                 &[
                     (InsertSetting::Auto, "Automatic"),
@@ -436,15 +369,6 @@ fn typing(cx: &App) -> SettingGroup {
             ),
         )],
     )
-}
-
-#[cfg(target_os = "linux")]
-fn insert_method_label(method: InsertMethod) -> &'static str {
-    match method {
-        InsertMethod::InputMethod => "input method",
-        InsertMethod::Paste => "paste",
-        InsertMethod::PortalPaste => "portal paste",
-    }
 }
 
 /// Starting with the session: the per-user sign-in entry on Windows, a
@@ -473,8 +397,8 @@ fn startup() -> SettingGroup {
     )
 }
 
-/// Microphone and Accessibility, each granted or with a way to System
-/// Settings.
+/// Microphone and Accessibility, each allowed, or with Ask again (the
+/// system's prompt) and a way to System Settings.
 #[cfg(target_os = "macos")]
 fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) -> SettingGroup {
     use earwig_core::permissions::{self, Access};
@@ -486,45 +410,51 @@ fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) ->
         .map(|status| {
             let permission = status.permission;
             let granted = status.access == Access::Granted;
-            SettingItem::render(move |_, _, cx| {
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        v_flex()
-                            .child(div().text_sm().child(permission.label()))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("To {}.", permission.purpose())),
-                            ),
-                    )
-                    .child(if granted {
-                        div().text_sm().child("Allowed").into_any_element()
-                    } else {
-                        h_flex()
-                            .gap_3()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child("Not allowed"),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("allow-{permission:?}")))
-                                    .primary()
-                                    .small()
-                                    .label("Open System Settings")
-                                    .on_click(move |_, _, _| {
-                                        permissions::request(permission);
-                                        permissions::open_settings(permission);
-                                    }),
-                            )
-                            .into_any_element()
-                    })
+            SettingItem::render(move |options, _, cx| {
+                let control = if granted {
+                    div().text_sm().child("Allowed").into_any_element()
+                } else {
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .flex_shrink_0()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .child("Not allowed"),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("settings-{permission:?}")))
+                                .link()
+                                .small()
+                                .label("System Settings")
+                                .on_click(move |_, _, _| permissions::open_settings(permission)),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("ask-{permission:?}")))
+                                .primary()
+                                .small()
+                                .label("Ask again")
+                                .tooltip(
+                                    "After an update, System Settings may still show the old \
+                                     earwig ticked; this replaces it.",
+                                )
+                                .on_click(move |_, _, _| permissions::ask(permission)),
+                        )
+                        .into_any_element()
+                };
+                shortcut::row(
+                    permission.label(),
+                    Some((
+                        format!("To {}.", permission.purpose()).into(),
+                        shortcut::Tone::Muted,
+                    )),
+                    control,
+                    None,
+                    options.layout(),
+                    cx,
+                )
             })
         })
         .collect();
@@ -680,19 +610,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn portal_desktops_name_their_settings_app_and_others_get_the_guide() {
         assert_eq!(
-            hotkey_help("ubuntu:GNOME", "RightCtrl"),
-            HotkeyHelp::Text("Change the key in Settings → Keyboard → Shortcuts.".into())
+            fallback("ubuntu:GNOME", true),
+            Fallback::Text(
+                "Meanwhile, the shortcut set in Settings → Keyboard → Shortcuts works.".into()
+            )
         );
-        assert_eq!(
-            hotkey_help("KDE", "RightCtrl"),
-            HotkeyHelp::Text("Change the key in System Settings → Keyboard → Shortcuts.".into())
-        );
-        for compositor in ["niri", "sway", "Hyprland", "COSMIC", ""] {
+        let Fallback::Text(kde) = fallback("KDE", true) else {
+            panic!("KDE's portal shortcut");
+        };
+        assert!(kde.contains("System Settings"), "{kde}");
+        for compositor in ["niri", "sway", "Hyprland", "COSMIC", "GNOME", ""] {
             assert_eq!(
-                hotkey_help(compositor, "RightCtrl"),
-                HotkeyHelp::SetupGuide,
+                fallback(compositor, false),
+                Fallback::SetupGuide,
                 "{compositor}"
             );
         }
@@ -706,62 +639,24 @@ mod tests {
         );
         assert_eq!(
             mode_description(ActivationMode::Toggle, Some("Ctrl+Space")),
-            "Press Ctrl+Space once to start, and again to stop."
+            "Press Ctrl+Space to start and stop."
         );
         assert_eq!(
             mode_description(ActivationMode::HoldOrToggle, None),
-            "Hold the hotkey to talk, or tap it to toggle."
+            "Hold or tap the hotkey to talk."
         );
     }
 
     #[test]
     #[cfg(target_os = "macos")]
-    fn macos_help_names_the_key_as_a_mac_keyboard_does() {
-        let HotkeyHelp::Text(alt) = hotkey_help("macos", "RightAlt") else {
-            panic!("macOS points to no setup guide");
-        };
-        assert!(alt.contains("Right Option"), "{alt}");
+    fn macos_shows_keys_with_a_macs_symbols() {
         assert_eq!(
-            mode_description(ActivationMode::HoldOrToggle, Some(key_label("RightCmd"))),
-            "Hold Right Command to talk, or tap it to toggle."
+            mode_description(
+                ActivationMode::HoldOrToggle,
+                Some(&shortcut::label("RightCmd"))
+            ),
+            "Hold or tap Right ⌘ to talk."
         );
-    }
-
-    #[test]
-    #[cfg(not(target_os = "macos"))]
-    fn windows_help_describes_the_configured_key() {
-        let help = |key| match hotkey_help("windows", key) {
-            HotkeyHelp::Text(text) => text.to_string(),
-            HotkeyHelp::SetupGuide => panic!("Windows points to no setup guide"),
-        };
-        let alt = help("RightAlt");
-        assert!(alt.contains("Right Alt"), "{alt}");
-        assert!(!alt.contains("Right Ctrl"), "{alt}");
-        assert_eq!(
-            help("Ctrl+Space"),
-            "Other apps no longer receive Ctrl+Space."
-        );
-        // Written by hand: named as written.
-        let custom = help("LeftAlt");
-        assert!(
-            custom.contains("LeftAlt works as it always does"),
-            "{custom}"
-        );
-        let broken = help("Ctrl+Hyper");
-        assert!(broken.contains("cannot be the hotkey"), "{broken}");
-        assert!(!broken.ends_with(".."), "{broken}");
-    }
-
-    #[test]
-    fn the_system_default_is_named_when_the_backend_knows_it() {
-        assert_eq!(
-            device_description(Some("Microphone (USB Audio)")),
-            "The microphone earwig records from; the system default is now \
-             Microphone (USB Audio)."
-        );
-        assert_eq!(
-            device_description(None),
-            "The microphone earwig records from."
-        );
+        assert_eq!(shortcut::label("Option+Space"), "⌥ Space");
     }
 }
