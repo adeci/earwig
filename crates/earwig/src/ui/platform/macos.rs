@@ -1,7 +1,4 @@
-//! macOS: the overlay is GPUI's pop-up panel made into a borderless,
-//! non-activating overlay on every Space; earwig runs as a menu-bar app (no
-//! Dock icon, the tray icon in the menu bar) and follows the system accent
-//! colour.
+//! macOS: a non-activating panel overlay on every Space, a menu-bar app, the system accent.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -26,16 +23,14 @@ pub(crate) use super::tray_icon::{TrayHandle, spawn as spawn_tray};
 const TITLED: usize = 1;
 /// `CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenAuxiliary`
 const EVERY_SPACE: usize = 1 | 16 | 64 | 256;
-/// How often the pointer is checked against the pill, which alone takes
-/// clicks.
+/// How often we check whether the pointer is over the pill, the only part taking clicks.
 const POINTER_POLL: f64 = 1. / 30.;
 
 pub(crate) fn overlay_surface(_caps: &DesktopCaps) -> OverlaySurface {
     OverlaySurface::Popup
 }
 
-/// A menu-bar app: no Dock icon, no menu bar, never activated by the
-/// overlay.
+/// A menu-bar app: no Dock icon, no menu bar, never activated by the overlay.
 pub(crate) fn application(_surface: OverlaySurface, _caps: &DesktopCaps) -> Application {
     gpui_kit::application().with_windowing(WindowingRequest::Headless)
 }
@@ -64,10 +59,7 @@ thread_local! {
     static INPUT_REGIONS: RefCell<HashMap<WindowId, Region>> = RefCell::default();
 }
 
-/// Only `area` of the overlay's window takes the pointer (none of it for
-/// `None`); clicks anywhere else reach the windows below. GPUI leaves
-/// [`Window::set_input_region`] to the platform and does nothing on macOS,
-/// so the window's [`Popup`] applies it.
+/// GPUI's `set_input_region` does nothing on macOS, so the window's [`Popup`] applies it.
 pub(crate) fn set_input_region(window: &Window, area: Option<Bounds<Pixels>>) {
     let id = window.window_handle().window_id();
     INPUT_REGIONS.with_borrow(|regions| {
@@ -77,9 +69,7 @@ pub(crate) fn set_input_region(window: &Window, area: Option<Bounds<Pixels>>) {
     });
 }
 
-/// The overlay's panel: kept off the key window and out of window cycling,
-/// on every Space and over full-screen apps, moved by hand while dragged,
-/// and transparent to clicks outside its input region.
+/// The overlay's panel: never key, on every Space, click-through outside its input region.
 pub(crate) struct Popup {
     panel: Retained<AnyObject>,
     window: WindowId,
@@ -100,10 +90,7 @@ impl Popup {
             let view = handle.ns_view.as_ptr().cast::<AnyObject>();
             let panel: Option<Retained<AnyObject>> = msg_send![view, window];
             let panel = panel.ok_or_else(|| anyhow::anyhow!("the overlay has no NSWindow"))?;
-            // Borderless, but still a non-activating panel: clicking it
-            // leaves the app being typed in active. Restyling resizes the
-            // window at once, which GPUI cannot take while it is still
-            // building it, so it waits for the next turn of the run loop.
+            // Borderless, still non-activating. Restyling resizes, which GPUI can't take mid-build.
             let restyled = panel.clone();
             let borderless = block2::RcBlock::new(move || {
                 let mask: usize = msg_send![&*restyled, styleMask];
@@ -126,8 +113,7 @@ impl Popup {
         }
     }
 
-    /// The pointer on the panel's screen, in GPUI's coordinates there (top
-    /// left origin, points).
+    /// On the panel's screen, in points from the top left.
     pub(crate) fn pointer(&self, _scale: f32) -> Option<Point<Pixels>> {
         let mouse: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
         let screen = self.screen()?;
@@ -138,7 +124,6 @@ impl Popup {
         ))
     }
 
-    /// Put the panel's top-left corner at `origin` on its screen.
     pub(crate) fn move_to(&mut self, origin: Point<Pixels>, _scale: f32) {
         let Some(screen) = self.screen() else {
             return;
@@ -147,8 +132,7 @@ impl Popup {
             screen.origin.x + f64::from(f32::from(origin.x)),
             screen.origin.y + screen.size.height - f64::from(f32::from(origin.y)),
         );
-        // Moving makes AppKit tell GPUI at once, which it cannot take while
-        // it is rendering this window: move on the next turn of the run loop.
+        // AppKit reports the move at once, which GPUI can't take mid-render: defer a turn.
         let panel = self.panel.clone();
         let moved = block2::RcBlock::new(move || unsafe {
             let () = msg_send![&*panel, setFrameTopLeftPoint: top_left];
@@ -176,8 +160,7 @@ impl Drop for Popup {
     }
 }
 
-/// Let clicks through the panel unless the pointer is on its input region.
-/// Left alone while a button is down, so a drag keeps its window.
+/// Click-through unless the pointer is on the input region; left alone mid-drag.
 fn poll_pointer(panel: Retained<AnyObject>, region: Region) -> Retained<AnyObject> {
     let ignoring = Cell::new(true);
     let tick = block2::RcBlock::new(move |_timer: *mut AnyObject| unsafe {
@@ -208,8 +191,7 @@ fn poll_pointer(panel: Retained<AnyObject>, region: Region) -> Retained<AnyObjec
     }
 }
 
-/// Send `NSColor.controlAccentColor` now and whenever the system colours
-/// change.
+/// Sends `NSColor.controlAccentColor` now and whenever the system colours change.
 pub(crate) fn follow_accent(tx: &flume::Sender<Option<Hsla>>, _cx: &App) {
     let _ = tx.send(accent());
     let tx = tx.clone();
@@ -258,8 +240,6 @@ fn accent() -> Option<Hsla> {
     }
 }
 
-/// The launch agent that starts earwig at login, in the user's
-/// `~/Library/LaunchAgents`.
 fn launch_agent() -> Option<std::path::PathBuf> {
     Some(
         dirs::home_dir()?
@@ -268,13 +248,11 @@ fn launch_agent() -> Option<std::path::PathBuf> {
     )
 }
 
-/// Whether earwig starts when the user logs in.
 pub(crate) fn autostart() -> bool {
     launch_agent().is_some_and(|path| path.is_file())
 }
 
-/// Start earwig at login, or stop doing so: a launch agent that runs this
-/// program's daemon, taking effect from the next login.
+/// A launch agent running this binary's daemon, from the next login.
 pub(crate) fn set_autostart(enabled: bool) -> anyhow::Result<()> {
     use anyhow::Context as _;
     let path = launch_agent().context("no home directory")?;

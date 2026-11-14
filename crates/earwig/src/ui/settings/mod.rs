@@ -29,11 +29,9 @@ use pill_preview::PillPreview;
 use shortcut::ShortcutField;
 
 const LOCKED_HINT: &str = "Set by system configuration.";
-/// Room for the search box's placeholder and the page names, no more.
+/// Just room for the search box's placeholder and the page names.
 const SIDEBAR_WIDTH: Pixels = px(152.);
-/// The smallest window in which every page still lays out as at the default
-/// size: each curated model's name beside its tag, the Opacity description
-/// on one line, Clear all's question in the History header.
+/// Smallest size at which every page still lays out as it does at the default size.
 const MIN_SIZE: Size<Pixels> = size(px(760.), px(540.));
 
 pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
@@ -53,9 +51,7 @@ pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
     Ok(window)
 }
 
-/// Permissions (macOS) are granted in System Settings and keyboard access
-/// (Linux) by a helper; keyboards come and go: re-render the window when
-/// what earwig may see changes, for as long as it is open.
+/// Re-render while open when permissions, keyboard access or the keyboards change.
 fn follow_system(window: AnyWindowHandle, cx: &App) {
     const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
     let check = || {
@@ -110,11 +106,7 @@ impl Render for SettingsView {
             .size_full()
             .bg(theme::page(cx))
             .text_color(cx.theme().foreground)
-            // Every press first clears focus, and a press in a text field
-            // takes it again before anything redraws. Without this a field
-            // kept focus wherever you clicked (gpui-component's buttons don't
-            // take it), and a dropdown handed it back when its menu closed,
-            // scrolling the page back to the field.
+            // Blur on every press (fields take it back), or a focused field drags the page back.
             .capture_any_mouse_down(|_, window, cx| window.blur(cx))
             .child(TitleBar::new().child(div().text_sm().child("earwig settings")))
             .child(
@@ -133,11 +125,7 @@ impl Render for SettingsView {
                                 history::page(&self.history, &settings, cx),
                             ]),
                     )
-                    // gpui-kit's Settings always edges its sidebar with a
-                    // resize handle, whose cursor promises a drag that a
-                    // fixed width ignores: cover its band (the 1 px line
-                    // and 4 px on each side) so neither cursor nor drag
-                    // reach it.
+                    // Cover the fixed-width sidebar's resize handle (1 px line, 4 px either side).
                     .child(
                         div()
                             .id("sidebar-edge")
@@ -169,7 +157,6 @@ where
         .disabled(locked)
 }
 
-/// `description`, saying so when its key is locked.
 fn hinted(description: &str, locked: bool) -> String {
     if locked {
         format!("{description} {LOCKED_HINT}")
@@ -186,8 +173,7 @@ fn is_locked(cx: &App, key: &str) -> bool {
         .is_locked(key)
 }
 
-/// A page's groups with room below the last one: the page itself leaves
-/// only that group's padding there, half the space between two groups.
+/// Room below the last group, which the page otherwise leaves too tight.
 fn spaced(mut groups: Vec<SettingGroup>) -> Vec<SettingGroup> {
     if let Some(last) = groups.pop() {
         groups.push(last.mb_4());
@@ -195,12 +181,7 @@ fn spaced(mut groups: Vec<SettingGroup>) -> Vec<SettingGroup> {
     groups
 }
 
-/// A group under a heading drawn in the page as its first row. As the
-/// group's title, the heading would also list the group in the sidebar,
-/// where gpui-kit's `Settings` opens that list when its page is clicked but
-/// closes it only from a small arrow; the sidebar names only the pages
-/// instead. The heading shows whenever one of the rows does, and searching
-/// for the heading finds the whole group.
+/// A group headed by its first row, not a title (which would list it in the sidebar).
 fn section(
     title: &'static str,
     description: Option<&'static str>,
@@ -216,7 +197,7 @@ fn section(
         .items(items)
 }
 
-/// A group's title, and its description below, as a group draws them.
+/// Drawn as gpui-kit draws a group's title and description.
 fn heading(
     title: &'static str,
     description: Option<&'static str>,
@@ -236,15 +217,13 @@ fn heading(
         })
 }
 
-/// `item`, which a search for `word` finds too.
 fn with_keyword(item: SettingItem, word: &'static str) -> SettingItem {
     let (SettingItem::Item { keywords, .. } | SettingItem::Element { keywords, .. }) = &item;
     let keywords: Vec<SharedString> = keywords.iter().cloned().chain([word.into()]).collect();
     item.keywords(keywords)
 }
 
-/// Everything a search matches in `item`: its title, its description (when
-/// plain text) and its keywords.
+/// What a search matches: title, plain-text description and keywords.
 fn search_words(item: &SettingItem) -> Vec<SharedString> {
     match item {
         SettingItem::Item {

@@ -1,16 +1,11 @@
-//! Models page: one table under a search box. Yours (on disk, the one in use
-//! first), then the curated models not downloaded yet, each with Handy's
-//! accuracy and speed meters. Typing filters the table; a row at its end
-//! searches Hugging Face for the query when clicked, and lists the untested
-//! models it finds. Clicking a row uses that model, downloading it first if
-//! needed; the last row clicked wins.
+//! The Models page: yours, curated ones to download and Hugging Face results, in one table.
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
-use earwig_core::config::{BackendSetting, Config, ModelConfig};
+use earwig_core::config::{Config, ModelConfig};
+use earwig_core::engine::Backend;
 use earwig_core::events::ModelStatus;
 use earwig_core::models::benchmark::{DICTATION_SECONDS, GRADE_CEILINGS, SPEED_CUTOFFS, STEPS};
 use earwig_core::models::{
@@ -31,24 +26,23 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    Anchor, AnyElement, AnyView, App, AppContext as _, Context, Entity, FontFeatures, Hsla,
+    Anchor, AnyElement, AnyView, App, AppContext as _, Context, Entity, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 
 use super::{LOCKED_HINT, is_locked, spaced};
 use crate::ui::marquee::marquee;
-use crate::ui::{UiState, edit_config};
+use crate::ui::{UiState, edit_config, font};
 use crate::{human_size, human_size_of};
 
 /// How often a running download moves its bar.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-/// How often the amount under a download's bar changes, so its digits
-/// don't flicker.
+/// How often the amount under the bar updates, so its digits don't flicker.
 const TEXT_INTERVAL: Duration = Duration::from_secs(1);
 /// The Language choice that leaves the language to the model.
 const DETECT_LANGUAGE: &str = "\u{0}detect";
-/// A row's download mark and trash can follow the pointer on the row.
+/// Hover group for a row's download mark and trash can.
 const ROW_GROUP: &str = "model-row";
 /// What the sidebar search finds the page by.
 const KEYWORDS: [&str; 4] = ["models", "downloads", "languages", "hugging face"];
@@ -61,9 +55,6 @@ const DOT: Pixels = px(6.);
 const DOT_GAP: Pixels = px(3.);
 /// Where a meter's or column's explanation wraps.
 const TIP_WIDTH: Pixels = px(300.);
-/// Digits of one width, so a changing amount doesn't jitter.
-static TABULAR: LazyLock<FontFeatures> =
-    LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
 
 pub struct ModelsPage {
     installed: Vec<InstalledModel>,
@@ -86,8 +77,7 @@ struct Download {
     downloaded: u64,
     /// 0 while unknown.
     total: u64,
-    /// The amount the row says, `downloaded` as of [`TEXT_INTERVAL`] ago at
-    /// most, and when it was taken.
+    /// The amount the row says, refreshed every [`TEXT_INTERVAL`].
     said: u64,
     said_at: Option<Instant>,
     cancel: CancelToken,
@@ -105,8 +95,7 @@ impl Download {
         }
     }
 
-    /// The bar follows every update; the amount said follows once a
-    /// [`TEXT_INTERVAL`], and at once when the last byte is in.
+    /// The bar follows every update; the text every [`TEXT_INTERVAL`], or at once when complete.
     fn progress(&mut self, downloaded: u64, total: u64, now: Instant) {
         self.downloaded = downloaded;
         self.total = total;
@@ -119,19 +108,16 @@ impl Download {
         }
     }
 
-    /// Every byte is in: the checksum is being verified before the file
-    /// moves into place, which ends the download.
+    /// Every byte is in: the checksum is being verified.
     fn complete(&self) -> bool {
         self.total > 0 && self.downloaded >= self.total
     }
 
-    /// No share of a known size to show: nothing in yet, no size known, or
-    /// verifying.
+    /// No size known yet, or verifying.
     fn indeterminate(&self) -> bool {
         self.total == 0 || self.complete()
     }
 
-    /// What the row says under the bar.
     fn line(&self) -> String {
         if self.complete() {
             "Verifying the download".into()
@@ -185,7 +171,7 @@ impl ModelsPage {
         self.installed = UiState::handle(cx).models().installed();
     }
 
-    /// A row was clicked: use its model, or download it and use it then.
+    /// Use the row's model, or download it and use it then.
     fn click(&mut self, row: &Row, active: &ModelSpec, locked: bool, cx: &mut Context<Self>) {
         cx.notify();
         // A click anywhere answers an open "Delete?" with no.
@@ -224,8 +210,7 @@ impl ModelsPage {
                 let result = models.download(
                     &thread_spec,
                     &mut |progress| {
-                        // The last byte always gets through: it starts the
-                        // verifying.
+                        // The last byte always gets through: it starts the verifying.
                         let complete = progress.total > 0 && progress.downloaded >= progress.total;
                         if complete || last.elapsed() >= PROGRESS_INTERVAL {
                             last = Instant::now();
@@ -311,8 +296,7 @@ impl ModelsPage {
         cx.notify();
     }
 
-    /// The search box changed: the rows filter, and a Hugging Face search
-    /// for anything else is forgotten.
+    /// Filters the rows, and forgets a Hugging Face search for another query.
     fn set_query(&mut self, query: String, cx: &mut Context<Self>) {
         if query == self.query {
             return;
@@ -322,8 +306,7 @@ impl ModelsPage {
         cx.notify();
     }
 
-    /// Search Hugging Face for the query in the box: its row at the end of
-    /// the table was clicked, or Enter pressed.
+    /// Its row was clicked or Enter pressed.
     fn search_hub(&mut self, cx: &mut Context<Self>) {
         let Some(query) = self.hub.start(&self.query) else {
             return;
@@ -361,9 +344,7 @@ impl ModelsPage {
     }
 }
 
-/// The Hugging Face search at the end of the table. Typing only filters the
-/// table; Hugging Face is asked when its row is clicked or Enter pressed,
-/// for two characters or more, and a new query offers the search again.
+/// Asked only on request, for two characters or more; a new query offers it again.
 #[derive(Debug, Default, PartialEq)]
 enum HubSearch {
     /// Not asked for the query in the box.
@@ -385,8 +366,7 @@ impl HubSearch {
         }
     }
 
-    /// Asked to search for `query`: the query to send, unless it is too
-    /// short, or its search is running or has found something already.
+    /// The query to send, unless it's too short, already running or already found.
     fn start(&mut self, query: &str) -> Option<String> {
         if !searchable(query) {
             return None;
@@ -407,24 +387,22 @@ impl HubSearch {
         }
     }
 
-    /// Whether its search for `query` is running.
     fn running(&self, query: &str) -> bool {
         matches!(self, Self::Running(searched) if searched == query)
     }
 }
 
-/// Whether `query` is worth a Hugging Face search: two characters or more.
+/// Two characters or more.
 fn searchable(query: &str) -> bool {
     query.chars().nth(1).is_some()
 }
 
-/// Use `spec` from now on: the config names it and the daemon reloads.
 fn use_model(spec: ModelSpec, cx: &mut App) {
     let model = UiState::handle(cx).models().setting_for(spec);
     edit_config(cx, |c| c.model.model = model);
 }
 
-/// A clicked row's model, as far as the click goes.
+/// Where the clicked row's model stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Clicked {
     /// On disk and in use.
@@ -435,19 +413,15 @@ enum Clicked {
     Remote,
 }
 
-/// What clicking a row does.
 #[derive(Debug, PartialEq, Eq)]
 enum Click {
-    /// Use the model now.
     Use,
-    /// Download it; it is used when that is done, unless another row was
-    /// clicked since.
+    /// Download it, then use it unless another row was clicked since.
     Download,
     Nothing,
 }
 
-/// The model a finished download switches to: the last row clicked, as long
-/// as that one was not on disk yet.
+/// What a finished download switches to: the last row clicked, if it wasn't on disk yet.
 #[derive(Debug, Default)]
 struct Picks {
     target: Option<ModelSpec>,
@@ -491,7 +465,7 @@ impl Picks {
         wanted
     }
 
-    /// `spec`'s download failed or was cancelled: nothing to switch to.
+    /// Its download failed or was cancelled.
     fn dropped(&mut self, spec: &ModelSpec) {
         if self.is_target(spec) {
             self.target = None;
@@ -513,7 +487,6 @@ enum Place {
     Stored,
 }
 
-/// One model in the table.
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
     spec: ModelSpec,
@@ -595,8 +568,7 @@ impl Row {
         self.languages.len() > 1
     }
 
-    /// Whether every word of `query` is in the row's name, summary, id, tag,
-    /// abilities or language names, ignoring case.
+    /// Every word of `query` is in the name, summary, id, tag, abilities or languages.
     fn matches(&self, query: &str) -> bool {
         let mut haystack = format!("{} {} {}", self.name, self.summary, self.spec);
         if let Some(role) = self.role {
@@ -672,8 +644,7 @@ fn catalog_index(catalog: &[CatalogEntry], spec: &ModelSpec) -> Option<usize> {
     }
 }
 
-/// The row of the model in use when nothing else lists it: a local file,
-/// a Hugging Face file not on disk, or an id this release doesn't know.
+/// A row for the model in use when nothing else lists it (a local file, remote or unknown id).
 fn active_row(
     active: &ModelSpec,
     catalog: &[CatalogEntry],
@@ -698,8 +669,7 @@ fn active_row(
     })
 }
 
-/// The untested rows of a search: files the engine loads that the catalog
-/// doesn't list already.
+/// Search results the engine loads and the catalog doesn't list.
 fn found_rows(results: &[SearchResult], catalog: &[CatalogEntry]) -> Vec<Row> {
     results
         .iter()
@@ -718,8 +688,7 @@ fn found_rows(results: &[SearchResult], catalog: &[CatalogEntry]) -> Vec<Row> {
         .collect()
 }
 
-/// The Untested rows for `query`: what the search for it found, while it is
-/// in the box, and untested models still downloading that match it.
+/// What the search for `query` found, plus untested downloads that match it.
 fn untested_rows<'a>(
     query: &str,
     hub: &HubSearch,
@@ -740,7 +709,6 @@ fn untested_rows<'a>(
     rows
 }
 
-/// The table's rows, section by section.
 #[derive(Debug, Default, PartialEq)]
 struct Table {
     /// On disk, the one in use first, then curated ones in catalog order.
@@ -864,11 +832,7 @@ fn render(
     let theme = cx.theme();
     let models = UiState::handle(cx).models();
     let catalog = models.catalog();
-    let configured = model
-        .model
-        .clone()
-        .unwrap_or_else(|| curated(models.default_model()));
-    let active = canonical(configured, catalog);
+    let active = canonical(crate::configured_model(&models, model), catalog);
     let untested = untested_rows(
         &page.query,
         &page.hub,
@@ -949,7 +913,6 @@ fn render(
         .into_any_element()
 }
 
-/// The search box across the table's top.
 fn search_box(page: &ModelsPage, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
@@ -969,20 +932,17 @@ fn search_box(page: &ModelsPage, cx: &App) -> impl IntoElement {
         )
 }
 
-/// Which of Handy's speeds fits this computer: the backend the model in use
-/// runs on, or before one is loaded, the configured one.
-fn tier(status: &ModelStatus, backend: BackendSetting) -> Tier {
+/// The loaded model's backend, else the configured one.
+fn tier(status: &ModelStatus, backend: Backend) -> Tier {
     match status {
         ModelStatus::Ready { backend, .. } if backend == "cpu" => Tier::Cpu,
         ModelStatus::Ready { .. } => Tier::Gpu,
-        _ if backend == BackendSetting::Cpu => Tier::Cpu,
+        _ if backend == Backend::Cpu => Tier::Cpu,
         _ => Tier::Gpu,
     }
 }
 
-/// The row at the end of the table while a query of two characters or more
-/// is typed: search Hugging Face for it, or the search running. Gone once
-/// the search found something; back, with why, when it failed.
+/// "Search Hugging Face" at the table's end; gone once that search found something.
 fn hub_row(page: &ModelsPage, view: &Entity<ModelsPage>, cx: &App) -> Option<AnyElement> {
     let query = page.query.as_str();
     let failed = match &page.hub {
@@ -1062,8 +1022,7 @@ fn untested_note(query: &str, found: bool, empty: bool) -> SharedString {
     }
 }
 
-/// A section's title. The first one also heads the accuracy and speed
-/// columns, whose legends show on hover.
+/// The first section's title also heads the accuracy and speed columns.
 fn section_title(title: &'static str, columns: Option<Tier>, cx: &App) -> impl IntoElement {
     h_flex()
         .px_2()
@@ -1215,7 +1174,7 @@ fn render_row(frame: &Frame, row: &Row, cx: &App) -> AnyElement {
                         .text_xs()
                         .text_color(line_color)
                         .when(download.is_some(), |this| {
-                            this.font_features(TABULAR.clone())
+                            this.font_features(font::TABULAR.clone())
                         }),
                 )
                 .children(language),
@@ -1273,8 +1232,7 @@ fn status_model(status: &ModelStatus) -> &ModelSpec {
     }
 }
 
-/// A spinning ring while downloading, else checked in use, empty on disk,
-/// and a download mark when not on disk yet.
+/// A spinner while downloading, else a check in use, empty on disk, a download mark remote.
 fn row_mark(frame: &Frame, row: &Row, in_use: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     if frame.page.downloads.contains_key(&row.spec) {
@@ -1358,9 +1316,7 @@ fn ability(id: SharedString, icon: IconName, tip: SharedString, cx: &App) -> imp
         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
 }
 
-/// Handy's accuracy and speed dots, the size, then × for a running download
-/// or the trash can (shown while the pointer is on the row) for a model in
-/// the user's store.
+/// The meters and size, then × for a download or (on hover) a trash can for a stored model.
 fn row_values(frame: &Frame, row: &Row, in_use: bool, cx: &App) -> AnyElement {
     let view = frame.view;
     let spec = &row.spec;
@@ -1412,8 +1368,7 @@ fn row_values(frame: &Frame, row: &Row, in_use: bool, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Handy's accuracy and speed dots for `row`, or the room they take when
-/// Handy hasn't measured it.
+/// Handy's accuracy and speed dots, or their room when untested.
 fn meters(row: &Row, tier: Tier, cx: &App) -> [AnyElement; 2] {
     let Some(benchmark) = row.benchmark else {
         return [(); 2].map(|()| div().w(COLUMN).flex_shrink_0().into_any_element());
@@ -1491,8 +1446,7 @@ fn delete_question(view: &Entity<ModelsPage>, spec: &ModelSpec) -> AnyElement {
         .into_any_element()
 }
 
-/// A click handler for a button on a row: runs `action` for the row's model
-/// and keeps the click from reaching the row.
+/// Runs `action` for the row's model without the click reaching the row.
 fn row_action(
     view: &Entity<ModelsPage>,
     spec: &ModelSpec,
@@ -1557,8 +1511,7 @@ fn language_picker(languages: &[String], configured: Option<&str>, locked: bool)
         .into_any_element()
 }
 
-/// Detect automatically, then `languages` by name, then the `configured`
-/// one when the model does not list it (the engine ignores it then).
+/// Detect, then the model's languages by name, then a configured one it doesn't list.
 fn language_options(
     languages: &[String],
     configured: Option<&str>,
@@ -1581,8 +1534,7 @@ fn language_options(
     options
 }
 
-/// The English name of a language code the catalog uses; any other code as
-/// it is.
+/// The English name of a catalog language code; others as they are.
 fn language_name(code: &str) -> &str {
     match code {
         "ar" => "Arabic",
@@ -1893,37 +1845,13 @@ mod tests {
             streaming: false,
             backend: backend.into(),
         };
-        assert_eq!(tier(&ready("vulkan"), BackendSetting::Cpu), Tier::Gpu);
-        assert_eq!(tier(&ready("cpu"), BackendSetting::Auto), Tier::Cpu);
+        assert_eq!(tier(&ready("vulkan"), Backend::Cpu), Tier::Gpu);
+        assert_eq!(tier(&ready("cpu"), Backend::Auto), Tier::Cpu);
         let loading = ModelStatus::Loading {
             model: model.clone(),
         };
-        assert_eq!(tier(&loading, BackendSetting::Auto), Tier::Gpu);
-        assert_eq!(tier(&loading, BackendSetting::Cpu), Tier::Cpu);
-    }
-
-    #[test]
-    fn the_legends_spell_out_handys_bands() {
-        assert_eq!(
-            accuracy_legend(),
-            "Accuracy in English, from Handy's tests. Dots by the share of words it gets \
-             wrong: 5 under 5% (A), 4 under 10% (B), 3 under 20% (C), 2 under 30% (D), 1 \
-             beyond (F)."
-        );
-        assert_eq!(
-            speed_legend(Tier::Cpu),
-            "Speed on a laptop's processor, from Handy's tests. Dots by the time 30 s of \
-             speech take: 5 under 1.5 s, 4 under 3 s, 3 under 5 s, 2 under 10 s, 1 under 20 \
-             s. This computer may differ."
-        );
-        // Curated rows carry Handy's numbers; untested ones none.
-        assert!(
-            catalog()
-                .iter()
-                .map(Row::curated)
-                .all(|row| row.benchmark.is_some())
-        );
-        assert_eq!(Row::hub("o/r", "m.gguf", "c", 1).benchmark, None);
+        assert_eq!(tier(&loading, Backend::Auto), Tier::Gpu);
+        assert_eq!(tier(&loading, Backend::Cpu), Tier::Cpu);
     }
 
     #[test]
@@ -1960,24 +1888,6 @@ mod tests {
         assert_eq!(picks.click(&a, Clicked::Remote, true), Click::Download);
         assert!(!picks.finished(&a));
         assert_eq!(picks.click(&a, Clicked::OnDisk, true), Click::Nothing);
-    }
-
-    #[test]
-    fn only_models_that_take_a_language_hint_offer_a_language() {
-        let catalog = catalog();
-        let hinted: Vec<&str> = catalog
-            .iter()
-            .filter(|entry| entry.language_hint)
-            .map(|entry| entry.id.as_str())
-            .collect();
-        assert_eq!(
-            hinted,
-            ["Qwen3-ASR-1.7B", "nemotron-3.5-asr-streaming-0.6b"]
-        );
-        // Multilingual, but it detects the language and takes no hint.
-        let ultra = catalog.iter().find(|entry| entry.id == "parakeet-ultra");
-        let ultra = Row::curated(ultra.unwrap());
-        assert!(ultra.multilingual() && !ultra.language_hint);
     }
 
     #[test]

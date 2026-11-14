@@ -48,12 +48,10 @@ pub(super) fn socket() -> PathBuf {
 /// `earwig` in each absolute entry of the colon-separated `var`, most
 /// important first (the spec's order).
 fn search_path(var: &str, default: &str) -> Vec<PathBuf> {
-    let dirs = env::var(var).unwrap_or_default();
-    let dirs = if dirs.is_empty() {
-        default.to_owned()
-    } else {
-        dirs
-    };
+    let dirs = env::var(var)
+        .ok()
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| default.to_owned());
     dirs.split(':')
         .filter(|d| d.starts_with('/'))
         .map(|d| PathBuf::from(d).join(APP))

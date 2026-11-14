@@ -1,12 +1,6 @@
-//! Linux backends, best first:
-//! - `input_method`: Wayland `zwp_input_method_v2.commit_string` (niri, sway,
-//!   Hyprland). Atomic, leaves the clipboard alone; needs the focused client
-//!   to have text-input-v3 enabled.
-//! - `paste`: clipboard via data-control plus one paste chord through
-//!   `zwp_virtual_keyboard_v1`; Ctrl+Shift+V when the focused toplevel is a
-//!   terminal. Covers clients without text-input (Electron, XWayland).
-//! - `portal`: RemoteDesktop portal (GNOME, KDE): clipboard portal plus one
-//!   paste chord over libei.
+//! Linux backends, best first: `input_method` (Wayland commit_string; niri,
+//! sway, Hyprland), `paste` (data-control clipboard plus one chord on a virtual
+//! keyboard; Electron, XWayland) and `portal` (RemoteDesktop; GNOME, KDE).
 
 use anyhow::Context as _;
 
@@ -31,8 +25,8 @@ const MIME_TYPES: &[&str] = &[
     "STRING",
 ];
 
-/// `auto` uses the portal only where the Wayland paste path is missing,
-/// since it asks for consent, and leaves out backends that fail to connect.
+/// `auto` uses the portal only where the Wayland paste path is missing (it
+/// asks for consent), and leaves out backends that fail to connect.
 pub(super) fn backends(
     config: &InsertConfig,
     caps: &DesktopCaps,

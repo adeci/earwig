@@ -14,14 +14,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLay
 
 use super::DesktopCaps;
 
-/// Longest wait for the portal frontend, which D-Bus may have to start. At
-/// login it answers only once its backends are up (about 5 s for
-/// xdg-desktop-portal-kde) and missing it costs portal insertion and
-/// shortcuts, so wait as long as D-Bus waits for an activated service.
-/// Without a portal, D-Bus fails at once.
+/// As long as D-Bus waits for an activated service: at login the portal only
+/// answers once its backends are up (about 5 s for KDE's).
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// Never fails: whatever cannot be reached counts as absent.
 pub(super) fn probe() -> DesktopCaps {
     let mut caps = DesktopCaps {
         desktop: std::env::var("XDG_CURRENT_DESKTOP")

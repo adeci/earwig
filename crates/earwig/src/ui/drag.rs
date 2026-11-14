@@ -1,27 +1,23 @@
-//! Where a drag of the overlay pill stands: held from the press on it until
-//! the button comes up, another one goes down, or the window loses the
-//! pointer. The pill's own window follows the pointer meanwhile, still
-//! animated (see `overlay`).
+//! Dragging the pill: where the pointer is while its window moves under it.
 
 use std::cell::Cell;
 
 use gpui_kit::{MouseButton, Pixels, Point};
 
+/// Where things stood at the press.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grab {
-    /// The pointer's offset from the spot it grabbed.
+    /// Pointer minus the pill's spot.
     pub offset: Point<Pixels>,
-    /// The pointer on the area at the press, in the window then at
-    /// `origin`, and how far it had travelled by then (relative motions
-    /// summed, where the compositor reports them).
+    /// The pointer on the area, and in the window then at `origin`.
     pub at: Point<Pixels>,
     pub local: Point<Pixels>,
     pub origin: Point<Pixels>,
+    /// Summed relative motion, where the compositor reports it.
     pub travel: Option<Point<Pixels>>,
 }
 
-/// What a compositor gives the pointer's position in a surface relative to
-/// while that surface moves under a held button.
+/// What pointer positions are relative to while the surface under a held button moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchoring {
     /// Where the surface was at the press (sway, niri).
@@ -35,27 +31,19 @@ thread_local! {
     static ANCHORING: Cell<Option<Anchoring>> = const { Cell::new(None) };
 }
 
-/// Pointer travel over which a drag tells the anchorings apart.
+/// Travel needed before a drag can tell the anchorings apart.
 const TELLING: f64 = 24.;
-/// How far from where it pressed the pointer may seem to be in the window,
-/// read as the protocol has it, before that is taken as positions anchored
-/// at the press: following the pointer, the window keeps it within one
-/// motion event of there.
+/// The window keeps the pointer near where it pressed; drifting further means press anchoring.
 const ADRIFT: f64 = 16.;
 
 impl Grab {
-    /// The pointer on the area now, from its travel since the press where
-    /// the compositor reports relative motion (it does not for absolute
-    /// devices such as tablets), else from `local` in the window at
-    /// `origin` as this compositor anchors it: as the protocol says until a
-    /// drag has shown otherwise. `free`: the window follows the pointer
-    /// rather than resting against an edge of the area.
+    /// The pointer on the area: by relative travel if any (not tablets), else `local` as anchored.
     pub fn pointer(
         self,
         travel: Option<Point<Pixels>>,
         local: Point<Pixels>,
         origin: Point<Pixels>,
-        free: bool,
+        unclamped: bool,
     ) -> Point<Pixels> {
         if let (Some(then), Some(now)) = (self.travel, travel)
             && now != then
@@ -64,7 +52,7 @@ impl Grab {
             self.learn(pointer, local, origin);
             return pointer;
         }
-        if ANCHORING.get().is_none() && free && (local - self.local).magnitude() > ADRIFT {
+        if ANCHORING.get().is_none() && unclamped && (local - self.local).magnitude() > ADRIFT {
             learned(Anchoring::Press, "the pointer drifting in the window");
         }
         match ANCHORING.get() {
@@ -73,9 +61,7 @@ impl Grab {
         }
     }
 
-    /// Note which anchoring puts `local` where the travel says the pointer
-    /// is (to within a quarter of the way, as relative motion may come an
-    /// event late); the other one is off by as far as the window went.
+    /// Learns the anchoring that puts `local` where the travel says, give or take a late event.
     fn learn(self, pointer: Point<Pixels>, local: Point<Pixels>, origin: Point<Pixels>) {
         let travel = (pointer - self.at).magnitude();
         if ANCHORING.get().is_some()
@@ -100,9 +86,7 @@ fn learned(anchoring: Anchoring, by: &str) {
     ANCHORING.set(Some(anchoring));
 }
 
-/// Whether positions are read as relative to where the window is now, so
-/// the window shifts those the compositor sent before it caught up with a
-/// move (see `vendor/gpui-pre-linux/PATCH.md`).
+/// Read positions relative to where the window is now (see vendor/gpui-pre-linux/PATCH.md).
 #[cfg(target_os = "linux")]
 pub fn reads_current() -> bool {
     ANCHORING.get() != Some(Anchoring::Press)
@@ -116,48 +100,18 @@ pub enum Pointer {
     },
     Pressed(MouseButton),
     Released(MouseButton),
-    /// The pointer left the window. While a button is down the compositor
-    /// keeps the pointer on the window it went down in, so this means the
-    /// grab is gone (layer-shell only: X11 reports crossings during one).
+    /// With a button down, the grab is gone (layer-shell only; X11 reports mid-grab crossings).
     Exited,
 }
 
 impl Pointer {
-    /// Whether the event ends a drag: the button came up (seen or not),
-    /// another one went down, or the grab was lost.
+    /// The button came up (seen or not), another went down, or the grab was lost.
     pub fn ends_drag(self) -> bool {
         match self {
             Pointer::Moved { pressed } => pressed != Some(MouseButton::Left),
             Pointer::Pressed(_) | Pointer::Exited => true,
             Pointer::Released(button) => button == MouseButton::Left,
         }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct Drag(Option<Grab>);
-
-impl Drag {
-    /// Take hold of the pill; refused while a drag lasts.
-    pub fn hold(&mut self, grab: Grab) -> bool {
-        if self.0.is_some() {
-            return false;
-        }
-        self.0 = Some(grab);
-        true
-    }
-
-    pub fn grab(&self) -> Option<Grab> {
-        self.0
-    }
-
-    pub fn is_held(&self) -> bool {
-        self.0.is_some()
-    }
-
-    /// Let go of the pill, where it is; whether it was held.
-    pub fn let_go(&mut self) -> bool {
-        self.0.take().is_some()
     }
 }
 
@@ -181,9 +135,7 @@ mod tests {
         }
     }
 
-    /// Where the window ends up behind a pointer that goes `steps` 5 px to
-    /// the right, relative to where it should be, on a compositor that
-    /// anchors positions as `truth`, with the pointer's travel known or not.
+    /// How far off the window ends up after `steps` 5 px moves right, anchored as `truth`.
     fn drive(truth: Anchoring, travel: bool, steps: usize) -> Point<Pixels> {
         let grab = grab(travel);
         let mut origin = self::origin();
@@ -223,53 +175,8 @@ mod tests {
         ANCHORING.set(None);
         assert!(drive(Anchoring::Current, false, 40).magnitude() < 1e-3);
         assert_eq!(ANCHORING.get(), None, "as the protocol says");
-        // Read as the protocol says, positions anchored at the press run
-        // ahead; the drift gives it away within a few events.
+        // Read as the protocol says, press-anchored positions run ahead; the drift shows it.
         assert!(drive(Anchoring::Press, false, 40).magnitude() < 1e-3);
         assert_eq!(ANCHORING.get(), Some(Anchoring::Press));
-    }
-
-    #[test]
-    fn a_drag_holds_and_lets_go_any_number_of_times() {
-        let mut drag = Drag::default();
-        for _ in 0..5 {
-            assert!(drag.hold(grab(true)));
-            assert_eq!(drag.grab(), Some(grab(true)));
-            assert!(drag.let_go());
-            assert!(!drag.is_held());
-        }
-    }
-
-    #[test]
-    fn one_drag_at_a_time() {
-        let mut drag = Drag::default();
-        assert!(drag.hold(grab(true)));
-        assert!(!drag.hold(grab(false)));
-        assert!(drag.let_go());
-        assert!(!drag.let_go(), "nothing held");
-    }
-
-    #[test]
-    fn what_ends_a_drag() {
-        let left = MouseButton::Left;
-        assert!(
-            !Pointer::Moved {
-                pressed: Some(left)
-            }
-            .ends_drag()
-        );
-        // The release went elsewhere: the next move says so.
-        assert!(Pointer::Moved { pressed: None }.ends_drag());
-        assert!(
-            Pointer::Moved {
-                pressed: Some(MouseButton::Right)
-            }
-            .ends_drag()
-        );
-        assert!(Pointer::Released(left).ends_drag());
-        assert!(!Pointer::Released(MouseButton::Right).ends_drag());
-        assert!(Pointer::Pressed(MouseButton::Right).ends_drag());
-        assert!(Pointer::Pressed(left).ends_drag());
-        assert!(Pointer::Exited.ends_drag());
     }
 }

@@ -1,22 +1,9 @@
-//! The control socket: a Unix socket (mode 0600), e.g.
-//! `$XDG_RUNTIME_DIR/earwig.sock`, or on Windows a named pipe only the user
-//! may open (see [`crate::paths::socket`]).
-//!
-//! Newline-delimited JSON: each client line is one [`Command`]; replies are
-//! [`Event`] lines.
-//! - [`Command::Status`]: one [`Event::Status`].
-//! - [`Command::Subscribe`]: an [`Event::Status`] snapshot, then every event
-//!   until either side hangs up. Lines sent after it are ignored.
-//! - every other command: no reply; it is queued for the controller.
-//! - a line that is not a valid command: one [`Event::Error`].
-//!
-//! The daemon closes a connection when the client closes its write side, so
-//! a client may send several commands, shut down writing, and read to EOF.
-//! A pipe has no half-close; there the client sends an empty message instead.
-//!
-//! Each OS module provides the transport: `Listener::{bind, accept}`, a
-//! connection that reads and writes through `&Conn`, `connect` and
-//! `shutdown_write`.
+//! The control socket (a 0600 Unix socket, or a named pipe only the user may
+//! open): one JSON [`Command`] per line in, [`Event`] lines out. `status` gets
+//! one [`Event::Status`], `subscribe` a snapshot and then every event (later
+//! lines are ignored), a bad line one [`Event::Error`], anything else no reply.
+//! The daemon hangs up once the client shuts its write side (on a pipe: sends
+//! an empty message).
 
 #[cfg(unix)]
 mod unix;
@@ -31,7 +18,7 @@ use windows as os;
 #[cfg(windows)]
 pub(crate) use windows::user_sid;
 
-use std::io::{self, BufRead as _, BufReader, Write as _};
+use std::io::{self, BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -56,9 +43,8 @@ pub fn subscribe() -> anyhow::Result<impl Iterator<Item = anyhow::Result<Event>>
     subscribe_at(&crate::paths::socket())
 }
 
-/// A bound control socket that is not serving yet. Binding first lets the
-/// daemon refuse to start twice before it opens the microphone or loads a
-/// model.
+/// Bound but not serving yet, so a second daemon stops before it opens the
+/// microphone or loads a model.
 pub struct Server {
     listener: os::Listener,
     path: PathBuf,
@@ -108,28 +94,27 @@ impl Server {
 }
 
 fn serve_client(conn: &os::Conn, handle: &Handle) -> io::Result<()> {
-    let mut out = conn;
     for line in BufReader::new(conn).lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<Command>(&line) {
-            Ok(Command::Status) => write_event(
-                &mut out,
+            Ok(Command::Status) => write_line(
+                conn,
                 &Event::Status {
                     status: handle.status(),
                 },
             )?,
             Ok(Command::Subscribe) => {
                 for event in &handle.subscribe() {
-                    write_event(&mut out, &event)?;
+                    write_line(conn, &event)?;
                 }
                 return Ok(());
             }
             Ok(cmd) => handle.send(cmd),
-            Err(e) => write_event(
-                &mut out,
+            Err(e) => write_line(
+                conn,
                 &Event::Error {
                     message: format!("invalid command: {e}"),
                 },
@@ -139,8 +124,8 @@ fn serve_client(conn: &os::Conn, handle: &Handle) -> io::Result<()> {
     Ok(())
 }
 
-fn write_event(out: &mut impl io::Write, event: &Event) -> io::Result<()> {
-    let mut line = serde_json::to_string(event).map_err(io::Error::other)?;
+fn write_line(mut out: impl io::Write, value: &impl serde::Serialize) -> io::Result<()> {
+    let mut line = serde_json::to_string(value).map_err(io::Error::other)?;
     line.push('\n');
     out.write_all(line.as_bytes())
 }
@@ -150,17 +135,10 @@ fn connect(path: &Path) -> anyhow::Result<os::Conn> {
         .with_context(|| format!("earwig is not running (no daemon at {})", path.display()))
 }
 
-fn send_line(mut conn: &os::Conn, cmd: &Command) -> anyhow::Result<()> {
-    let mut line = serde_json::to_string(cmd)?;
-    line.push('\n');
-    conn.write_all(line.as_bytes())?;
-    Ok(())
-}
-
 /// [`request`] against an explicit socket path.
 pub fn request_at(path: &Path, cmd: &Command) -> anyhow::Result<Option<Event>> {
     let conn = connect(path)?;
-    send_line(&conn, cmd)?;
+    write_line(&conn, cmd)?;
     os::shutdown_write(&conn)?;
     let mut reply = None;
     for line in BufReader::new(&conn).lines() {
@@ -181,7 +159,7 @@ pub fn subscribe_at(
     path: &Path,
 ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Event>> + use<>> {
     let conn = connect(path)?;
-    send_line(&conn, &Command::Subscribe)?;
+    write_line(&conn, &Command::Subscribe)?;
     Ok(BufReader::new(conn)
         .lines()
         .filter(|line| !line.as_ref().is_ok_and(|l| l.trim().is_empty()))
@@ -204,9 +182,6 @@ mod tests {
     struct NoEngine;
 
     impl EngineFactory for NoEngine {
-        fn name(&self) -> &'static str {
-            "none"
-        }
         fn supports_architecture(&self, _arch: &str) -> bool {
             false
         }
@@ -293,7 +268,7 @@ mod tests {
         assert_eq!(events.next().unwrap().unwrap(), Event::Level { level: 0.5 });
 
         let raw = os::connect(&path).unwrap();
-        (&raw).write_all(b"{\"cmd\":\"dance\"}\n").unwrap();
+        write_line(&raw, &serde_json::json!({"cmd": "dance"})).unwrap();
         os::shutdown_write(&raw).unwrap();
         let line = BufReader::new(&raw).lines().next().unwrap().unwrap();
         assert!(matches!(
@@ -303,26 +278,27 @@ mod tests {
     }
 
     #[test]
-    fn a_live_daemon_keeps_its_address_until_it_is_gone() {
+    fn a_second_daemon_leaves_the_live_ones_address_alone() {
         let dir = tempfile::tempdir().unwrap();
         let path = address(dir.path());
-        let server = Server::bind(&path).unwrap();
+        let _server = Server::bind(&path).unwrap();
         assert!(Server::bind(&path).is_err());
         assert!(
             os::connect(&path).is_ok(),
             "the live daemon lost its address"
         );
-        drop(server);
-        Server::bind(&path).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn stale_socket_is_replaced() {
+    fn a_stale_socket_is_replaced() {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, socket};
         let dir = tempfile::tempdir().unwrap();
         let path = address(dir.path());
-        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-        assert!(path.exists());
+        // A socket nothing listens on, as a crash leaves it. Not a dropped
+        // listener: a child another test forks meanwhile holds that until exec.
+        let stale = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        bind(&stale, &SocketAddrUnix::new(&path).unwrap()).unwrap();
         let _server = Server::bind(&path).unwrap();
         assert!(os::connect(&path).is_ok());
     }

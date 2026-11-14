@@ -1,7 +1,5 @@
-# Shared parts of the desktop VM tests: a user `alice` (uid 1000) with
-# autologin on tty1, PipeWire with a virtual microphone, earwig through the
-# NixOS module with the default model pinned, and Python helpers for the test
-# script.
+# Shared by the desktop VM tests: alice (uid 1000) logged in on tty1, PipeWire with a virtual
+# mic, earwig from the NixOS module, and Python helpers for the test scripts.
 { self }:
 {
   machine =
@@ -41,10 +39,8 @@
         enable = true;
         pulse.enable = true;
         wireplumber.enable = true;
-        # A virtual microphone: whatever is played into the `test_mic_in`
-        # sink comes out of the `test_mic` source, the only and therefore
-        # default capture device. The graph runs on PipeWire's dummy driver
-        # since the VM has no sound card.
+        # A virtual mic: what plays into the test_mic_in sink comes out of the test_mic source,
+        # the only (so default) capture device, on PipeWire's dummy driver (no sound card).
         extraConfig.pipewire."90-test-mic" = {
           "context.modules" = [
             {
@@ -139,12 +135,8 @@
 
 
     def read_overlay() -> str:
-        """OCR of the band the overlay sits in at home (the bottom 35% of
-        the screen), cropped and scaled up: on the whole screen, tesseract
-        often reads little of the pill's 15 px text among windows and
-        panels. One plain pass: the driver's preprocessed variants of an
-        image this size take tens of seconds of the host's CPU, which the
-        VM's decoder needs."""
+        """OCR of the bottom 35% of the screen, where the overlay sits, scaled up: on the whole
+        screen tesseract misses the pill's small text. One plain pass, to spare the host's CPU."""
         from pathlib import Path
         from test_driver.machine.ocr import perform_ocr_on_screenshot
 

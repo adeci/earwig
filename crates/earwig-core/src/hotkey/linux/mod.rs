@@ -15,12 +15,11 @@ use crate::desktop::DesktopCaps;
 
 /// Lets the user at the seat read keyboards and make virtual ones; the
 /// NixOS module installs the same file.
-pub const UDEV_RULE: &str = include_str!("../../../../../assets/udev/70-earwig.rules");
+const UDEV_RULE: &str = include_str!("../../../../../assets/udev/70-earwig.rules");
 const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/70-earwig.rules";
 
-/// The GlobalShortcuts portal when enabled and advertised, and earwig cannot
-/// watch a key itself (no keyboard access, or no key set). An advertised
-/// portal that does not work ends quietly within seconds.
+/// The GlobalShortcuts portal, when enabled and advertised and earwig cannot
+/// watch a key itself; one that does not work ends quietly within seconds.
 pub(super) fn sources(config: &HotkeyConfig, caps: &DesktopCaps) -> Vec<Box<dyn HotkeySource>> {
     let watching = !config.key.trim().is_empty() && earwig_keys::can_see_keys();
     if config.portal && caps.portal_global_shortcuts && !watching {
@@ -55,9 +54,8 @@ pub fn access_fix() -> AccessFix {
     }
 }
 
-/// Install [`UDEV_RULE`] as root (pkexec asks for the password) and apply it
-/// to the keyboards plugged in now; earwig picks them up within a second.
-/// Blocks until the user answered.
+/// Install the udev rule as root (pkexec asks for the password) and apply it
+/// to the keyboards plugged in now. Blocks until the user answered.
 pub fn allow_keyboard_access() -> anyhow::Result<()> {
     let script = format!(
         "cat > {UDEV_RULE_PATH} <<'EOF'\n{UDEV_RULE}EOF\n\

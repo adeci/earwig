@@ -1,10 +1,6 @@
-//! A Wayland connection served on its own thread, shared by the
-//! input-method and paste backends.
-//!
-//! The thread dispatches events as they arrive, so focus, input-method and
-//! clipboard state stay current between insertions (and the clipboard keeps
-//! being served after a paste). Inserters hand it closures through
-//! [`Worker::call`]; an eventfd wakes the thread's `poll`.
+//! A Wayland connection served on its own thread for the input-method and
+//! paste backends: it keeps dispatching between insertions (so the clipboard
+//! stays served), and [`Worker::call`] runs closures on it.
 
 use std::io::ErrorKind;
 use std::os::fd::OwnedFd;
@@ -37,9 +33,8 @@ impl<S> Worker<S>
 where
     S: Dispatch<WlRegistry, GlobalListContents> + 'static,
 {
-    /// Connect to the compositor from `$WAYLAND_DISPLAY` on a new thread named
-    /// `name`, build the state with `init` (bind globals, create objects), do
-    /// one roundtrip so initial events have arrived, then serve.
+    /// Connect on a new thread, build the state with `init` (bind globals,
+    /// create objects), and do one roundtrip before serving.
     pub(super) fn spawn<F>(name: &str, init: F) -> anyhow::Result<Self>
     where
         F: FnOnce(&GlobalList, &QueueHandle<S>) -> anyhow::Result<S> + Send + 'static,

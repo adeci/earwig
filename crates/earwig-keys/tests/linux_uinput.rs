@@ -1,9 +1,6 @@
-//! The Linux backend against a uinput keyboard: keys as a real keyboard
-//! sends them, through the kernel, plugged in after the listener started.
-//! Needs write access to `/dev/uinput` (root in the `vm-keys` VM test);
-//! without it the test says so and passes. With `EARWIG_KEYS_KEYD=1` keyd is
-//! expected to hold the keyboards: the keys then come through its virtual
-//! keyboard, and the hotkey is seen but cannot be swallowed.
+//! The Linux backend driven by a real uinput keyboard, plugged in after the listener started.
+//! Skips without write access to `/dev/uinput`; set `EARWIG_KEYS_KEYD=1` where keyd holds the
+//! keyboards (the hotkey is then seen but not swallowed).
 #![cfg(target_os = "linux")]
 
 use std::ffi::c_void;

@@ -1,10 +1,4 @@
-//! GPUI front end: the dictation overlay, the settings window and the tray.
-//!
-//! [`run`] owns the main thread. Daemon events arrive on a flume channel and
-//! are applied to [`UiState`] (a GPUI global) on the main thread; the overlay
-//! and settings windows render from it. Nothing here talks to the microphone,
-//! the model or the inserter: every action goes back to the controller as a
-//! [`Command`] or a config edit.
+//! GPUI front end: renders daemon events, sends every action back as a command or config edit.
 
 mod accent;
 mod assets;
@@ -34,24 +28,20 @@ use gpui_kit::{AnyWindowHandle, App, Context, Entity, Global, QuitMode};
 
 use overlay::OverlayView;
 
-/// Requests that do not come from the daemon (tray clicks).
+/// Tray clicks, which don't go through the daemon.
 enum Local {
     ShowSettings,
 }
 
-/// How the overlay can float above other windows without taking focus;
-/// [`platform::overlay_surface`] picks one.
+/// How the overlay floats above other windows without taking focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlaySurface {
-    /// `zwlr_layer_shell_v1` (niri, sway, Hyprland, KDE, COSMIC).
+    /// niri, sway, Hyprland, KDE, COSMIC.
     #[cfg(target_os = "linux")]
     LayerShell,
-    /// A borderless popup window that [`platform::Popup`] moves: an
-    /// override-redirect X11 window, through XWayland on GNOME; a
-    /// non-activating topmost tool window on Windows.
+    /// Moved by us: override-redirect X11 (GNOME), no-activate window (Windows), panel (macOS).
     Popup,
-    /// Nothing suitable; showing a normal window would steal focus from the
-    /// app the text is meant for, so no overlay.
+    /// A normal window would steal focus, so no overlay.
     None,
 }
 
@@ -73,8 +63,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
         .with_assets(assets::Assets)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx: &mut App| {
-            // Before init, whose theme looks up the system font: GPUI's is
-            // IBM Plex Sans on Linux.
+            // Before init, whose theme looks up the system font (IBM Plex Sans on Linux).
             let bundled = font::register(cx);
             gpui_kit::init(cx);
             theme::install(cx);
@@ -114,8 +103,7 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
             })
             .detach();
 
-            // A voice shows on the next frame, however slowly the overlay
-            // was pacing itself; wake-ups coalesce, so this never queues.
+            // Show a voice next frame, however slowly the overlay paces itself (wake-ups coalesce).
             cx.spawn(async move |cx| {
                 let wakes = voice.wakes();
                 while wakes.recv_async().await.is_ok() {
@@ -143,14 +131,14 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
         });
 }
 
-/// Wall-clock milliseconds since the Unix epoch, the unit of daemon timestamps.
+/// Unix epoch ms, like the daemon's timestamps.
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Everything the windows render from, owned by the main thread.
+/// What the windows render from (main thread only).
 pub(crate) struct UiState {
     handle: Handle,
     #[cfg(target_os = "linux")]
@@ -160,11 +148,10 @@ pub(crate) struct UiState {
     tray: Option<platform::TrayHandle>,
     overlay: Option<Entity<OverlayView>>,
     settings: Option<AnyWindowHandle>,
-    /// When the overlay is woken next to move on by itself (see
-    /// [`follow_overlay`]).
+    /// When the overlay's next timed wake-up is due.
     overlay_wake: Option<Instant>,
     input_devices: InputDevices,
-    /// The microphone's last failure, until it delivers audio again.
+    /// Last mic failure, cleared once audio flows again.
     mic_error: Option<String>,
 }
 
@@ -189,19 +176,15 @@ impl UiState {
         &cx.global::<Self>().input_devices.devices
     }
 
-    /// Why the microphone last failed, until it delivers audio again.
     pub(crate) fn mic_error(cx: &App) -> Option<&str> {
         cx.global::<Self>().mic_error.as_deref()
     }
 
-    /// Forget the microphone's failure: another one is picked, which reports
-    /// its own.
     pub(crate) fn clear_mic_error(cx: &mut App) {
         cx.global_mut::<Self>().mic_error = None;
     }
 }
 
-/// The current merged settings.
 pub(crate) fn config(handle: &Handle) -> Config {
     handle
         .config()
@@ -226,9 +209,7 @@ pub(crate) fn edit_config(cx: &mut App, edit: impl FnOnce(&mut Config)) {
     cx.refresh_windows();
 }
 
-/// Theme every window with the configured scheme and accent. Cheap when
-/// they are already in place, so it runs whenever a window opens and picks
-/// up hand edits.
+/// Cheap when nothing changed, so every window opening calls it (picking up hand edits).
 pub(crate) fn apply_appearance(cx: &mut App) {
     let AppearanceConfig { theme, accent } = UiState::handle(cx)
         .config()
@@ -250,9 +231,7 @@ pub(crate) fn apply_appearance(cx: &mut App) {
 fn apply(event: Event, cx: &mut App) {
     match event {
         Event::Status { status } => {
-            // Snapshots also come with the state unchanged (after the
-            // inserter is rebuilt); passing those on would restart the
-            // overlay's switch-off.
+            // Snapshots can repeat the state, which would restart the overlay's switch-off.
             let state = status.state;
             let changed = UiState::status(cx).state != state;
             cx.global_mut::<UiState>().status = status;
@@ -265,16 +244,14 @@ fn apply(event: Event, cx: &mut App) {
             cx.global_mut::<UiState>().status.state = state;
             set_state(state, cx);
         }
-        // Audio arrived, so the microphone works (again). The overlay itself
-        // follows the faster spectrum feed.
+        // Audio arrived, so the mic works again. (The overlay follows the spectrum feed.)
         Event::Level { .. } => {
             if UiState::mic_error(cx).is_some() {
                 UiState::clear_mic_error(cx);
                 cx.refresh_windows();
             }
         }
-        // For socket clients: the pill switched off when the recording
-        // stopped.
+        // Only for socket clients; the pill switched off already.
         Event::Inserted { .. } => {}
         Event::Transcript {
             committed,
@@ -289,7 +266,7 @@ fn apply(event: Event, cx: &mut App) {
         }
         Event::Error { message } => {
             log::warn!("daemon: {message}");
-            // The audio worker's failures, for the Microphone settings.
+            // Mic failures, for the Microphone settings.
             if let Some(error) = message.strip_prefix(earwig_core::audio::MIC_ERROR_PREFIX) {
                 cx.global_mut::<UiState>().mic_error = Some(error.to_owned());
                 cx.refresh_windows();
@@ -305,9 +282,7 @@ fn set_state(state: DictationState, cx: &mut App) {
     }
     match state {
         DictationState::Recording { started_at_ms, .. } => {
-            // The window of a pill still switching off or saying a failure
-            // is reused, unless the pill was dragged: a new dictation
-            // starts at home.
+            // Reuse a pill still on screen, unless it was dragged: new dictations start at home.
             if let Some(view) = cx.global::<UiState>().overlay.clone()
                 && view.read(cx).moved_before(started_at_ms)
             {
@@ -333,8 +308,7 @@ fn update_overlay(cx: &mut App, f: impl FnOnce(&mut OverlayView, &mut Context<Ov
     }
 }
 
-/// Close the overlay once it is done, or wake it when it next moves on by
-/// itself (a switch-off or a failure notice ending).
+/// Closes the overlay once done, or schedules a wake-up for its next timed change.
 fn follow_overlay(cx: &mut App) {
     let Some(view) = cx.global::<UiState>().overlay.clone() else {
         return;
@@ -360,7 +334,7 @@ fn follow_overlay(cx: &mut App) {
             if state.overlay_wake == Some(at) {
                 state.overlay_wake = None;
             }
-            // A wake-up meant for an earlier pill finds nothing due.
+            // A stale wake-up just finds nothing due.
             update_overlay(cx, |o, _| o.advance(Instant::now()));
         });
     })
@@ -382,15 +356,14 @@ fn open_overlay(cx: &mut App) {
 }
 
 fn close_overlay(cx: &mut App) {
-    if let Some(view) = cx.global_mut::<UiState>().overlay.take() {
-        for window in view.read(cx).windows() {
-            let _ = window.update(cx, |_, window, _| window.remove_window());
-        }
+    if let Some(view) = cx.global_mut::<UiState>().overlay.take()
+        && let Some(window) = view.read(cx).window()
+    {
+        let _ = window.update(cx, |_, window, _| window.remove_window());
     }
 }
 
-/// The pill's × was clicked: drop the dictation (nothing is inserted) and
-/// get out of the way at once.
+/// The pill's ×: drop the dictation and close right away.
 pub(crate) fn discard(cx: &mut App) {
     UiState::handle(cx).send(Command::Cancel);
     close_overlay(cx);
@@ -399,8 +372,7 @@ pub(crate) fn discard(cx: &mut App) {
 fn show_settings(cx: &mut App) {
     refresh_input_devices(cx);
     apply_appearance(cx);
-    // A menu-bar app's window comes to the front, with the keyboard, only
-    // once the app is active.
+    // A menu-bar app's window only gets the front and the keyboard once the app is active.
     #[cfg(target_os = "macos")]
     cx.activate(true);
     if let Some(window) = cx.global::<UiState>().settings
@@ -412,9 +384,7 @@ fn show_settings(cx: &mut App) {
     }
     match settings::open(cx) {
         Ok(window) => {
-            // Opening only shows the window. Activating it, as for an open
-            // one, brings it to the front where `earwig settings` gave leave
-            // (Windows).
+            // Opening only shows the window; activate it too, as for one already open.
             let _ = window.update(cx, |_, window, _| window.activate_window());
             cx.global_mut::<UiState>().settings = Some(window);
         }
@@ -422,9 +392,7 @@ fn show_settings(cx: &mut App) {
     }
 }
 
-/// Re-list microphones, and which is the system default, off the main
-/// thread (asking the sound server or ALSA can take a moment); the settings
-/// window re-renders when the list arrives.
+/// Re-lists mics off the main thread (the sound server can be slow), then re-renders.
 fn refresh_input_devices(cx: &mut App) {
     let configured = config(UiState::handle(cx)).audio.device;
     cx.spawn(async move |cx| {

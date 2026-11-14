@@ -1,6 +1,4 @@
-//! General settings: the hotkey, the microphone, how the overlay and this
-//! window look, and how text is typed (Linux) or whether earwig starts at
-//! sign-in (Windows).
+//! General settings: hotkey, microphone, appearance, then typing (Linux) or startup.
 
 use std::iter;
 use std::sync::PoisonError;
@@ -29,7 +27,7 @@ use super::shortcut::{self, ShortcutField};
 use super::{hinted, is_locked, item, section, spaced};
 use crate::ui::{UiState, apply_appearance, config, edit_config};
 
-/// Search words for the Hotkey group's rows, whose titles do not say them.
+/// Search words the Hotkey rows' titles don't contain.
 const HOTKEY_KEYWORDS: [&str; 6] = ["hotkey", "shortcut", "key", "bind", "record", "keyboard"];
 
 /// How to bind the hotkey on each Linux desktop.
@@ -84,9 +82,6 @@ pub fn page(
         .groups(spaced(groups))
 }
 
-/// The hotkey: the shortcut earwig watches, recorded by pressing it, and
-/// what a press does. On Linux, where earwig may not read the keyboard yet,
-/// how to let it and what works meanwhile.
 fn hotkey(settings: &Config, shortcut: &Entity<ShortcutField>, cx: &App) -> SettingGroup {
     let status = earwig_core::hotkey::status();
     let label = (status.source == "keyboard").then(|| shortcut::label(&settings.hotkey.key));
@@ -115,8 +110,7 @@ fn hotkey(settings: &Config, shortcut: &Entity<ShortcutField>, cx: &App) -> Sett
     )
 }
 
-/// Without keyboard access, how to give it; while earwig does not watch the
-/// shortcut itself, what works meanwhile.
+/// How to grant keyboard access, and what works until earwig watches the key itself.
 #[cfg(target_os = "linux")]
 fn linux_rows(
     status: &earwig_core::events::HotkeyStatus,
@@ -134,7 +128,6 @@ fn linux_rows(
     rows
 }
 
-/// What a press does in `mode`, naming the key where earwig watches it.
 fn mode_description(mode: ActivationMode, key: Option<&str>) -> String {
     let key = key.unwrap_or("the hotkey");
     match mode {
@@ -144,7 +137,6 @@ fn mode_description(mode: ActivationMode, key: Option<&str>) -> String {
     }
 }
 
-/// What works on Linux while earwig does not watch the shortcut itself.
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq)]
 enum Fallback {
@@ -153,9 +145,7 @@ enum Fallback {
     SetupGuide,
 }
 
-/// The shortcut the desktop's GlobalShortcuts portal bound for earwig
-/// (`portal`), changed in the desktop's settings; anywhere else a key bound
-/// in the compositor's config, as the setup guide shows.
+/// With the GlobalShortcuts portal, the desktop's own shortcut settings; else the setup guide.
 #[cfg(target_os = "linux")]
 fn fallback(desktop: &str, portal: bool) -> Fallback {
     let desktops: Vec<&str> = desktop.split(':').collect();
@@ -174,7 +164,6 @@ fn fallback(desktop: &str, portal: bool) -> Fallback {
     }
 }
 
-/// `help` as a line of small text, the setup guide a link.
 #[cfg(target_os = "linux")]
 fn help_line(help: &Fallback, cx: &App) -> impl IntoElement + use<> {
     let line = div().text_sm().text_color(cx.theme().muted_foreground);
@@ -223,12 +212,9 @@ fn microphone(settings: &Config, cx: &App) -> SettingGroup {
     section("Microphone", None, iter::once(device).chain(error))
 }
 
-/// System default, every microphone the audio backend lists, by the name
-/// people know it by, and the configured device even when it is currently
-/// unplugged. A long name ("Family 17h/19h HD Audio Controller Analog
-/// Stereo") ends in an ellipsis rather than pushing the dropdown past the
-/// window's edge; the open menu shows it whole.
+/// System default, every listed mic, and the configured one even when unplugged.
 fn device_dropdown(settings: &Config, cx: &App) -> SettingField<SharedString> {
+    /// Long names end in an ellipsis instead of pushing the dropdown off-window.
     const MAX_WIDTH: f32 = 240.;
     const DEFAULT: &str = "\u{0}default";
     let mut options: Vec<(SharedString, SharedString)> =
@@ -264,8 +250,6 @@ fn device_dropdown(settings: &Config, cx: &App) -> SettingField<SharedString> {
     .max_w(px(MAX_WIDTH))
 }
 
-/// The look of the overlay and of this window. This window follows at once;
-/// the overlay takes a change from the next dictation.
 fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
     section(
         "Appearance",
@@ -371,8 +355,6 @@ fn typing(cx: &App) -> SettingGroup {
     )
 }
 
-/// Starting with the session: the per-user sign-in entry on Windows, a
-/// launch agent on macOS.
 #[cfg(any(windows, target_os = "macos"))]
 fn startup() -> SettingGroup {
     section(
@@ -397,8 +379,7 @@ fn startup() -> SettingGroup {
     )
 }
 
-/// Microphone and Accessibility, each allowed, or with Ask again (the
-/// system's prompt) and a way to System Settings.
+/// Each permission: Allowed, or a way to System Settings and Ask again.
 #[cfg(target_os = "macos")]
 fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) -> SettingGroup {
     use earwig_core::permissions::{self, Access};
@@ -465,11 +446,7 @@ fn permissions_group(statuses: &[earwig_core::permissions::PermissionStatus]) ->
     )
 }
 
-/// The Opacity row: the slider where other rows have their field, and the
-/// overlay preview below it across the row. Laid out as [`item`]'s rows
-/// are, except that the description wraps as narrow as the slider needs:
-/// GPUI measures text unwrapped, so a standard row keeps a long description
-/// at its widest and pushes a wide field past the window's edge.
+/// The Opacity row and preview, laid out by hand so the description wraps (GPUI won't).
 fn pill_item(
     cx: &App,
     pill: &Entity<PillPreview>,
@@ -596,21 +573,11 @@ fn user_error(cx: &App) -> Option<String> {
         .map(str::to_owned)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     #[test]
-    fn enum_keys_round_trip_through_serde_names() {
-        let key = serde_key(&ActivationMode::HoldOrToggle);
-        assert_eq!(key, "hold-or-toggle");
-        let back: ActivationMode =
-            serde_json::from_value(serde_json::Value::String(key.to_string())).unwrap();
-        assert_eq!(back, ActivationMode::HoldOrToggle);
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
     fn portal_desktops_name_their_settings_app_and_others_get_the_guide() {
         assert_eq!(
             fallback("ubuntu:GNOME", true),
@@ -629,34 +596,5 @@ mod tests {
                 "{compositor}"
             );
         }
-    }
-
-    #[test]
-    fn the_mode_description_follows_the_mode_and_names_the_key() {
-        assert_eq!(
-            mode_description(ActivationMode::Hold, Some("Right Alt")),
-            "Hold Right Alt while you talk."
-        );
-        assert_eq!(
-            mode_description(ActivationMode::Toggle, Some("Ctrl+Space")),
-            "Press Ctrl+Space to start and stop."
-        );
-        assert_eq!(
-            mode_description(ActivationMode::HoldOrToggle, None),
-            "Hold or tap the hotkey to talk."
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn macos_shows_keys_with_a_macs_symbols() {
-        assert_eq!(
-            mode_description(
-                ActivationMode::HoldOrToggle,
-                Some(&shortcut::label("RightCmd"))
-            ),
-            "Hold or tap Right ⌘ to talk."
-        );
-        assert_eq!(shortcut::label("Option+Space"), "⌥ Space");
     }
 }

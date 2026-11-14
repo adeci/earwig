@@ -1,8 +1,8 @@
 # AGENTS.md
 
-earwig is a local dictation daemon for Linux desktops and macOS: hold or tap a hotkey,
-speak, and the text lands in the focused app. Rust, GPUI for the overlay and
-settings window, transcribe.cpp for speech. NixOS first.
+earwig is a local dictation daemon for Linux, macOS and Windows: hold or tap a
+hotkey, speak, and the text lands in the focused app. Rust, GPUI for the
+overlay and settings window, transcribe.cpp for speech. NixOS first.
 
 ## Layout
 
@@ -14,13 +14,19 @@ settings window, transcribe.cpp for speech. NixOS first.
   CPU plus Vulkan, or Metal on macOS).
 - `crates/earwig`: the binary: CLI, daemon wiring, GPUI overlay, settings
   window, tray.
+- `crates/earwigw`: the Windows launcher without a console window.
 - `crates/earwig-core/models.toml`: the curated model catalog.
-- `nix/`: package, NixOS module, model fetchers, dev shell, treefmt, VM tests;
-  `nix/darwin/`: earwig.app and the nix-darwin module.
+- `nix/`: package, NixOS module, model fetchers, dev shell, treefmt, VM tests,
+  the release effect; `nix/darwin/`: earwig.app and the nix-darwin module.
 - `tests/fixtures/`: speech clips for engine and VM tests.
-- `.github/workflows/ci.yml`: fmt, clippy, tests and a release build on macOS
-  and Windows; Linux is the flake's checks. `macos-app.yml` builds earwig.app
-  from the flake and screenshots the overlay over a dictation.
+- `packaging/`: `github-release.sh` makes a tag's GitHub release; `windows/` the
+  portable zip, the installer and winget manifests.
+- CI is the flake's `checks` (package, clippy, tests, treefmt; VM tests on
+  x86_64-linux), built by nixbot on Linux and a Mac. A pushed `v*` tag gets its
+  GitHub release from the `release` effect (`herculesCI` in `flake.nix`) once
+  its commit built green. `.github/workflows/ci.yml` builds, tests and packages
+  Windows, which Nix can't, and attaches the packages to the release (making
+  it first if nixbot hasn't yet).
 
 Per-OS code lives in `linux`, `macos` and `windows` modules behind one
 signature each: `audio/`, `desktop/`, `insert/` and `paths/` in earwig-core,

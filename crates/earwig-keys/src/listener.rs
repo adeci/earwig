@@ -1,5 +1,4 @@
-//! The handle programs hold: what to watch, what was seen, and the state
-//! the backends share with it.
+//! The handle programs hold, and the state the backends share with it.
 
 use std::fmt;
 use std::io;
@@ -14,10 +13,8 @@ use crate::recorder::{Recorded, Recorder};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
-    /// Linux: keep a key-with-modifiers hotkey from other apps by grabbing
-    /// the keyboards that have it (and passing all their other keys on
-    /// through a uinput clone). Off, or where that is impossible, apps and
-    /// the compositor see the hotkey too. macOS and Windows always keep it.
+    /// Linux: grab the keyboards to keep a key-with-modifiers hotkey from apps (other keys go on
+    /// through a uinput clone). macOS and Windows always keep it.
     pub block: bool,
 }
 
@@ -31,23 +28,20 @@ impl Default for Options {
 pub enum Status {
     /// [`Listener::run`] has not started, or it ended.
     Stopped,
-    /// The system does not let the program see keys: Accessibility
-    /// (macOS), read access to the keyboards (Linux).
+    /// No Accessibility (macOS) or keyboard read access (Linux).
     NoAccess,
     /// Linux: no keyboard to watch.
     NoKeyboard,
     Watching(Blocking),
 }
 
-/// Whether other apps see the hotkey.
+/// Whether the hotkey is kept from other apps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Blocking {
-    /// No: it is swallowed.
     Yes,
-    /// Yes, by design: modifiers alone pass through (or there is no
-    /// hotkey).
+    /// Modifiers alone pass through on purpose (or there's no hotkey).
     PassThrough,
-    /// Yes, though it should not (Linux), for this reason.
+    /// It should be but isn't (Linux), for this reason.
     No(String),
 }
 
@@ -71,9 +65,8 @@ impl fmt::Display for Status {
     }
 }
 
-/// Watches the keyboard for one hotkey; cheap to clone, every clone the
-/// same listener. [`Self::run`] does the watching on its caller's thread;
-/// the rest may be called from anywhere.
+/// Watches the keyboard for one hotkey; clones share it. [`Self::run`] blocks its thread, the rest
+/// may be called from anywhere.
 #[derive(Clone)]
 pub struct Listener {
     shared: Arc<Shared>,
@@ -88,12 +81,10 @@ struct State {
     matcher: Option<Matcher>,
     options: Options,
     recording: Option<Recording>,
-    /// Counts recordings started and stopped, so a recording that ended
-    /// while its sink ran is not put back.
+    /// Bumped on each recording start/stop, so one that ended while its sink ran isn't put back.
     generation: u64,
     status: Status,
-    /// A recording ended as this key went down: its repeats and release
-    /// are swallowed with it.
+    /// The key that just finished a recording: its repeats and release are swallowed too.
     recorded_key: Option<Key>,
     stop: bool,
 }
@@ -131,8 +122,7 @@ impl Listener {
         }
     }
 
-    /// Watch for `hotkey` from now on; `None` watches for nothing (a
-    /// recording still works).
+    /// `None` watches for nothing (a recording still works).
     pub fn set_hotkey(&self, hotkey: Option<Hotkey>) {
         let mut state = self.shared.lock();
         if state.matcher.as_ref().map(Matcher::hotkey) == hotkey.as_ref() {
@@ -141,14 +131,6 @@ impl Listener {
         state.matcher = hotkey.map(Matcher::new);
         drop(state);
         self.shared.waker.wake();
-    }
-
-    pub fn hotkey(&self) -> Option<Hotkey> {
-        self.shared
-            .lock()
-            .matcher
-            .as_ref()
-            .map(|m| m.hotkey().clone())
     }
 
     pub fn set_options(&self, options: Options) {
@@ -164,10 +146,8 @@ impl Listener {
         self.shared.lock().status.clone()
     }
 
-    /// Record a hotkey: from now on the keyboard goes to `sink` instead of
-    /// the hotkey, until it reports [`Recorded::Done`] or
-    /// [`Recorded::Cancelled`], or [`Self::stop_recording`]. Keys still
-    /// reach apps. Replaces a recording in progress.
+    /// Send keys to `sink` instead of the hotkey until it's [`Recorded::Done`] or
+    /// [`Recorded::Cancelled`] or [`Self::stop_recording`]; keys still reach apps.
     pub fn record(&self, sink: impl FnMut(Recorded) + Send + 'static) {
         let mut state = self.shared.lock();
         state.generation += 1;
@@ -187,9 +167,8 @@ impl Listener {
         self.shared.lock().recording.is_some()
     }
 
-    /// Watch the keyboard on this thread until [`Self::stop`], or until
-    /// `events` returns false. Waits for access the system has not given
-    /// yet, and for keyboards to be plugged in.
+    /// Watches on this thread until [`Self::stop`] or `events` returns false, waiting for access
+    /// and keyboards as needed.
     pub fn run(&self, mut events: impl FnMut(Event) -> bool) -> io::Result<()> {
         self.shared.lock().stop = false;
         let result = backend::run(&self.shared, &mut events);
@@ -226,9 +205,7 @@ impl Shared {
         }
     }
 
-    /// One key edge as the backend saw it (`key` is `None` for a key with
-    /// no name here; `held` is the modifier keys down besides it): what to
-    /// do with it. A recording takes the edge instead of the hotkey.
+    /// What to do with one key edge; a recording takes it instead of the hotkey.
     pub(crate) fn edge(&self, key: Option<Key>, edge: Edge, held: Held) -> Action {
         let swallow = Action {
             swallow: true,
@@ -253,8 +230,7 @@ impl Shared {
         };
         let generation = state.generation;
         let mut recording = state.recording.take().expect("a recording is in progress");
-        // The key that made a shortcut is the recorder's, not the apps'
-        // (where the keyboard is held), as the hotkey's would be.
+        // The key that completed the shortcut is swallowed, as the hotkey's would be.
         let action = match &step {
             Recorded::Done(hotkey) if !hotkey.is_modifier_only() => {
                 state.recorded_key = key;

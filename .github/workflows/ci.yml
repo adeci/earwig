@@ -1,4 +1,6 @@
-# macOS and Windows. Linux is checked by the flake (`nix flake check`).
+# Linux and macOS are the flake's checks, built by nixbot, whose release effect also makes a pushed
+# v* tag's release. Nix can't build earwig for Windows (GPUI's shaders need the Windows SDK's
+# fxc.exe, transcribe.cpp MSVC and the Vulkan SDK), so Windows and its release packages stay here.
 name: CI
 
 on:
@@ -13,54 +15,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-latest is Apple silicon; GitHub no longer accepts macos-14.
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    # Tags attach the Windows packages to their release.
+  windows:
+    runs-on: windows-latest
+    # Tags attach the packages to their release.
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
-
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-
-      # transcribe.cpp builds its Vulkan backend from source: CMake needs
-      # glslc and the headers, and the binaries link vulkan-1.lib (found
-      # through VULKAN_SDK by earwig-transcribe's build script). The
-      # runtime (vulkan-1.dll) lets the tests start on a runner without a
-      # GPU driver; they fall back to the CPU.
-      - name: Install the Vulkan SDK
-        if: runner.os == 'Windows'
-        uses: jakoch/install-vulkan-sdk-action@v1
+          components: clippy
+      # transcribe.cpp's Vulkan backend builds with the SDK's glslc and headers and links
+      # vulkan-1.lib; the runtime lets the tests start without a GPU driver, on the CPU.
+      - uses: jakoch/install-vulkan-sdk-action@v1
         with:
           install_runtime: true
           cache: true
-
       - uses: Swatinem/rust-cache@v2
-
-      - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: cargo build --release --locked
-        if: runner.os != 'Windows'
-
       # The portable zip, the per-user installer and its winget manifests.
-      - name: Install Inno Setup
-        if: runner.os == 'Windows'
-        run: choco install innosetup --no-progress -y
-      - name: Package
-        if: runner.os == 'Windows'
+      - run: choco install innosetup --no-progress -y
+      - run: packaging/windows/package.ps1
         shell: pwsh
-        run: packaging/windows/package.ps1
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows'
+      - uses: actions/upload-artifact@v5
         with:
           name: earwig-windows-x64
           path: |
@@ -68,8 +46,12 @@ jobs:
             target/package/*-setup.exe
             target/package/winget
       - name: Attach to the release
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: gh release upload "${{ github.ref_name }}" (Get-Item target/package/*.zip, target/package/*-setup.exe) --clobber
+        shell: bash
+        run: |
+          # nixbot's release effect usually made the release already; if not, this does.
+          bash packaging/github-release.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" target/package/*.zip target/package/*-setup.exe \
+            --repo "$GITHUB_REPOSITORY" --clobber

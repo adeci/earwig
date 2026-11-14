@@ -1,6 +1,4 @@
-//! The overlay's window on layer-shell: where it opens, and moving it while
-//! the pill is dragged (through the patched GPUI in `vendor/`, as GPUI only
-//! places a layer surface when it opens it).
+//! The overlay's layer surface: opening it, and moving it in a drag (patched GPUI, vendor/).
 
 use anyhow::bail;
 use earwig_core::config::OverlayPosition;
@@ -12,23 +10,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{WINDOW_MARGIN, base_options};
 
-/// The pill floats on the Overlay layer of the output the compositor picks
-/// (the focused one), never takes keyboard focus, and reserves no space.
+/// On the Overlay layer of the focused output, without keyboard focus or reserved space.
 pub(super) fn home_window_options(position: OverlayPosition, size: Size<Pixels>) -> WindowOptions {
-    // One edge only: layer-shell centres the surface along it.
-    layer_options(
-        edge_anchor(position),
-        margins(position, px(WINDOW_MARGIN), px(0.)),
-        size,
-    )
-}
-
-/// A transparent Overlay-layer surface that never takes keyboard focus.
-fn layer_options(
-    anchor: Anchor,
-    margin: (Pixels, Pixels, Pixels, Pixels),
-    size: Size<Pixels>,
-) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin: point(px(0.), px(0.)),
@@ -37,10 +20,11 @@ fn layer_options(
         kind: WindowKind::LayerShell(LayerShellOptions {
             namespace: "earwig".into(),
             layer: Layer::Overlay,
-            anchor,
+            // One edge only: layer-shell centres the surface along it.
+            anchor: edge_anchor(position),
             exclusive_zone: None,
             exclusive_edge: None,
-            margin: Some(margin),
+            margin: Some(margins(position, px(WINDOW_MARGIN), px(0.))),
             keyboard_interactivity: KeyboardInteractivity::None,
         }),
         ..base_options()
@@ -54,8 +38,7 @@ fn edge_anchor(position: OverlayPosition) -> Anchor {
     }
 }
 
-/// Layer-shell margins (top, right, bottom, left): `edge` from the edge at
-/// `position`, `left` from the left one.
+/// (top, right, bottom, left): `edge` from the anchored edge, `left` from the left one.
 fn margins(
     position: OverlayPosition,
     edge: Pixels,
@@ -67,9 +50,7 @@ fn margins(
     }
 }
 
-/// Move the window of size `size` from one origin to another on the usable
-/// `area` (see [`moved`]); with `shift`, pointer positions are in its new
-/// frame at once (see `vendor/gpui-pre-linux/PATCH.md`).
+/// `shift`: read pointer positions in the new frame at once (see gpui-pre-linux/PATCH.md).
 pub(super) fn move_window(
     window: &Window,
     position: OverlayPosition,
@@ -88,8 +69,7 @@ pub(super) fn move_window(
     Ok(())
 }
 
-/// Anchor and margins of a window of size `size` at `origin` on the usable
-/// `area`: from the edge at `position` and the left one.
+/// Anchor and margins that put a window of `size` at `origin` on the usable `area`.
 pub(super) fn moved(
     position: OverlayPosition,
     origin: Point<Pixels>,

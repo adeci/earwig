@@ -29,14 +29,14 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-use super::{InsertError, Inserter};
+use super::{InsertError, Inserter, is_terminal};
 use crate::config::{InsertConfig, InsertSetting};
 use crate::desktop::DesktopCaps;
 use crate::events::InsertMethod;
 use crate::win32::{is, owned, scan_code};
 
-/// Executables (without `.exe`, compared ASCII case-insensitively) that
-/// paste with Ctrl+Shift+V. `[insert] terminals` adds to this list.
+/// Executables (without `.exe`) that paste with Ctrl+Shift+V, besides
+/// `[insert] terminals`.
 const TERMINALS: &[&str] = &["alacritty", "rio", "wezterm-gui"];
 
 /// How long to keep trying while another app has the clipboard open.
@@ -82,7 +82,7 @@ impl Inserter for Paste {
         let terminal = process
             .as_ref()
             .and_then(|process| process.name.as_deref())
-            .is_some_and(|name| is_terminal(name, &self.terminals));
+            .is_some_and(|name| is_terminal(name, TERMINALS, &self.terminals));
         set_clipboard(text)?;
         log::debug!(
             "pasting into {:?} with {}",
@@ -96,14 +96,6 @@ impl Inserter for Paste {
     fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError> {
         Ok(set_clipboard(text)?)
     }
-}
-
-fn is_terminal(name: &str, extra: &[String]) -> bool {
-    TERMINALS
-        .iter()
-        .copied()
-        .chain(extra.iter().map(String::as_str))
-        .any(|terminal| terminal.eq_ignore_ascii_case(name))
 }
 
 /// Replace the clipboard's contents with `text`.
@@ -307,14 +299,5 @@ mod tests {
         let text = "Grüße, 世界 👋 — earwig";
         paste.copy_to_clipboard(text).unwrap();
         assert_eq!(clipboard_text(), text);
-    }
-
-    #[test]
-    fn terminals_match_case_insensitively_and_include_configured_ones() {
-        let extra = ["MyTerm".to_owned()];
-        assert!(is_terminal("Alacritty", &[]));
-        assert!(is_terminal("wezterm-gui", &[]));
-        assert!(!is_terminal("WindowsTerminal", &[]), "pastes with Ctrl+V");
-        assert!(is_terminal("myterm", &extra));
     }
 }

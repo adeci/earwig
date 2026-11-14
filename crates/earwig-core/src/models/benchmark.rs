@@ -1,9 +1,6 @@
-//! How accurate and how fast a curated model is, as Handy measured it.
-//!
-//! `models.toml` carries Handy's numbers for each model it benchmarked (the
-//! header there names the source); the bands that turn them into grades and
-//! meter steps are Handy's too (`accuracyGrade` and `speedMeterLevel` in
-//! @handy-computer/models 0.2.3).
+//! How accurate and how fast a curated model is, as Handy measured it; the
+//! grade and meter bands are Handy's too (`accuracyGrade` and
+//! `speedMeterLevel` in @handy-computer/models 0.2.3).
 
 use serde::{Deserialize, Serialize};
 

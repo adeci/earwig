@@ -1,8 +1,4 @@
-//! Daemon assembly and the thin socket clients.
-//!
-//! `EARWIG_AUDIO_FILE=<wav>` replaces the microphone with that recording:
-//! every dictation hears it from the start, in real time, then silence. The
-//! VM tests use it to drive real transcriptions without a sound card.
+//! Daemon wiring and the thin socket clients.
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -12,18 +8,17 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use earwig_core::audio::{self, Source};
-use earwig_core::config::{BackendSetting, ConfigStore, InsertConfig};
+use earwig_core::config::{ConfigStore, InsertConfig};
 use earwig_core::controller::{self, Parts};
 use earwig_core::engine::{Backend, EngineFactory, EngineOptions};
 use earwig_core::events::{Command, Event, InsertMethod};
 use earwig_core::history::History;
 use earwig_core::insert::{self, InsertError, Inserter};
-use earwig_core::models::{ModelManager, ModelSpec};
+use earwig_core::models::ModelManager;
 use earwig_core::{SAMPLE_RATE, desktop, hotkey, ipc, paths, permissions};
 use earwig_transcribe::TranscribeEngine;
 
-/// Open the settings window of the running daemon, or start the daemon with
-/// it open (desktop entry, first launch without the user service).
+/// Raise the running daemon's settings, or start the daemon with them open (desktop entry).
 pub fn settings() -> anyhow::Result<()> {
     if ipc::request(&Command::ShowSettings).is_ok() {
         return Ok(());
@@ -57,6 +52,7 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     let sources = hotkey::sources(&settings.hotkey, &caps);
     let mut hotkey_sources = vec!["socket".to_owned()];
     hotkey_sources.extend(sources.iter().map(|s| s.name().to_owned()));
+    // VM tests make every dictation hear a recording instead of the mic.
     let source = match std::env::var_os("EARWIG_AUDIO_FILE") {
         Some(path) => {
             let path = PathBuf::from(path);
@@ -94,9 +90,7 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     server.serve(handle.clone())?;
     log::info!("listening on {}", socket.display());
 
-    // Privacy permissions (macOS): the system asks for what is missing
-    // once per build; until it is all granted, the settings window says
-    // what is.
+    // macOS asks for missing permissions once per build; settings opens until they're granted.
     let missing = permissions::ask_once(&paths::state_dir());
     for permission in &missing {
         log::warn!("{}", permissions::missing_message(*permission));
@@ -104,22 +98,19 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     if !headless {
         crate::ui::run(handle.clone(), caps, open_settings || !missing.is_empty());
     }
-    // Headless: wait for a Quit command. Either way, return only once the
-    // controller has freed the model; GPU backends crash at process exit
-    // while a model is alive.
+    // Return only once the model is freed: GPU backends crash at exit with one alive.
     let events = handle.subscribe();
     if !headless {
         handle.send(Command::Quit);
     }
     while events.recv().is_ok() {}
-    // A pipe goes away with its last handle; a socket file stays behind.
+    // Windows pipes go away by themselves; a Unix socket file stays behind.
     #[cfg(unix)]
     let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 
-/// Stand-in when no insertion backend works here: every dictation fails to
-/// insert and is kept in history.
+/// Stand-in when nothing can insert text here: dictations fail and land in history.
 struct Unavailable(String);
 
 impl Inserter for Unavailable {
@@ -166,31 +157,18 @@ pub fn events() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Transcribe WAV files with the configured model, fed in 100 ms chunks as
-/// live audio would be (but as fast as the model takes them). Text goes to
-/// stdout, timings to stderr; "final" is the time from the last sample to
-/// the final text, which is what a dictation waits for after release.
+/// Feeds WAVs in 100 ms chunks like live audio, as fast as the model takes them.
 pub fn transcribe_files(wavs: &[PathBuf], backend: Option<&str>) -> anyhow::Result<()> {
     let config = ConfigStore::load()?;
     let settings = config.config();
     let models = ModelManager::new(paths::models_dir());
-    let spec = settings
-        .model
-        .model
-        .clone()
-        .unwrap_or_else(|| ModelSpec::Curated {
-            id: models.default_model().id.clone(),
-        });
+    let spec = crate::configured_model(&models, &settings.model);
     let path = models.resolve(&spec)?;
     let backend = match backend {
         Some("cpu") => Backend::Cpu,
         Some("gpu") => Backend::Gpu,
         Some(_) => Backend::Auto,
-        None => match settings.model.backend {
-            BackendSetting::Auto => Backend::Auto,
-            BackendSetting::Cpu => Backend::Cpu,
-            BackendSetting::Gpu => Backend::Gpu,
-        },
+        None => settings.model.backend,
     };
     let options = EngineOptions {
         backend,
@@ -244,8 +222,7 @@ fn transcribe_one(model: &mut dyn earwig_core::engine::Model, wav: &Path) -> any
     Ok(())
 }
 
-/// One line per microphone: what `[audio] device` takes, then the name the
-/// system shows when that differs.
+/// One line per mic: the id `[audio] device` takes, then its display name if different.
 pub fn devices() -> anyhow::Result<()> {
     let found = audio::input_devices(None)?;
     let width = found

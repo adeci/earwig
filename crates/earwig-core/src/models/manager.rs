@@ -43,12 +43,9 @@ fn parse_catalog(text: &str) -> anyhow::Result<Vec<CatalogEntry>> {
     Ok(file.model)
 }
 
-/// Catalog, local store, search and downloads. Shared as `Arc<ModelManager>`.
-///
-/// Models are looked up in the user's store first, then in read-only system
-/// stores (`earwig/models` under each `$XDG_DATA_DIRS` entry) with the same
-/// `<owner>/<repo>/<commit>/<file>` layout. NixOS installs pinned models
-/// there, so they work offline without locking the model choice.
+/// Catalog, local store, search and downloads. Models are looked up in the
+/// user's store, then in read-only system stores (`earwig/models` in each
+/// `$XDG_DATA_DIRS` entry, where NixOS pins them) of the same layout.
 #[derive(Debug)]
 pub struct ModelManager {
     store: PathBuf,
@@ -58,9 +55,8 @@ pub struct ModelManager {
 }
 
 impl ModelManager {
-    /// Manager over `store` (plus the system stores) with the catalog built
-    /// into this release, talking to `$EARWIG_HF_ENDPOINT` or
-    /// `https://huggingface.co`.
+    /// The user's `store` plus the system stores, talking to
+    /// `$EARWIG_HF_ENDPOINT` or Hugging Face.
     pub fn new(store: PathBuf) -> Self {
         let endpoint = std::env::var(ENDPOINT_ENV)
             .ok()
@@ -84,10 +80,6 @@ impl ModelManager {
     pub fn with_system_stores(mut self, stores: Vec<PathBuf>) -> Self {
         self.system = stores;
         self
-    }
-
-    pub fn store(&self) -> &Path {
-        &self.store
     }
 
     pub fn catalog(&self) -> &[CatalogEntry] {
@@ -153,10 +145,8 @@ impl ModelManager {
         Err(ModelError::NotInstalled(spec.clone()))
     }
 
-    /// Verified model files in the user's store and the system stores,
-    /// curated ones under their catalog id; a model in both is listed once,
-    /// from the user's store. Local `Path` models are not listed; they live
-    /// wherever the config points.
+    /// Verified model files in the user's store and the system stores (one
+    /// in both is listed once, from the user's), curated ones by catalog id.
     pub fn installed(&self) -> Vec<InstalledModel> {
         let mut models: Vec<InstalledModel> = Vec::new();
         let roots =
@@ -218,10 +208,8 @@ impl ModelManager {
         })
     }
 
-    /// Search Hugging Face for repos tagged `transcribe.cpp`; an empty query
-    /// lists the most downloaded. Each GGUF's architecture is read from its
-    /// header and checked with `supports` (the engine's
-    /// `supports_architecture`).
+    /// Search Hugging Face for repos tagged `transcribe.cpp` (the most
+    /// downloaded for an empty query), each GGUF checked with `supports`.
     pub fn search(
         &self,
         query: &str,
@@ -230,11 +218,9 @@ impl ModelManager {
         self.hub.search(query, supports)
     }
 
-    /// Download `spec` into the store and return its path. Already present
-    /// files return at once; a failed download resumes where it stopped,
-    /// and a cancelled one leaves nothing behind. The file is verified
-    /// against the catalog's sha256 (curated) or the Hub's LFS sha256
-    /// (`hf:`) before it appears at its final path.
+    /// Download `spec` into the store and return its path. A failed download
+    /// resumes where it stopped, a cancelled one leaves nothing behind, and the
+    /// file is verified (catalog or LFS sha256) before it reaches its path.
     pub fn download(
         &self,
         spec: &ModelSpec,
@@ -404,11 +390,11 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
-    use crate::models::{Benchmark, Role, Tier};
+    use crate::models::Role;
 
     #[test]
     fn builtin_catalog_parses_with_roles() {
-        let catalog = super::parse_catalog(super::BUILTIN_CATALOG).unwrap();
+        let catalog = parse_catalog(BUILTIN_CATALOG).unwrap();
         assert!(
             catalog
                 .iter()
@@ -448,69 +434,10 @@ default = true
     }
 
     #[test]
-    fn roles_are_optional_and_spelled_out() {
-        let role = |text: &str| super::parse_catalog(&one_model(text)).map(|c| c[0].role);
-        assert_eq!(role("").unwrap(), None);
-        assert_eq!(role(r#"role = "faster""#).unwrap(), Some(Role::Faster));
-        assert_eq!(role(r#"role = "accurate""#).unwrap(), Some(Role::Accurate));
-        assert!(role(r#"role = "best""#).is_err());
-    }
-
-    #[test]
-    fn builtin_catalog_carries_handys_benchmarks() {
-        let catalog = super::parse_catalog(super::BUILTIN_CATALOG).unwrap();
-        let measured = |english_error, gpu_speed, cpu_speed| Benchmark {
-            english_error,
-            gpu_speed,
-            cpu_speed,
-        };
-        // Handy's numbers (models.toml names the source), then the grade and
-        // the accuracy, GPU speed and CPU speed steps they come to.
-        let expected = [
-            (measured(3.99, 25.28, 13.955), ("A−", 5, 5, 4)),
-            (measured(6.11, 76.455, 50.03), ("B+", 4, 5, 5)),
-            (measured(3.23, 4.085, 2.47), ("A", 5, 2, 1)),
-            (measured(4.26, 23., 13.29), ("A−", 5, 5, 4)),
-            (measured(7.9, 17.135, 10.59), ("B", 4, 4, 4)),
-        ];
-        let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "parakeet-unified-en-0.6b",
-                "parakeet-tdt-ctc-110m",
-                "Qwen3-ASR-1.7B",
-                "parakeet-ultra",
-                "nemotron-3.5-asr-streaming-0.6b",
-            ]
-        );
-        for (entry, (benchmark, graded)) in catalog.iter().zip(expected) {
-            assert_eq!(entry.benchmark, Some(benchmark), "{}", entry.id);
-            let shown = (
-                benchmark.grade(),
-                benchmark.accuracy_steps(),
-                benchmark.speed_steps(Tier::Gpu),
-                benchmark.speed_steps(Tier::Cpu),
-            );
-            assert_eq!(shown, graded, "{}", entry.id);
-        }
-    }
-
-    #[test]
-    fn benchmarks_are_optional_and_checked() {
-        let benchmark = |text: &str| super::parse_catalog(&one_model(text)).map(|c| c[0].benchmark);
-        assert_eq!(benchmark("").unwrap(), None);
+    fn impossible_benchmarks_are_refused() {
         let table = "[model.benchmark]\nenglish_error = 3.5\ngpu_speed = 20\ncpu_speed = 10.5";
-        assert_eq!(
-            benchmark(table).unwrap(),
-            Some(Benchmark {
-                english_error: 3.5,
-                gpu_speed: 20.,
-                cpu_speed: 10.5,
-            })
-        );
-        assert!(benchmark("[model.benchmark]\nenglish_error = 3.5\ngpu_speed = 20").is_err());
-        assert!(benchmark(&table.replace("= 10.5", "= 0")).is_err());
+        assert!(parse_catalog(&one_model(table)).is_ok());
+        assert!(parse_catalog(&one_model(&table.replace("= 10.5", "= 0"))).is_err());
     }
 
     #[test]

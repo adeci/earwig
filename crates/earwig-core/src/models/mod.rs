@@ -1,9 +1,5 @@
-//! Speech models: which one to use, where it lives, and how to get it.
-//!
-//! A model is named by a [`ModelSpec`]: a curated catalog id, an exact file in
-//! a Hugging Face repo, or a local path. The catalog that ships with each
-//! release is `models.toml` next to this crate; any GGUF the engine can load
-//! works too, which is how users swap models without a code change.
+//! Speech models: which one, where it lives and how to get it. The curated
+//! catalog ships as `models.toml`; any GGUF the engine loads works too.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -13,9 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-/// Which model to use.
-///
-/// String form (config files, CLI, socket):
+/// Which model to use. String form (config files, CLI, socket):
 /// - `parakeet-unified-en-0.6b`: curated catalog id
 /// - `hf:owner/repo/path/to/file.gguf@<commit>`: a file in a Hugging Face
 ///   repo, pinned to a commit

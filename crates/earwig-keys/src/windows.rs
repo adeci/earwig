@@ -1,6 +1,5 @@
-//! Windows: a low-level keyboard hook (`WH_KEYBOARD_LL`). It sees every key
-//! edge before any app does, which `RegisterHotKey` cannot (no releases, no
-//! lone modifiers), and needs no permission.
+//! Windows: a low-level keyboard hook, which sees every edge before apps do and needs no
+//! permission (`RegisterHotKey` sees no releases or lone modifiers).
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -24,8 +23,7 @@ use crate::listener::{Blocking, Shared, Snapshot, Status};
 use crate::matcher::{Edge, Mask};
 use crate::{Event, SYNTHETIC};
 
-/// An unassigned virtual key, sent between a swallowed key and the release
-/// of Alt or Win so that release does not open the menu bar or Start.
+/// An unassigned virtual key, tapped before Alt or Win goes up so the menu bar or Start stays shut.
 const MASK: u16 = 0xe8;
 
 /// Wakes [`run`]'s message loop: the hook thread's id, while it runs.
@@ -73,8 +71,7 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
         .waker
         .0
         .store(unsafe { GetCurrentThreadId() }, Ordering::Release);
-    // SAFETY: a global hook needs no module handle when the callback lives
-    // in this process; it runs on this thread's message loop.
+    // SAFETY: no module handle needed for a callback in this process; it runs on this thread.
     let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook), std::ptr::null_mut(), 0) };
     let result = if hook.is_null() {
         Err(io::Error::last_os_error())
@@ -152,7 +149,7 @@ impl Context<'_> {
             self.down[slot] &= !bit;
         }
         let key = key(vk, extended);
-        let held = key.map_or_else(held, |key| held().without(key));
+        let held = held().besides(key);
         let action = self.shared.edge(key, edge, held);
         if let Some(event) = action.event
             && !(self.events)(event)

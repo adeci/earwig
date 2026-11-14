@@ -1,13 +1,6 @@
-//! Turns the key edges a backend sees into [`Event`]s, and says which edges
-//! to keep from other apps. The same rules on every OS; backends supply
-//! the keys and which modifiers are held.
-//!
-//! - A key with modifiers (`Super+Space`) fires when it goes down while
-//!   exactly those modifiers are held; it, its repeats and its release are
-//!   swallowed (on Linux only while the keyboards are grabbed).
-//! - Modifiers alone (`RightCtrl`) pass through to apps. If another key
-//!   goes down while they are held, the user meant a shortcut (Right
-//!   Ctrl+C): [`Event::Chord`], and their release sends nothing.
+//! Turns key edges into [`Event`]s and says which edges to swallow, the same on every OS.
+//! A key with modifiers fires when it goes down with exactly those held, and is swallowed;
+//! modifiers alone pass through, and another key while they're held makes an [`Event::Chord`].
 
 use crate::Event;
 use crate::hotkey::Hotkey;
@@ -16,7 +9,6 @@ use crate::key::{Held, Key};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Edge {
     Down,
-    /// Auto-repeat of a key that is down.
     Repeat,
     Up,
 }
@@ -30,18 +22,15 @@ pub(crate) struct Action {
     pub mask: Mask,
 }
 
-/// Released with nothing pressed since it went down, Alt opens the menu bar
-/// (Windows, Firefox) and Super opens Start or the launcher (Windows,
-/// GNOME, KDE). Where the hotkey swallowed a key, or is such a modifier
-/// alone, the backend presses a harmless key in between.
+/// A lone Alt or Super release opens the menu bar, Start or a launcher, so after a swallowed key
+/// (or with such a modifier alone) the backend taps a harmless key in between.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Mask {
     #[default]
     None,
-    /// Press the mask key now, after this (swallowed) edge.
+    /// Tap the mask key after this swallowed edge.
     After,
-    /// This edge, the trigger's release, was swallowed: press the mask key,
-    /// then send the release.
+    /// The trigger's release was swallowed: tap the mask key, then send the release.
     Release,
 }
 
@@ -67,8 +56,7 @@ impl Matcher {
         &self.hotkey
     }
 
-    /// One edge of `key` (`None`: a key earwig has no name for). `held` is
-    /// the modifier keys down besides it.
+    /// `key` is `None` for keys earwig can't name; `held` is the other modifiers down.
     pub(crate) fn edge(&mut self, key: Option<Key>, edge: Edge, held: Held) -> Action {
         if self.hotkey.is_modifier_only() {
             self.modifiers_alone(key, edge, held)
@@ -159,8 +147,7 @@ mod tests {
     const RIGHT_ALT: Key = Key::Modifier(Modifier::Alt, Side::Right);
     const LEFT_SUPER: Key = Key::Modifier(Modifier::Super, Side::Left);
 
-    /// Feeds edges the way a keyboard makes them, keeping track of what is
-    /// held.
+    /// Feeds edges like a keyboard, tracking what's held.
     struct Keyboard {
         matcher: Matcher,
         held: Held,

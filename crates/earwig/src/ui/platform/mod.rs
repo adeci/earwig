@@ -1,21 +1,4 @@
-//! What the front end does differently per OS. Each OS module provides:
-//!
-//! - `overlay_surface(caps)`: how the overlay floats above other windows
-//!   without taking focus, or [`OverlaySurface::None`](super::OverlaySurface).
-//! - `application(surface, caps)`: the GPUI application to run.
-//! - `Popup`: moves the overlay's [`OverlaySurface::Popup`](super::OverlaySurface)
-//!   window during a drag and reports the pointer in screen coordinates
-//!   (`new`, `pointer`, `move_to`).
-//! - `home_display(cx)`: the display the overlay opens on.
-//! - `spawn_tray(handle, local)` (called inside the GPUI application) and
-//!   `TrayHandle::set_state`.
-//! - `follow_accent(tx, cx)`: sends the desktop's accent colour, and every
-//!   change of it, to `tx`.
-//!
-//! macOS and Windows also have `set_input_region`, as GPUI does not
-//! implement `Window::set_input_region` there, and `autostart`/
-//! `set_autostart`; Windows has `set_grip` for the hand cursors GPUI shows
-//! as arrows there.
+//! What the front end does differently per OS, with the same signatures in each OS module.
 
 #[cfg(target_os = "linux")]
 mod linux;

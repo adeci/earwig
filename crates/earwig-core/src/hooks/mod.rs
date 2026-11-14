@@ -1,18 +1,7 @@
-//! The `[hooks]` commands: external programs that see the final text.
-//!
-//! - `filter` gets the text on stdin; what it prints replaces the text, minus
-//!   trailing line breaks (so `echo`-style output never presses Enter). A
-//!   failure, a non-zero exit, output that is not UTF-8, or the timeout keeps
-//!   the original text.
-//! - `on_insert` gets the inserted text on stdin and is not awaited.
-//!
-//! Both inherit the daemon's stderr, so their diagnostics land in its log.
-//! Each is an argv, run directly: `["sh", "-c", "…"]` for a shell script, or
-//! `["cmd", "/C", "…"]` on Windows.
-//!
-//! Each OS module spawns the filter as a process tree it can kill whole
-//! (`spawn` and `Tree::kill`): a process group on Unix, a job object on
-//! Windows.
+//! The `[hooks]` commands, run directly as argv (`["sh", "-c", "…"]` for a
+//! script) with the daemon's stderr. `filter` swaps the text for its stdout
+//! minus trailing line breaks, unless it fails, times out or prints non-UTF-8;
+//! `on_insert` gets the inserted text and is not awaited.
 
 #[cfg(unix)]
 mod unix;
@@ -102,7 +91,6 @@ fn run_filter(argv: &[String], text: &str, timeout: Duration) -> anyhow::Result<
     // Its own process tree, so a timeout also kills what a shell filter
     // started.
     let (mut child, tree) = os::spawn(command(argv, Stdio::piped()))?;
-    let kill_group = || tree.kill();
     let mut stdin = child.stdin.take().expect("stdin is piped");
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let input = text.to_owned();
@@ -127,13 +115,13 @@ fn run_filter(argv: &[String], text: &str, timeout: Duration) -> anyhow::Result<
         thread::sleep(Duration::from_millis(5));
     };
     let Some(status) = status else {
-        kill_group();
+        tree.kill();
         let _ = child.wait();
         anyhow::bail!("timed out after {} ms", timeout.as_millis());
     };
     anyhow::ensure!(status.success(), "exited with {status}");
     let Ok(output) = output else {
-        kill_group();
+        tree.kill();
         anyhow::bail!("stdout still open after {} ms", timeout.as_millis());
     };
     let mut out = String::from_utf8(output?)?;
@@ -155,17 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn filter_without_command_is_identity() {
-        assert_eq!(filter(&HooksConfig::default(), "same"), "same");
-    }
-
-    #[test]
     fn missing_filter_keeps_original() {
-        let config = HooksConfig {
-            filter: vec!["/nonexistent/earwig-filter".into()],
-            ..HooksConfig::default()
-        };
-        assert_eq!(filter(&config, "hello world"), "hello world");
+        assert_eq!(
+            filter_with(vec!["/nonexistent/earwig-filter".into()], None),
+            "hello world"
+        );
     }
 
     /// Wait until `done`, at most 5 s.

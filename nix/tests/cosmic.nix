@@ -1,12 +1,6 @@
-# Dictation end to end on COSMIC (cosmic-comp), chosen by capability only:
-# cosmic-comp offers layer-shell, input-method-v2, virtual-keyboard and
-# data-control to unsandboxed clients, while xdg-desktop-portal-cosmic has
-# no GlobalShortcuts, so the hotkey is a COSMIC custom shortcut that runs
-# `earwig toggle`. cosmic-comp fires key bindings on press only (and
-# modifier-only bindings on release only; src/input/mod.rs), so a COSMIC
-# shortcut can toggle but not hold-to-talk.
-#
-# Session setup follows nixpkgs nixos/tests/cosmic.
+# Dictation end to end on COSMIC without keyboard access: insertion through input-method-v2,
+# the hotkey a COSMIC custom shortcut running `earwig toggle` (no GlobalShortcuts portal, and
+# cosmic-comp binds fire on press only). Setup as in nixpkgs' cosmic test.
 { self }:
 let
   common = import ./common.nix { inherit self; };

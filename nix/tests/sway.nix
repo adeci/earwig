@@ -1,4 +1,4 @@
-# Dictation end to end on sway (wlroots): virtual mic -> earwig -> focused
+# Dictation end to end on sway, earwig holding the keyboard: virtual mic -> earwig -> focused
 # foot. Software rendering via pixman, as in nixpkgs' sway test.
 { self }:
 let
@@ -18,13 +18,6 @@ in
         SWAYSOCK = "/tmp/sway-ipc.sock";
         WLR_RENDERER = "pixman";
       };
-      # The binds a user would add (the stock config already uses
-      # Mod4+space); the test drives the same commands through the CLI.
-      environment.etc."sway/config.d/earwig.conf".text = ''
-        bindsym --no-repeat Mod4+backslash exec earwig press
-        bindsym --release Mod4+backslash exec earwig release
-        bindsym Mod4+Escape exec earwig cancel
-      '';
       programs.bash.loginShellInit = ''
         if [ "$(tty)" = "/dev/tty1" ]; then
           sway > /tmp/sway.log 2>&1

@@ -1,10 +1,4 @@
-//! The area of the output a layer surface may cover: the output less the
-//! bars' exclusive zones.
-//!
-//! Layer-shell tells a client that only in the configure of a surface it
-//! stretches over the area, and GPUI cannot open a zero-sized surface on a
-//! scaled output (it sends an invalid viewport). So the overlay asks with a
-//! layer surface of its own that never gets a buffer and never shows.
+//! The output's usable area: only a layer surface stretched over it learns it, so probe one.
 
 use anyhow::Context as _;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -19,8 +13,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     self, Anchor, ZwlrLayerSurfaceV1,
 };
 
-/// Width and height, in logical pixels, of the usable area of the output the
-/// compositor puts new overlay surfaces on (the focused one).
+/// Logical size of the usable area on the focused output, where new overlays go.
 pub fn usable_area() -> anyhow::Result<(u32, u32)> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<Probe>(&conn)?;

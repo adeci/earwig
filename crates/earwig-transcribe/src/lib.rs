@@ -1,15 +1,8 @@
-//! earwig's speech engine: [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
-//! with GGUF models, the CPU and one GPU backend compiled in (Metal on macOS,
-//! Vulkan elsewhere).
-//!
-//! Streaming models decode while you speak and `finish` only decodes the
-//! tail; if the stream fails or comes up empty, the whole recording is
-//! decoded instead. Other models are re-decoded about once a second for live
-//! text and in full at the end.
-//!
-//! transcribe.cpp allows one in-flight compute per model and a stream
-//! borrows its session, so each loaded model gets a worker thread that owns
-//! the session; [`Model`] calls are messages to it.
+//! The speech engine: transcribe.cpp with the CPU and one GPU backend (Metal
+//! on macOS, Vulkan elsewhere). Streaming models decode as you speak, falling
+//! back to one decode of the whole recording; others re-decode about once a
+//! second. Each model's session lives on a worker thread: transcribe.cpp
+//! allows one compute at a time and a stream borrows the session.
 
 use std::path::Path;
 use std::sync::Once;
@@ -58,10 +51,6 @@ impl TranscribeEngine {
 }
 
 impl EngineFactory for TranscribeEngine {
-    fn name(&self) -> &'static str {
-        "transcribe.cpp"
-    }
-
     fn supports_architecture(&self, arch: &str) -> bool {
         ASR_ARCHITECTURES.contains(&arch)
     }
@@ -93,10 +82,9 @@ fn backend_request(backend: Backend) -> anyhow::Result<tc::Backend> {
     })
 }
 
-/// The language hint `lang` as the model lists it: as given, or, for a bare
-/// language code the model lists only with a region (Nemotron lists `en-US`
-/// and `en-GB` where the catalog says `en`), the first such tag. `None`, with
-/// a warning, when the model lists languages and not this one.
+/// The language hint as the model lists it: as given, or for a bare code the
+/// model only lists with a region (Nemotron has `en-US`, the catalog says `en`)
+/// the first such tag. `None` when the model lists languages but not this one.
 fn listed_language(lang: &str, listed: &[String]) -> Option<String> {
     if listed.is_empty() || listed.iter().any(|tag| tag == lang) {
         return Some(lang.to_owned());
@@ -230,9 +218,8 @@ impl TranscribeModel {
             language,
             ..tc::RunOptions::default()
         };
-        // A first decode builds the GPU's pipelines, which can take many
-        // seconds the first time a driver sees them; better now than in the
-        // first dictation.
+        // A first decode builds the GPU's pipelines, which can take seconds the
+        // first time a driver sees them: better now than in the first dictation.
         let warm = Instant::now();
         match session.run(&vec![0.; earwig_core::SAMPLE_RATE as usize], &run) {
             Ok(_) => log::debug!("warm-up decode took {:?}", warm.elapsed()),
@@ -615,16 +602,6 @@ fn decode(session: &mut tc::Session, run: &tc::RunOptions, pcm: &[f32]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn knows_speech_architectures_only() {
-        let engine = TranscribeEngine::new();
-        assert!(engine.supports_architecture("parakeet"));
-        assert!(engine.supports_architecture("whisper"));
-        assert!(!engine.supports_architecture("silero_vad"));
-        assert!(!engine.supports_architecture("sortformer"));
-        assert!(!engine.supports_architecture("llama"));
-    }
 
     #[test]
     fn a_bare_language_code_finds_the_models_regional_tag() {

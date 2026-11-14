@@ -1,6 +1,4 @@
-//! Linux: layer-shell where the compositor has it, else an override-redirect
-//! X11 popup (GNOME, through XWayland); a StatusNotifierItem tray; the XDG
-//! Settings portal's accent colour.
+//! Linux: layer-shell or an X11 popup, an SNI tray, the portal's accent colour.
 
 mod accent;
 mod layer_area;
@@ -29,17 +27,14 @@ pub(crate) fn overlay_surface(caps: &DesktopCaps) -> OverlaySurface {
 
 pub(crate) fn application(surface: OverlaySurface, caps: &DesktopCaps) -> Application {
     if surface == OverlaySurface::Popup && caps.wayland {
-        // No layer-shell (GNOME): run on XWayland, where an override-redirect
-        // popup floats above other windows without taking focus. A Wayland
-        // toplevel would be centred by the compositor and steal focus.
+        // No layer-shell (GNOME): an XWayland override-redirect popup floats without taking focus.
         gpui_kit::platform::linux(WindowingModes::X11)
     } else {
         gpui_kit::application()
     }
 }
 
-/// The primary display: the X11 popup opens there (layer-shell surfaces go
-/// to the output the compositor picks).
+/// Where the X11 popup opens; the compositor places layer surfaces itself.
 pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>> {
     cx.primary_display()
 }

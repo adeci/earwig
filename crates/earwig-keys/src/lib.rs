@@ -1,24 +1,6 @@
-//! A global hotkey: parse it ([`Hotkey`]), check that it is usable
-//! ([`Hotkey::check`]), watch the keyboard for it ([`Listener::run`]) and
-//! record a new one ([`Listener::record`]).
-//!
-//! One hotkey at a time, either a key with modifiers (`Super+Space`,
-//! swallowed so apps never see it) or modifiers alone (`RightCtrl`, passed
-//! through; [`Event::Chord`] says when they turned out to be part of a
-//! shortcut), with left and right modifiers apart. Edges come as
-//! [`Event::Pressed`] and [`Event::Released`], so hold-to-talk and tapping
-//! both work.
-//!
-//! - Linux: evdev (`/dev/input/event*`) directly, on any desktop, with
-//!   hot-plug; needs read access to the keyboards. Swallowing grabs the
-//!   keyboards and passes every other key on through a uinput clone of each;
-//!   without `/dev/uinput` access, or where another program (keyd) holds
-//!   them, the hotkey reaches apps too.
-//! - macOS: a `CGEventTap`; needs Accessibility.
-//! - Windows: a low-level keyboard hook.
-//!
-//! Keys the program sends itself, marked with [`SYNTHETIC`] (macOS,
-//! Windows), are not seen; on Linux it sends none through the keyboards.
+//! One global hotkey: parse and check it, watch the keyboard for it, record a new one.
+//! A key with modifiers (`Super+Space`) is swallowed; modifiers alone (`RightCtrl`) pass through.
+//! Linux reads evdev directly, macOS uses an event tap, Windows a low-level keyboard hook.
 
 mod check;
 mod hotkey;
@@ -52,8 +34,7 @@ pub use recorder::Recorded;
 pub enum Event {
     Pressed,
     Released,
-    /// The modifiers of a modifiers-alone hotkey were part of a shortcut
-    /// after all: take the press back. No release follows.
+    /// Modifiers alone turned out to be part of a shortcut: take the press back (no release).
     Chord,
 }
 
@@ -64,8 +45,7 @@ pub const SYNTHETIC: i64 = 0x6561_7277;
 #[cfg(windows)]
 pub const SYNTHETIC: usize = 0xea51_9000;
 
-/// Whether the system lets this program see keys now: read access to a
-/// keyboard (Linux), Accessibility (macOS); always on Windows.
+/// Can we see keys? Keyboard read access on Linux, Accessibility on macOS, always on Windows.
 pub fn can_see_keys() -> bool {
     backend::can_see_keys()
 }

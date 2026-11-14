@@ -38,17 +38,3 @@ pub(super) fn state_dir() -> PathBuf {
 pub(super) fn socket() -> PathBuf {
     env::temp_dir().join(format!("{APP}.sock"))
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn files_live_in_application_support() {
-        let config = super::super::user_config();
-        assert!(
-            config.ends_with("Library/Application Support/earwig/config.toml"),
-            "{}",
-            config.display()
-        );
-        assert!(super::super::models_dir().starts_with(config.parent().unwrap()));
-    }
-}

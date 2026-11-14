@@ -1,21 +1,14 @@
-//! The speech engine boundary.
-//!
-//! earwig ships one engine (`earwig-transcribe`, transcribe.cpp/GGUF), but the
-//! daemon only sees these traits, so another runtime (ONNX, whisper.cpp, a
-//! remote service) is one crate implementing them.
-//!
-//! Audio is always 16 kHz mono `f32` in `[-1, 1]` ([`crate::SAMPLE_RATE`]).
+//! The speech engine boundary; another runtime is one crate implementing
+//! these traits. Audio is 16 kHz mono `f32` in `[-1, 1]`.
 
 use std::path::Path;
 
-/// Loads models. Shared by the daemon and the model browser.
-pub trait EngineFactory: Send + Sync {
-    /// Short name for logs and the UI, e.g. `transcribe.cpp`.
-    fn name(&self) -> &str;
+use serde::{Deserialize, Serialize};
 
-    /// Whether a model whose GGUF `general.architecture` is `arch` loads.
-    /// The model browser uses this to mark search results compatible before
-    /// downloading anything.
+/// Loads models; shared by the daemon and the model browser.
+pub trait EngineFactory: Send + Sync {
+    /// Whether a model whose GGUF `general.architecture` is `arch` loads, so
+    /// search results can be marked before anything is downloaded.
     fn supports_architecture(&self, arch: &str) -> bool;
 
     /// Load a model file and keep it warm for repeated dictations.
@@ -31,7 +24,9 @@ pub struct EngineOptions {
     pub language: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Also `[model] backend`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Backend {
     #[default]
     Auto,
@@ -46,13 +41,11 @@ pub trait Model: Send {
     /// Start a recording. Any previous recording is discarded.
     fn begin(&mut self) -> anyhow::Result<()>;
 
-    /// Add audio to the current recording. Returns the live transcript when it
-    /// changed. Models without native streaming may re-decode periodically
-    /// here; they must keep this call cheap enough for real time.
+    /// Add audio to the current recording; returns the live transcript when it
+    /// changed. Must stay cheap enough for real time.
     fn feed(&mut self, pcm: &[f32]) -> anyhow::Result<Option<Partial>>;
 
-    /// End the recording and return the final text. With native streaming
-    /// most audio is already decoded, so this only covers the tail.
+    /// End the recording and return the final text.
     fn finish(&mut self) -> anyhow::Result<String>;
 
     /// Drop the current recording without decoding.

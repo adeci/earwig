@@ -1,8 +1,4 @@
-//! Windows: the overlay is GPUI's topmost tool-window popup, made
-//! non-activating so clicking or dragging the pill never takes focus from
-//! the app the text is meant for, with hand cursors for grabbing it (Windows
-//! has none, and GPUI shows an arrow for them); a notification-area icon
-//! (`tray-icon`); the accent colour from the DWM settings in the registry.
+//! Windows: a never-activating topmost popup with hand cursors, a tray icon, the DWM accent.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -51,8 +47,7 @@ pub(crate) fn application(_surface: OverlaySurface, _caps: &DesktopCaps) -> Appl
     gpui_kit::application()
 }
 
-/// The display the overlay opens on: the one with the focused window, where
-/// the user is looking.
+/// The display with the focused window.
 pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>> {
     // SAFETY: plain calls; a null window maps to the primary monitor.
     let monitor = unsafe { MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY) };
@@ -61,7 +56,6 @@ pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>>
     cx.find_display(id).or_else(|| cx.primary_display())
 }
 
-/// The overlay's popup window.
 pub(crate) struct Popup {
     hwnd: HWND,
     /// Origin last asked for, `None` while the window is where it opened.
@@ -69,8 +63,7 @@ pub(crate) struct Popup {
 }
 
 impl Popup {
-    /// Make the popup GPUI opened (topmost, no taskbar entry) never take
-    /// activation, and clip it to nothing until the pill is painted.
+    /// Never take activation, and clip to nothing until the pill is painted.
     pub(crate) fn new(window: &Window) -> anyhow::Result<Self> {
         let hwnd = hwnd(window)?;
         // SAFETY: `hwnd` is the live window GPUI just created on this thread.
@@ -104,7 +97,6 @@ impl Popup {
         ))
     }
 
-    /// Put the window's top-left corner at `origin` (logical pixels).
     pub(crate) fn move_to(&mut self, origin: Point<Pixels>, scale: f32) {
         if self.origin == Some(origin) {
             return;
@@ -112,9 +104,7 @@ impl Popup {
         self.origin = Some(origin);
         #[allow(clippy::cast_possible_truncation)]
         let device = |value: Pixels| (f32::from(value) * scale).round() as i32;
-        // Moving sends WM_MOVE right away, which GPUI cannot take while it
-        // renders (where the drag calls this); the window moves itself once
-        // the message loop gets to this.
+        // WM_MOVE arrives at once, which GPUI can't take mid-render: post the move to ourselves.
         let packed =
             (i64::from(device(origin.y)) << 32) | i64::from(device(origin.x).cast_unsigned());
         // SAFETY: posting to a live window of this thread.
@@ -126,10 +116,7 @@ impl Popup {
     }
 }
 
-/// Clicks reach the window only inside `area` (window coordinates, logical
-/// pixels), and everywhere else whatever is below. `None` is nothing. The
-/// region clips drawing as well, so `area` includes what is painted around
-/// the pill.
+/// Clicks only land inside `area` (none for `None`). It clips drawing too.
 pub(crate) fn set_input_region(window: &Window, area: Option<Bounds<Pixels>>) {
     let Ok(hwnd) = hwnd(window) else {
         return;
@@ -163,8 +150,7 @@ fn hwnd(window: &Window) -> anyhow::Result<HWND> {
 pub(crate) enum Grip {
     /// It cannot: the cursor is GPUI's.
     None,
-    /// Over the pill at these bounds (window coordinates, logical pixels),
-    /// where GPUI shows an arrow (not over the ×), it can grab it.
+    /// Grabbable over these bounds where GPUI shows an arrow (not over the ×).
     Open(Bounds<Pixels>),
     /// It holds the pill.
     Held,
@@ -176,9 +162,7 @@ thread_local! {
     static HANDS: RefCell<HashMap<i32, (HCURSOR, HCURSOR)>> = RefCell::new(HashMap::new());
 }
 
-/// Show the open hand where the pill can be grabbed and the closed one
-/// while it is held, as GPUI's `CursorStyle::OpenHand` and `ClosedHand`
-/// would elsewhere. Takes effect at once when the pointer is on `window`.
+/// The hand cursors GPUI shows as arrows here; applied at once if the pointer is on `window`.
 pub(crate) fn set_grip(window: &Window, grip: Grip) {
     if GRIP.replace(grip) == grip {
         return;
@@ -205,8 +189,7 @@ pub(crate) fn set_grip(window: &Window, grip: Grip) {
     }
 }
 
-/// The hand for the pointer on `hwnd` as things stand, if any. GPUI has
-/// set its own cursor already.
+/// The hand for the pointer on `hwnd` now, if any (GPUI has set its own cursor already).
 unsafe fn grip_cursor(hwnd: HWND) -> Option<HCURSOR> {
     let (open, closed) = hands(hwnd)?;
     match GRIP.get() {
@@ -276,8 +259,7 @@ fn cursor(svg: &str, size: i32) -> Option<HCURSOR> {
         },
         ..Default::default()
     };
-    // SAFETY: the DIB section has room for `width`² BGRA pixels, which are
-    // copied in; the bitmaps are copied into the cursor and freed after.
+    // SAFETY: the DIB has room for the copied pixels; the cursor copies the bitmaps.
     unsafe {
         let mut bits = std::ptr::null_mut();
         let color = CreateDIBSection(
@@ -333,8 +315,7 @@ fn bgra(svg: &str, size: u32) -> Vec<u8> {
 /// [`Popup::move_to`]'s request: `lparam` holds x (low half) and y.
 const MOVE_TO: u32 = WM_APP + 1;
 
-/// GPUI activates a window on every click (`MA_ACTIVATE`); the overlay asks
-/// Windows not to, so the focused app keeps the keyboard.
+/// GPUI activates a window on every click; we don't, so the focused app keeps the keyboard.
 unsafe extern "system" fn no_activate(
     hwnd: HWND,
     msg: u32,
@@ -381,8 +362,7 @@ unsafe extern "system" fn no_activate(
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
-/// The accent colour Windows draws title bars and Start with, and every
-/// change of it (`HKCU\Software\Microsoft\Windows\DWM`, `AccentColor`).
+/// DWM's `AccentColor` (title bars, Start), now and on every change.
 pub(crate) fn follow_accent(tx: &flume::Sender<Option<Hsla>>, cx: &App) {
     let tx = tx.clone();
     cx.background_executor()
@@ -399,14 +379,12 @@ const DWM_KEY: &str = r"Software\Microsoft\Windows\DWM";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "earwig";
 
-/// Whether earwig starts when the user signs in (a value in the per-user
-/// `Run` key).
+/// A value in the per-user `Run` key.
 pub(crate) fn autostart() -> bool {
     RegKey::open(RUN_KEY, KEY_READ).is_ok_and(|key| key.has_value(RUN_VALUE))
 }
 
-/// Start earwig at sign-in, through `earwigw.exe` when it sits next to this
-/// program so no console window opens, or stop doing so.
+/// Prefers `earwigw.exe` beside us, which opens no console.
 pub(crate) fn set_autostart(enabled: bool) -> anyhow::Result<()> {
     let key = RegKey::open(RUN_KEY, KEY_SET_VALUE)?;
     let name = wide(RUN_VALUE);
@@ -455,8 +433,7 @@ fn watch_accent(tx: &flume::Sender<Option<Hsla>>) -> anyhow::Result<()> {
     let event = unsafe { OwnedHandle::from_raw_handle(event) };
     loop {
         // Arm the notification before reading, so no change slips between.
-        // SAFETY: both handles live for the call; the event is signalled
-        // asynchronously.
+        // SAFETY: both handles outlive the call; the event is signalled asynchronously.
         let armed = unsafe {
             RegNotifyChangeKeyValue(
                 key.0,

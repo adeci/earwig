@@ -67,14 +67,13 @@ const NAMED: [(u16, Key); 48] = [
 ];
 
 /// Every (code, key) pair, a key with several codes once per code.
-fn table() -> impl Iterator<Item = (u16, Key)> {
+pub(super) fn table() -> impl Iterator<Item = (u16, Key)> {
     let letters = ('A'..='Z')
         .zip(LETTERS)
         .map(|(c, code)| (code, Key::Letter(c)));
     // KEY_1 … KEY_9 are 2 … 10, KEY_0 is 11.
     let digits = (0..=9u8).map(|d| (if d == 0 { 11 } else { 1 + u16::from(d) }, Key::Digit(d)));
-    // KEY_F1 … KEY_F10 are 59 … 68, KEY_F11 and KEY_F12 87 and 88, KEY_F13
-    // … KEY_F24 183 … 194.
+    // KEY_F1 … KEY_F10 are 59 … 68, KEY_F11 and KEY_F12 87 and 88, KEY_F13 … KEY_F24 183 … 194.
     let function = (1..=24u8).map(|n| {
         let code = match n {
             1..=10 => 58 + u16::from(n),
@@ -97,14 +96,7 @@ pub(super) fn key(code: u16) -> Option<Key> {
     table().find(|&(c, _)| c == code).map(|(_, key)| key)
 }
 
-/// The codes a keyboard may send for `key`.
-pub(super) fn codes(key: Key) -> impl Iterator<Item = u16> {
-    table()
-        .filter(move |&(_, k)| k == key)
-        .map(|(code, _)| code)
-}
-
-/// The evdev codes of modifier keys, which [`crate::key::Held`] tracks.
+/// The first nine named keys are the modifiers, which [`crate::key::Held`] tracks.
 pub(super) fn modifier_codes() -> impl Iterator<Item = (u16, Key)> {
     NAMED.into_iter().take(9)
 }
@@ -116,7 +108,7 @@ mod tests {
     #[test]
     fn every_key_has_a_code_that_maps_back_to_it() {
         for key in Key::all() {
-            let codes: Vec<u16> = codes(key).collect();
+            let codes: Vec<u16> = table().filter(|&(_, k)| k == key).map(|(c, _)| c).collect();
             assert!(!codes.is_empty(), "{key:?}");
             for code in codes {
                 assert_eq!(super::key(code), Some(key), "{code}");

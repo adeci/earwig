@@ -1,19 +1,8 @@
-//! Linux: the keyboards' evdev nodes (`/dev/input/event*`), read directly,
-//! so the hotkey works on any desktop, Wayland or X11, and on a console.
-//! Reading needs access to the nodes (a udev `uaccess` rule gives it to the
-//! user at the seat). Keyboards plugged in later, and access granted later,
-//! are picked up through inotify.
-//!
-//! Swallowing the hotkey grabs each keyboard that has its key, and a uinput
-//! clone of the keyboard (same name and ids, so the compositor's settings for
-//! it still apply) passes every other key on; LED changes on the clone go
-//! back to the keyboard. A keyboard is grabbed and let go only while no key is
-//! down on it, so no key goes down through one device and up through the
-//! other. Without access to `/dev/uinput`, or where another program holds a
-//! keyboard (keyd grabs every keyboard and types through a virtual one of its
-//! own), the hotkey is seen but not swallowed. Virtual keyboards, keyd's
-//! included, are read but never grabbed: keyd grabs every new keyboard,
-//! clones too, and the two would feed each other.
+//! Linux: read the keyboards' evdev nodes directly (hot-plug via inotify), on any desktop.
+//! Swallowing grabs each keyboard with the hotkey's key and passes other keys on through a uinput
+//! clone (same name and ids, so compositor settings still apply). Grabs change only while no key
+//! is down. Virtual keyboards are never grabbed: keyd grabs every new one, clones too, and the two
+//! would feed each other.
 
 mod codes;
 mod evdev;
@@ -40,9 +29,7 @@ use crate::listener::{Blocking, Shared, Snapshot, Status};
 use crate::matcher::{Edge, Mask};
 
 const DEV_INPUT: &str = "/dev/input";
-/// How long a refused grab waits before it is tried again; sooner when a
-/// device's permissions change. A keyboard another program holds is tried
-/// again only when devices change.
+/// How long a refused grab waits to retry; a busy keyboard waits for devices to change instead.
 const RETRY: Duration = Duration::from_secs(10);
 
 /// Wakes [`run`] when the configuration changes: an eventfd.
@@ -150,10 +137,16 @@ fn changes(notify: &OwnedFd) -> Vec<(PathBuf, bool)> {
     changes
 }
 
-/// The hotkey is swallowed: a key with modifiers, or modifiers alone that
-/// need a mask key.
+/// Swallowed: a key with modifiers, or modifiers alone that need a mask key.
 fn swallows(hotkey: &Hotkey) -> bool {
     !hotkey.is_modifier_only() || hotkey.needs_mask()
+}
+
+fn trigger_codes(hotkey: &Hotkey) -> Vec<u16> {
+    codes::table()
+        .filter(|&(_, key)| hotkey.is_trigger(key))
+        .map(|(code, _)| code)
+        .collect()
 }
 
 #[derive(Default)]
@@ -193,20 +186,13 @@ impl Keyboards {
         }
     }
 
-    /// Grab the keyboards the hotkey wants grabbed and let go of the others,
-    /// each while no key is down on it.
+    /// Grab the keyboards the hotkey wants and let go of the rest, each once no key is down on it.
     fn settle(&mut self, snapshot: &Snapshot) {
-        let codes: Vec<u16> = snapshot
+        let codes = snapshot
             .hotkey
             .as_ref()
             .filter(|hotkey| snapshot.options.block && swallows(hotkey))
-            .map(|hotkey| {
-                hotkey
-                    .trigger_keys()
-                    .into_iter()
-                    .flat_map(codes::codes)
-                    .collect()
-            })
+            .map(trigger_codes)
             .unwrap_or_default();
         for keyboard in &mut self.keyboards {
             let device = &keyboard.device;
@@ -239,11 +225,7 @@ impl Keyboards {
         if !snapshot.options.block {
             return Status::Watching(Blocking::No("swallowing it is off".into()));
         }
-        let codes: Vec<u16> = hotkey
-            .trigger_keys()
-            .into_iter()
-            .flat_map(codes::codes)
-            .collect();
+        let codes = trigger_codes(hotkey);
         let refused = self
             .keyboards
             .iter()
@@ -298,9 +280,7 @@ impl Keyboards {
                 sources.push(Source::Clone(i));
             }
         }
-        // A keyboard another program holds is tried again when devices
-        // change (keyd stopping takes its virtual keyboard away), not on a
-        // timer.
+        // A busy keyboard is retried when devices change (keyd stopping drops its keyboard).
         let refused = self
             .keyboards
             .iter()
@@ -340,8 +320,7 @@ impl Keyboards {
             .fold(Held::default(), |held, (_, keyboard)| keyboard.held(held))
     }
 
-    /// Everything keyboard `i` has to say; it is dropped when it is gone.
-    /// False once `events` wants no more.
+    /// Reads all keyboard `i` has (dropping it if gone); false once `events` wants no more.
     fn read(&mut self, i: usize, shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> bool {
         let others = self.held_except(i);
         let keyboard = &mut self.keyboards[i];
@@ -398,8 +377,7 @@ enum Grab {
     No,
     Held {
         clone: Uinput,
-        /// When the grab took hold, in microseconds of `CLOCK_MONOTONIC`:
-        /// events from before reached the compositor too.
+        /// When the grab took hold (`CLOCK_MONOTONIC` µs); earlier events reached the compositor.
         since: i64,
     },
     Refused {
@@ -408,13 +386,10 @@ enum Grab {
     },
 }
 
-/// One keyboard being read.
 struct Keyboard {
     device: Device,
-    /// Keys down, as its events said. Never the kernel's view: a keyboard
-    /// another program holds (keyd) sends no events, so a snapshot of its
-    /// keys would stay down here for good, a Super among them making every
-    /// Space Super+Space.
+    /// Keys down as its events said, never the kernel's view: a keyboard keyd holds sends us
+    /// nothing, so a kernel snapshot would leave Super held for good (every Space Super+Space).
     down: KeyBits,
     grab: Grab,
     /// Why the last grab was refused, logged once.
@@ -423,12 +398,10 @@ struct Keyboard {
     frame: Vec<InputEvent>,
     /// A key event of the frame was swallowed.
     swallowed: bool,
-    /// A mask key to press when the frame ends, and the release it held
-    /// back.
+    /// A mask key to tap when the frame ends, and the release it held back.
     mask: Mask,
     release: u16,
-    /// Events were lost (`SYN_DROPPED`): skip to the next frame, then catch
-    /// up with the keys down.
+    /// Events were lost (`SYN_DROPPED`): skip to the next frame, then catch up.
     dropping: bool,
     /// The grab failed while in use: let go after this read.
     lost_grab: bool,
@@ -472,8 +445,7 @@ impl Keyboard {
     }
 
     fn try_grab(&mut self) {
-        // A key down now would come up through the clone, unbalanced: wait
-        // for its release.
+        // A key down now would come up through the clone unbalanced: wait for its release.
         if !evdev::keys_down(&self.device.fd).is_ok_and(|down| down.is_empty()) {
             return;
         }
@@ -491,8 +463,7 @@ impl Keyboard {
                     log::info!("hotkey: not holding {}: {problem:?}", self.device.name);
                 }
                 if problem == Problem::Busy {
-                    // Its keys go to the other program now: any its events
-                    // left down here would never come up.
+                    // Its keys go to the other program now, so ours would never come up.
                     self.down = KeyBits::default();
                 }
                 self.refused = Some(problem.clone());
@@ -504,8 +475,8 @@ impl Keyboard {
         };
     }
 
-    /// The clone is set up first, so no grab is taken without one; it
-    /// appears once the grab holds, so another grabber never sees it.
+    /// Set up the clone first so no grab happens without one; it only appears once the grab
+    /// holds, so another grabber never sees it.
     fn grab_with_clone(&self) -> Result<Grab, Problem> {
         let set_up = Uinput::set_up(&self.device).map_err(|e| match e.kind() {
             io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound => Problem::NoUinput,
@@ -577,7 +548,7 @@ impl Keyboard {
             }
         };
         let key = codes::key(event.code);
-        let held = key.map_or_else(|| self.held(others), |key| self.held(others).without(key));
+        let held = self.held(others).besides(key);
         self.down.set(event.code, edge != Edge::Up);
         let action = shared.edge(key, edge, held);
         let running = action.event.is_none_or(&mut *events);
@@ -621,8 +592,7 @@ impl Keyboard {
         self.mask = Mask::None;
     }
 
-    /// After lost events: the keys that went up meanwhile go up now, the
-    /// keys that went down are taken as down, and the clone catches up.
+    /// After lost events, sync the keys down with the kernel and let the clone catch up.
     fn resync(
         &mut self,
         others: Held,
@@ -637,7 +607,7 @@ impl Keyboard {
         let released: Vec<u16> = self.down.iter().filter(|&code| !now.has(code)).collect();
         for code in released {
             let key = codes::key(code);
-            let held = key.map_or_else(|| self.held(others), |key| self.held(others).without(key));
+            let held = self.held(others).besides(key);
             self.down.set(code, false);
             let action = shared.edge(key, Edge::Up, held);
             running &= action.event.is_none_or(&mut *events);
@@ -669,7 +639,7 @@ impl Keyboard {
         let mut running = true;
         for code in down {
             let key = codes::key(code);
-            let held = key.map_or_else(|| self.held(others), |key| self.held(others).without(key));
+            let held = self.held(others).besides(key);
             self.down.set(code, false);
             running &= shared
                 .edge(key, Edge::Up, held)
@@ -680,9 +650,7 @@ impl Keyboard {
     }
 }
 
-/// What a grabbed keyboard's clone sends for one frame (`frame`, ended by
-/// `syn`): what is left of it, then the mask key's tap and the release it
-/// held back.
+/// What the clone sends for one frame: what's left of it, then any mask tap and held-back release.
 fn passed_on(
     frame: &[InputEvent],
     swallowed: bool,

@@ -1,6 +1,4 @@
-//! Moving the overlay's override-redirect popup on X11 (GNOME, through
-//! XWayland). GPUI places such a window only when it opens, so the overlay
-//! talks to the X server itself to follow a drag.
+//! Moving the overlay's override-redirect X11 popup, which GPUI only places when it opens.
 
 use anyhow::{Context as _, bail};
 use gpui_kit::{Pixels, Point, Window, point, px};
@@ -29,9 +27,7 @@ impl X11Popup {
         })
     }
 
-    /// The pointer on the root window, in logical pixels. Asked of the
-    /// server rather than derived from window-relative events, which lag a
-    /// window that moves under them.
+    /// Asked of the server: window-relative events lag a window that's moving.
     pub fn pointer(&self, scale: f32) -> Option<Point<Pixels>> {
         let reply = self.conn.query_pointer(self.window).ok()?.reply().ok()?;
         Some(point(
@@ -40,7 +36,6 @@ impl X11Popup {
         ))
     }
 
-    /// Put the window's top-left corner at `origin` (logical pixels).
     pub fn move_to(&mut self, origin: Point<Pixels>, scale: f32) {
         if self.origin == Some(origin) {
             return;

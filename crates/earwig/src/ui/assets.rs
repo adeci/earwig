@@ -1,5 +1,4 @@
-//! The icons the windows draw: gpui-kit's default set plus the few Lucide
-//! icons it lacks.
+//! gpui-kit's icons plus the few Lucide ones it lacks.
 
 use std::borrow::Cow;
 
@@ -7,7 +6,6 @@ use gpui_kit::{AssetSource, SharedString};
 
 gpui_kit::assets::icon_assets!(Extra, [Languages, Radio, RotateCcw, Trash]);
 
-/// gpui-kit's default icons and [`Extra`].
 pub(crate) struct Assets;
 
 impl AssetSource for Assets {

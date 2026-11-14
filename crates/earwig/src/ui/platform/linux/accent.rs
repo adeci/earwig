@@ -1,12 +1,10 @@
-//! The desktop's accent colour, `org.freedesktop.appearance accent-color`
-//! from the XDG Settings portal.
+//! The desktop's accent colour from the XDG Settings portal.
 
 use ashpd::desktop::Color;
 use ashpd::desktop::settings::Settings;
 use futures_lite::StreamExt as _;
 use gpui_kit::{App, Hsla, Rgba};
 
-/// Ask the portal off the main thread and keep following it.
 pub(crate) fn follow(tx: &flume::Sender<Option<Hsla>>, cx: &App) {
     let tx = tx.clone();
     cx.background_executor()
@@ -20,8 +18,7 @@ pub(crate) fn follow(tx: &flume::Sender<Option<Hsla>>, cx: &App) {
 
 async fn listen(tx: &flume::Sender<Option<Hsla>>) -> ashpd::Result<()> {
     let settings = Settings::new().await?;
-    // Subscribe first so a change between the read and the subscription
-    // is not lost.
+    // Subscribe before reading, so no change slips between.
     let mut changes = settings.receive_accent_color_changed().await?;
     let _ = tx.send(settings.accent_color().await.ok().and_then(to_hsla));
     while let Some(color) = changes.next().await {
@@ -32,8 +29,7 @@ async fn listen(tx: &flume::Sender<Option<Hsla>>) -> ashpd::Result<()> {
     Ok(())
 }
 
-/// The portal speaks sRGB in 0..1; anything outside that means "no
-/// preference".
+/// The portal speaks sRGB in 0..1; anything outside means "no preference".
 #[allow(clippy::cast_possible_truncation)]
 fn to_hsla(color: Color) -> Option<Hsla> {
     let channels = [color.red(), color.green(), color.blue()];

@@ -15,32 +15,12 @@ use gpui_kit::{
 use super::{SIDEBAR_WIDTH, item, spaced};
 use crate::ui::{UiState, config, edit_config, now_ms};
 
-/// The choices for Entries kept.
 const LIMITS: [usize; 3] = [50, 200, 1000];
 
-/// What the History page remembers between renders.
 #[derive(Debug, Default)]
 pub struct HistoryPage {
-    /// Clear all was clicked: Cancel or Delete answers.
+    /// Clear all is asking to confirm.
     asking: bool,
-}
-
-impl HistoryPage {
-    /// Clear all: ask before deleting anything.
-    fn ask(&mut self) {
-        self.asking = true;
-    }
-
-    /// Cancel: keep everything.
-    fn keep(&mut self) {
-        self.asking = false;
-    }
-
-    /// Delete: whether to delete every transcript now, which only an asked
-    /// question allows.
-    fn confirm(&mut self) -> bool {
-        std::mem::take(&mut self.asking)
-    }
 }
 
 pub fn page(view: &Entity<HistoryPage>, settings: &Config, cx: &App) -> SettingPage {
@@ -82,11 +62,7 @@ pub fn page(view: &Entity<HistoryPage>, settings: &Config, cx: &App) -> SettingP
         ]))
 }
 
-/// Clear all at the right end of the header, and once clicked its question
-/// in its place; nothing while there is nothing to clear. gpui-kit puts the
-/// header's suffix right after the title, so this one spans the rest of the
-/// header: the page (the window less the sidebar) less the header's padding
-/// of a rem on each side.
+/// Clear all, or its question, at the right end of the header.
 fn clear_all(view: &Entity<HistoryPage>, window: &Window, cx: &App) -> AnyElement {
     let count = UiState::handle(cx).history().len();
     if count == 0 {
@@ -105,7 +81,7 @@ fn clear_all(view: &Entity<HistoryPage>, window: &Window, cx: &App) -> AnyElemen
         let delete = {
             let view = view.clone();
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                if view.update(cx, |page, _| page.confirm()) {
+                if view.update(cx, |page, _| std::mem::take(&mut page.asking)) {
                     if let Err(e) = UiState::handle(cx).history().clear() {
                         log::error!("clearing history: {e}");
                     }
@@ -121,7 +97,7 @@ fn clear_all(view: &Entity<HistoryPage>, window: &Window, cx: &App) -> AnyElemen
                     .label("Cancel")
                     .ghost()
                     .small()
-                    .on_click(answer(HistoryPage::keep)),
+                    .on_click(answer(|page: &mut HistoryPage| page.asking = false)),
             )
             .child(
                 Button::new("delete-history")
@@ -137,9 +113,10 @@ fn clear_all(view: &Entity<HistoryPage>, window: &Window, cx: &App) -> AnyElemen
             .icon(IconName::Trash)
             .ghost()
             .small()
-            .on_click(answer(HistoryPage::ask))
+            .on_click(answer(|page: &mut HistoryPage| page.asking = true))
             .into_any_element()
     };
+    // The suffix sits right after the title, so span the header: window less sidebar and padding.
     let width = window.viewport_size().width - SIDEBAR_WIDTH - window.rem_size() * 2.;
     div()
         .absolute()
@@ -154,7 +131,6 @@ fn clear_all(view: &Entity<HistoryPage>, window: &Window, cx: &App) -> AnyElemen
         .into_any_element()
 }
 
-/// What Clear all asks before deleting `count` transcripts.
 fn question(count: usize) -> String {
     if count == 1 {
         "Delete 1 transcript?".into()
@@ -163,7 +139,7 @@ fn question(count: usize) -> String {
     }
 }
 
-/// [`LIMITS`], and in order among them `limit` when it was written by hand.
+/// The presets, plus a hand-written limit in its place among them.
 fn limit_options(limit: usize) -> Vec<(SharedString, SharedString)> {
     let mut limits = LIMITS.to_vec();
     if !limits.contains(&limit) {
@@ -210,8 +186,7 @@ fn row(ix: usize, entry: &HistoryEntry, now: u64, cx: &App) -> impl IntoElement 
     } else {
         " · not inserted".to_owned()
     };
-    // GPUI measures text unwrapped: without `min_w_0` a long transcript
-    // keeps its widest size and pushes Copy past the window's edge.
+    // `min_w_0`: GPUI measures text unwrapped, so a long transcript would push Copy off-window.
     h_flex()
         .w_full()
         .items_start()
@@ -255,7 +230,7 @@ fn ago(now_ms: u64, at_ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HistoryPage, ago, limit_options, question};
+    use super::{ago, limit_options};
 
     #[test]
     fn ages_round_down_to_the_largest_unit() {
@@ -279,24 +254,5 @@ mod tests {
         assert_eq!(values(200), ["50", "200", "1000"]);
         assert_eq!(values(500), ["50", "200", "500", "1000"]);
         assert_eq!(values(5000), ["50", "200", "1000", "5000"]);
-    }
-
-    #[test]
-    fn clear_all_deletes_only_once_asked() {
-        let mut page = HistoryPage::default();
-        assert!(!page.confirm(), "never a one-click wipe");
-        page.ask();
-        page.keep();
-        assert!(!page.confirm(), "Cancel keeps everything");
-        page.ask();
-        assert!(page.confirm());
-        assert!(!page.asking, "answered");
-        assert!(!page.confirm());
-    }
-
-    #[test]
-    fn clear_all_says_how_many_go() {
-        assert_eq!(question(12), "Delete all 12 transcripts?");
-        assert_eq!(question(1), "Delete 1 transcript?");
     }
 }

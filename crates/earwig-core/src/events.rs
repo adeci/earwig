@@ -1,7 +1,5 @@
 //! The control socket's wire format (one JSON object per line) and the
-//! in-process feed the UI renders from. The voice the overlay's pill shows
-//! comes from [`crate::spectrum::Feed`] instead, which is not sent over the
-//! socket.
+//! in-process feed the UI renders from.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,10 +15,8 @@ pub enum Command {
     Toggle,
     /// Drop the current recording without inserting anything.
     Cancel,
-    /// The held hotkey turned out to be part of a key combination (a bare
-    /// modifier trigger such as Right Command, chorded with another key):
-    /// a recording its press started is dropped, a latched one it stopped
-    /// still finishes, and its release is ignored.
+    /// The held hotkey was part of a key combination: a recording its press
+    /// started is dropped (one it stopped still finishes), its release ignored.
     Chord,
     ShowSettings,
     /// Reply with one [`Event::Status`].
@@ -47,8 +43,7 @@ pub enum Event {
     State {
         state: DictationState,
     },
-    /// Microphone level while recording, 0.0 (silence) to 1.0 (loud), 20
-    /// times a second.
+    /// Microphone level while recording, 0.0 (silence) to 1.0 (loud), 20 Hz.
     Level {
         level: f32,
     },
@@ -152,17 +147,15 @@ pub struct Status {
 /// How the hotkey reaches earwig.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeyStatus {
-    /// What delivers it: `keyboard` (earwig watches `key` itself),
-    /// `portal` (the desktop's shortcut) or `socket` (only `earwig press`
-    /// and the like, from compositor binds or scripts).
+    /// `keyboard` (earwig watches `key` itself), `portal` (the desktop's
+    /// shortcut) or `socket` (only `earwig press` and the like).
     pub source: String,
     /// The key earwig watches, as `[hotkey] key` writes it; empty for none.
     pub key: String,
     pub keyboard: KeyboardState,
     /// Other apps do not get the key.
     pub blocking: bool,
-    /// Why the source is not the keyboard, or why other apps get the key
-    /// too.
+    /// Why the source is not the keyboard, or why other apps get the key too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }

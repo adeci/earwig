@@ -1,7 +1,5 @@
-//! The C and Objective-C entry points earwig needs on macOS: synthetic keys
-//! (CoreGraphics), privacy checks (ApplicationServices, AVFoundation), the
-//! build's code signature (Security) and the pasteboard. The hotkey's event
-//! tap is earwig-keys'.
+//! The C and Objective-C calls earwig makes on macOS: synthetic keys, privacy
+//! checks, the code signature and the pasteboard.
 
 use std::ffi::c_void;
 
@@ -72,9 +70,8 @@ unsafe extern "C" {}
 const RECORD_UNDETERMINED: isize = 0x756e_6474;
 const RECORD_GRANTED: isize = 0x6772_6e74;
 
-/// AVAudioApplication (macOS 14 on), which reads the microphone's answer
-/// live and asks again once it is cleared. AVCaptureDevice, all macOS 13
-/// has, keeps the first answer it read for the life of the process.
+/// AVAudioApplication (macOS 14+) reads the mic answer live and asks again
+/// once it is cleared; AVCaptureDevice (all macOS 13 has) caches the first.
 fn audio_application() -> Option<&'static AnyClass> {
     AnyClass::get(c"AVAudioApplication")
 }

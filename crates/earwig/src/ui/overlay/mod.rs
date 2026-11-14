@@ -1,19 +1,7 @@
-//! The small on-screen pill shown while dictating. The user can drag it out
-//! of the way for the rest of the dictation; the next one starts at home.
-//! Its × throws the dictation away. Once the dictation is finished the pill
-//! switches off where it is (see [`crt`](crate::ui::crt)) and its window
-//! waits, empty and click-through, until the text has landed (see
-//! [`lifecycle`](crate::ui::lifecycle)).
-//!
-//! The pill's window is just big enough for it: GPUI's path rendering costs
-//! in proportion to the window's area, which makes an output-sized overlay
-//! expensive (very much so on software rendering). A drag moves that window
-//! with the pointer, the pill animated as ever: a layer surface through its
-//! margins, a popup to its new place.
+//! The dictation pill, in a window just its size (GPUI's path rendering costs per window area).
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use earwig_core::config::{OverlayAnimation, OverlayConfig, OverlayPosition};
@@ -22,53 +10,45 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
-    Entity, FontFeatures, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, PlatformDisplay, Point, Render, Size, Stateful, StatefulInteractiveElement as _,
-    Styled as _, StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
+    Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
+    PlatformDisplay, Point, Render, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
+    StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
-use crate::ui::drag::{Drag, Grab, Pointer};
+use crate::ui::drag::{Grab, Pointer};
 use crate::ui::lifecycle::{Lifecycle, Stage};
 use crate::ui::pill::{self, Clock, Edge, Look, Motion};
 use crate::ui::platform::Popup;
-use crate::ui::{OverlaySurface, accent, crt, now_ms};
+use crate::ui::{OverlaySurface, accent, crt, font, now_ms};
 
 #[cfg(target_os = "linux")]
 mod layer_shell;
 
-/// Width of the pill.
 pub(crate) const WIDTH: f32 = 560.;
-/// Gap between the pill and the edge of the screen (less bars) it starts
-/// at; at least `INSET`, so the window never reaches past that edge.
+/// From the pill to the screen edge it starts at.
 const MARGIN: f32 = 56.;
-/// Transparent room around the pill for its moving edge and its shadow.
+/// Room around the pill for its moving edge and shadow.
 const INSET: f32 = pill::ROOM;
-/// Gap between the window and the edge it starts at.
 const WINDOW_MARGIN: f32 = MARGIN - INSET;
 const _: () = assert!(WINDOW_MARGIN >= 0.);
-/// Closest a dragged pill gets to an edge, so even its fullest swell stays
-/// on screen.
+/// Closest a dragged pill gets to an edge, so its fullest swell stays on screen.
 const EDGE_GAP: f32 = pill::DEPTH;
-/// Size and line height of the dictated text.
 pub(crate) const TEXT_SIZE: f32 = 15.;
 pub(crate) const LINE_HEIGHT: f32 = 22.;
-/// Frame pacing: every display frame while the voice moves the pill, slow
-/// otherwise, so the overlay never competes with CPU decoding at display
-/// rate. A voice wakes a slow overlay at once (see [`OverlayView::hears`]).
+/// Pacing while the voice isn't moving the pill, so we don't compete with CPU decoding.
 const QUIET_FRAME: Duration = Duration::from_millis(50);
 const STILL_FRAME: Duration = Duration::from_millis(250);
 const DISCARD_SIZE: f32 = 24.;
-/// Pixels the voice must move the pill by to be worth every frame.
+/// Pixels the voice must move the edge by to be worth every frame.
 const SPEAKING_REACH: f32 = 0.35;
 const HEADER_HEIGHT: f32 = 22.;
-/// The pill's padding, and the gap between its header and its text.
 pub(crate) const PADDING_X: f32 = 18.;
 pub(crate) const PADDING_Y: f32 = 18.;
+/// Between the header and the text.
 pub(crate) const GAP: f32 = 8.;
 
-/// Open the overlay's window at home.
 pub fn open(
     config: &OverlayConfig,
     surface: OverlaySurface,
@@ -77,11 +57,10 @@ pub fn open(
 ) -> anyhow::Result<Entity<OverlayView>> {
     let display = crate::ui::platform::home_display(cx);
     let options = home_window_options(surface, config, display.as_deref());
-    // No Base root: it paints an opaque background, and the overlay has no
-    // inputs or popovers that need one.
+    // No gpui-kit Root: it paints an opaque background, and we have no inputs or popovers.
     let mut view = None;
     let handle = cx.open_window(options, |window, cx| {
-        // Click-through until the pill is painted and takes its own bounds.
+        // Click-through until the pill is painted.
         window.set_input_region(Some(&[]));
         let root = cx.new(|cx| OverlayView::new(config, surface, voice, window, cx));
         view = Some(root.clone());
@@ -92,9 +71,7 @@ pub fn open(
     Ok(view)
 }
 
-/// Window options for the overlay at home, the one place the platform
-/// choice is made: a layer surface (see `layer_shell.rs`), or else a
-/// borderless popup centred on the display the platform picks.
+/// A layer surface, or a borderless popup centred on the platform's display.
 #[cfg_attr(
     not(target_os = "linux"),
     expect(
@@ -141,17 +118,13 @@ fn base_options() -> WindowOptions {
         app_id: Some("earwig-overlay".into()),
         window_background: WindowBackgroundAppearance::Transparent,
         window_decorations: Some(WindowDecorations::Client),
-        // The pill never has focus, and GPUI holds unfocused windows to 30
-        // fps, which would also hold back the first frame of a voice by up
-        // to 33 ms. The overlay paces itself.
+        // GPUI caps unfocused windows at 30 fps, delaying a voice's first frame; we pace ourselves.
         inactive_frame_interval: None,
         ..WindowOptions::default()
     }
 }
 
-/// Room for the header, `max_lines` of text and the inset around the pill,
-/// in whole pixels as the compositor sizes it; the pill inside shrinks to
-/// its content.
+/// Room for the header, `max_lines` lines and the inset, in whole pixels; the pill shrinks to fit.
 #[allow(clippy::cast_precision_loss)]
 fn window_size(max_lines: u32) -> Size<Pixels> {
     let height =
@@ -159,11 +132,7 @@ fn window_size(max_lines: u32) -> Size<Pixels> {
     size(px((WIDTH + 2. * INSET).floor()), px(height.floor()))
 }
 
-/// Where the pill starts on `area`: centred, `MARGIN` from the edge at
-/// `position`.
-///
-/// A spot is the pill's left edge and the y of the edge it hugs (its bottom
-/// when it sits at the bottom), which stays put while the text grows.
+/// Home: centred, `MARGIN` off its edge. A spot is the pill's left x and its hugged edge's y.
 fn home_spot(area: Bounds<Pixels>, position: OverlayPosition) -> Point<Pixels> {
     let x = area.left() + (area.size.width - px(WIDTH)) / 2.;
     let y = match position {
@@ -173,9 +142,7 @@ fn home_spot(area: Bounds<Pixels>, position: OverlayPosition) -> Point<Pixels> {
     point(x, y)
 }
 
-/// Where layer-shell puts the home window on a usable area of size `area`:
-/// centred along the edge at `position` in whole pixels, `WINDOW_MARGIN`
-/// (truncated, as GPUI sends it) from it.
+/// Where layer-shell puts the home window: centred in whole pixels, margin truncated like GPUI.
 fn layer_home_origin(
     area: Size<Pixels>,
     window: Size<Pixels>,
@@ -190,8 +157,7 @@ fn layer_home_origin(
     point(x, y)
 }
 
-/// The spot of a pill that hugs the edge at `position` of a window at
-/// `origin`, `INSET` inside it.
+/// The spot of a pill hugging its edge of the window at `origin`.
 fn hug(origin: Point<Pixels>, window: Size<Pixels>, position: OverlayPosition) -> Point<Pixels> {
     let y = match position {
         OverlayPosition::Bottom => origin.y + window.height - px(INSET),
@@ -200,8 +166,7 @@ fn hug(origin: Point<Pixels>, window: Size<Pixels>, position: OverlayPosition) -
     point(origin.x + px(INSET), y)
 }
 
-/// `spot` moved just far enough that a pill of size `pill` keeps `EDGE_GAP`
-/// inside `area`. On an area too small for it, its top-left corner stays on.
+/// Moves `spot` just enough to keep the pill `EDGE_GAP` inside `area` (top-left first if it can't).
 fn clamp_spot(
     spot: Point<Pixels>,
     pill: Size<Pixels>,
@@ -218,8 +183,7 @@ fn clamp_spot(
     point(x, y)
 }
 
-/// Top-left corner of the window that shows the pill at `spot` hugging its
-/// edge at `position`.
+/// Top-left of the window showing the pill at `spot`.
 fn popup_origin(
     spot: Point<Pixels>,
     window: Size<Pixels>,
@@ -232,8 +196,7 @@ fn popup_origin(
     point(spot.x - px(INSET), y)
 }
 
-/// The window for a pill at `spot`: [`popup_origin`], kept on `area` in
-/// whole pixels. Near an edge the pill sits off centre in it instead.
+/// [`popup_origin`] kept on `area` in whole pixels; near an edge the pill sits off-centre.
 fn window_origin(
     spot: Point<Pixels>,
     window: Size<Pixels>,
@@ -248,16 +211,13 @@ fn window_origin(
     )
 }
 
-/// How a pill at `spot` lays out in a window at `origin`, both on `area`.
+/// Where the pill sits in its window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Placement {
-    /// From the window's left edge to the pill's.
     left: Pixels,
-    /// From the window's edge at `position` to the pill's, given way when
-    /// the pill grows into `far`.
+    /// From the window's hugged edge; gives way as the pill grows into `far`.
     near: Pixels,
-    /// Room the pill leaves at the window's other end, so that it keeps
-    /// `EDGE_GAP` from the area's far edge however tall the text grows.
+    /// Kept clear at the other end so the pill stays `EDGE_GAP` off the area's far edge.
     far: Pixels,
 }
 
@@ -287,51 +247,39 @@ pub struct OverlayView {
     stopped_at_ms: Option<u64>,
     committed: String,
     tentative: String,
-    /// The voice of the current recording.
     voice: Feed,
     clock: Clock,
     motion: Motion,
-    /// What the voice did to the pill's edge as of the last tick.
     edge: Edge,
-    /// The pill holds still (reduced motion, software rendering).
+    /// Reduced motion or software rendering.
     still: bool,
-    /// How the pill comes and goes.
     animation: OverlayAnimation,
-    /// Where the power-on of a new dictation's pill stands.
     power_on: PowerOn,
-    /// Fill opacity and border width settings.
     opacity: f32,
     border: f32,
     frame_pending: bool,
-    /// The pill's colours as they fade toward the theme's and the accent's.
+    /// Fades toward the theme's and the accent's colours.
     look: Option<Look>,
-    /// The pill sits on a layer surface, which cannot move once mapped.
     layer_shell: bool,
-    /// The popup, when it can be moved.
     popup: Option<Popup>,
-    /// The output's usable area (layer-shell), once known; until then the
-    /// pill stays put.
+    /// The output's usable area (layer-shell), once probed.
     usable: Option<Size<Pixels>>,
-    /// The window the pill rests in, and where it sits on the area (`None`
-    /// where it opened).
     window: Option<AnyWindowHandle>,
+    /// Where the window sits on the area; `None` where it opened.
     origin: Option<Point<Pixels>>,
-    /// Where the user dragged the pill this dictation (see [`home_spot`]);
-    /// `None` keeps it at home.
+    /// Where the pill was dragged this dictation; `None` is home.
     spot: Option<Point<Pixels>>,
-    drag: Drag,
+    drag: Option<Grab>,
     painted: Painted,
 }
 
-/// The pill's bounds as last painted in a resting window, and which one:
-/// each new window needs its input region set.
+/// The pill's last painted bounds and window, to set each new window's input region.
 type Painted = Rc<Cell<Option<(WindowId, Bounds<Pixels>)>>>;
 
-/// A new dictation's pill powers on from its first frame (see
-/// [`crt::opening`]).
+/// The CRT power-on, from the pill's first frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PowerOn {
-    /// On the next frame.
+    /// Starts on the next frame.
     Due,
     Since(Instant),
     /// Done, or not animated.
@@ -405,13 +353,12 @@ impl OverlayView {
             window: None,
             origin: None,
             spot: None,
-            drag: Drag::default(),
+            drag: None,
             painted: Rc::default(),
         }
     }
 
-    /// Recording (re)started. A different start time is a new recording and
-    /// clears the previous one's text.
+    /// A new start time is a new recording, which clears the text.
     pub fn recording(&mut self, started_at_ms: u64) {
         if started_at_ms != self.started_at_ms || !self.is_recording() {
             self.committed.clear();
@@ -423,43 +370,35 @@ impl OverlayView {
         self.life.recording();
     }
 
-    /// The recording was finished: switch the pill off at once, where it
-    /// is (a pill held mid-drag is let go there). The final text and its
-    /// insertion carry on unseen.
+    /// Switch the pill off right where it is, letting go of any drag.
     pub fn finish(&mut self, now: Instant, cx: &mut Context<Self>) {
         self.stopped_at_ms.get_or_insert_with(now_ms);
         self.end_drag(cx);
         self.life.finish(now, self.switch_off());
     }
 
-    /// The final text could not be inserted: say so.
     pub fn failed(&mut self, on_clipboard: bool, now: Instant) {
         self.life.failed(on_clipboard, now);
     }
 
-    /// The daemon is done with the dictation.
     pub fn idle(&mut self) {
         self.life.idle();
     }
 
-    /// Catch up with the clock (see [`OverlayView::deadline`]).
     pub fn advance(&mut self, now: Instant) {
         self.life.advance(now, self.switch_off());
     }
 
-    /// When the pill next moves on by itself: a switch-off or a failure
-    /// notice ending.
+    /// When the pill next changes by itself.
     pub fn deadline(&self) -> Option<Instant> {
         self.life.deadline()
     }
 
-    /// Whether the overlay is done and its windows should close.
     pub fn is_closed(&self) -> bool {
         self.life.stage() == Stage::Closed
     }
 
-    /// How long switching off takes: none when the pill holds still, which
-    /// spares a CPU-drawn window the frames, or when the setting says so.
+    /// Instant when the pill holds still (spares a CPU-drawn window) or the setting says so.
     fn switch_off(&self) -> Duration {
         if self.still || self.animation == OverlayAnimation::Instant {
             Duration::ZERO
@@ -468,7 +407,7 @@ impl OverlayView {
         }
     }
 
-    /// Seconds into powering on, while the pill does.
+    /// Seconds into the power-on, while it lasts.
     fn powering_on(&self, now: Instant) -> Option<f32> {
         match self.power_on {
             PowerOn::Since(since) => Some(now.duration_since(since).as_secs_f32())
@@ -477,7 +416,7 @@ impl OverlayView {
         }
     }
 
-    /// Seconds into switching off, while the pill does.
+    /// Seconds into the switch-off, while it lasts.
     fn switching_off(&self, now: Instant) -> Option<f32> {
         match self.life.stage() {
             Stage::SwitchingOff { since, .. } => Some(now.duration_since(since).as_secs_f32()),
@@ -486,7 +425,7 @@ impl OverlayView {
     }
 
     pub fn set_text(&mut self, committed: String, tentative: String) {
-        // A finished pill keeps the text it had, so it switches off as it was.
+        // A finished pill keeps its text while it switches off.
         if self.is_recording() {
             self.committed = committed;
             self.tentative = tentative;
@@ -502,14 +441,12 @@ impl OverlayView {
         self.is_recording() && !self.still
     }
 
-    /// Whether the pill takes the pointer: while recording, or saying the
-    /// insertion failed; not while it switches off.
+    /// Live or showing a failure; never while switching off.
     fn takes_pointer(&self) -> bool {
         matches!(self.life.stage(), Stage::Live | Stage::Failed { .. })
     }
 
-    /// The failure the pill says, or switches off saying: whether the text
-    /// was left on the clipboard.
+    /// The failure on show (or switching off): whether the text is on the clipboard.
     fn failure(&self) -> Option<bool> {
         match self.life.stage() {
             Stage::Failed { on_clipboard, .. }
@@ -521,15 +458,13 @@ impl OverlayView {
         }
     }
 
-    /// Whether the pill was dragged and recording `started_at_ms` is a new
-    /// dictation, which starts at home in a fresh window.
+    /// Dragged, and `started_at_ms` is a new dictation, which starts at home in a fresh window.
     pub fn moved_before(&self, started_at_ms: u64) -> bool {
         self.spot.is_some() && (started_at_ms != self.started_at_ms || !self.is_recording())
     }
 
-    /// Every window the overlay has open.
-    pub fn windows(&self) -> Vec<AnyWindowHandle> {
-        self.window.iter().copied().collect()
+    pub fn window(&self) -> Option<AnyWindowHandle> {
+        self.window
     }
 
     fn elapsed(&self) -> Duration {
@@ -565,9 +500,7 @@ impl OverlayView {
         self.layer_shell || self.popup.is_some()
     }
 
-    /// The area the pill moves on: the output's usable area for layer-shell
-    /// (the frame its window's margins are in), the screen less its panels
-    /// for the popup.
+    /// What the pill moves on: the output's usable area (layer-shell) or the screen less panels.
     fn area(&self, window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
         if self.popup.is_some() {
             window.display(cx).map(|display| display.visible_bounds())
@@ -576,7 +509,7 @@ impl OverlayView {
         }
     }
 
-    /// Where the resting window sits on `area`.
+    /// Where the window sits on `area`.
     fn origin(&self, area: Bounds<Pixels>) -> Point<Pixels> {
         let window = window_size(self.max_lines);
         self.origin.unwrap_or_else(|| {
@@ -588,8 +521,7 @@ impl OverlayView {
         })
     }
 
-    /// Where the pill is now: its spot (at home, hugging the edge of the
-    /// window at `origin`) kept on `area` at its current size.
+    /// The pill's spot now (home unless dragged), kept on `area` at its painted size.
     fn current_spot(&self, area: Bounds<Pixels>, origin: Point<Pixels>) -> Point<Pixels> {
         let pill = self
             .painted
@@ -601,8 +533,7 @@ impl OverlayView {
         clamp_spot(spot, pill, area, self.position)
     }
 
-    /// The pointer on `area`, given an event at `local` in the pill's window
-    /// (which keeps the pointer while the button is down).
+    /// The pointer on `area`, from an event at `local` in the pill's window.
     fn pointer(
         &self,
         local: Point<Pixels>,
@@ -610,7 +541,7 @@ impl OverlayView {
         window: &Window,
     ) -> Option<Point<Pixels>> {
         let origin = self.origin(area);
-        match (&self.popup, self.drag.grab()) {
+        match (&self.popup, self.drag) {
             (Some(popup), _) => popup.pointer(window.scale_factor()),
             (None, Some(grab)) => Some(grab.pointer(
                 self.pointer_travel(),
@@ -622,8 +553,7 @@ impl OverlayView {
         }
     }
 
-    /// Whether the pill's window sits where the pill was dragged, not
-    /// against an edge of `area`.
+    /// The window sits where the pill was dragged, not pushed against an edge.
     fn follows_freely(&self, area: Bounds<Pixels>) -> bool {
         let Some(spot) = self.spot else {
             return true;
@@ -635,8 +565,7 @@ impl OverlayView {
                 == popup_origin(spot, size, self.position).map(|v| v.round())
     }
 
-    /// How far the pointer has travelled (see [`Grab::pointer`]), on
-    /// layer-shell.
+    /// Summed relative pointer motion, on layer-shell.
     #[cfg_attr(
         not(target_os = "linux"),
         expect(clippy::unused_self, reason = "only layer-shell reports it")
@@ -658,19 +587,19 @@ impl OverlayView {
         };
         let origin = self.origin(area);
         let from = self.current_spot(area, origin);
-        if self.drag.hold(Grab {
+        let grab = Grab {
             offset: pointer - from,
             at: pointer,
             local: event.position,
             origin,
             travel: self.pointer_travel(),
-        }) {
+        };
+        if self.drag.is_none() {
+            self.drag = Some(grab);
             cx.notify();
         }
     }
 
-    /// A pointer event in the pill's window while the pill is held, at
-    /// `local` in it.
     fn on_pointer(
         &mut self,
         event: Pointer,
@@ -678,7 +607,7 @@ impl OverlayView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(grab) = self.drag.grab() else {
+        let Some(grab) = self.drag else {
             return;
         };
         if event.ends_drag() {
@@ -696,11 +625,11 @@ impl OverlayView {
         }
     }
 
-    /// How the pointer may take the pill, for the hand cursors.
+    /// For the hand cursors.
     #[cfg(windows)]
     fn grip(&self) -> crate::ui::platform::Grip {
         use crate::ui::platform::Grip;
-        if self.drag.is_held() {
+        if self.drag.is_some() {
             return Grip::Held;
         }
         match self.painted.get() {
@@ -709,15 +638,13 @@ impl OverlayView {
         }
     }
 
-    /// Let go of the pill where it is.
     fn end_drag(&mut self, cx: &mut Context<Self>) {
-        if self.drag.let_go() {
+        if self.drag.take().is_some() {
             cx.notify();
         }
     }
 
-    /// Move the layer surface to the pill's spot, at once rather than with
-    /// the next frame: the compositor sends the pointer relative to it.
+    /// Moves the layer surface right away: pointer positions come relative to it.
     #[cfg(target_os = "linux")]
     fn move_layer(&mut self, area: Bounds<Pixels>, window: &Window) {
         if !self.layer_shell {
@@ -742,12 +669,11 @@ impl OverlayView {
             Err(e) => {
                 log::warn!("the overlay cannot be dragged: {e:#}");
                 self.layer_shell = false;
-                self.drag.let_go();
+                self.drag = None;
             }
         }
     }
 
-    /// Move the popup to the pill's spot once it was dragged.
     fn place_popup(&mut self, area: Bounds<Pixels>, window: &Window) {
         if self.popup.is_none() || self.spot.is_none() {
             return;
@@ -764,8 +690,7 @@ impl OverlayView {
         }
     }
 
-    /// Advance the clock, the pill's motion and the colours, and schedule
-    /// the next frame.
+    /// Steps the clock, motion and colours, and schedules the next frame.
     fn tick(&mut self, window: &Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         let dt = self.clock.tick(now);
@@ -773,7 +698,7 @@ impl OverlayView {
         let edge = self.motion.step(dt, voice.as_ref());
         self.still = pill::holds_still(window, cx);
         if self.power_on == PowerOn::Due {
-            // From this, its first frame: nothing waits for it.
+            // Starts on this, its first frame.
             self.power_on = if self.switch_off() > Duration::ZERO {
                 PowerOn::Since(now)
             } else {
@@ -798,8 +723,6 @@ impl OverlayView {
         self.look = Some(self.look.map_or(target, |look| look.fade_to(target, dt)));
     }
 
-    /// The pill: outline, header and text, or as far switched off as it
-    /// is.
     fn pill(&self, theme: &Theme) -> Div {
         let edge = self.edge;
         let look = self.look;
@@ -816,7 +739,7 @@ impl OverlayView {
         div()
             .w(px(WIDTH))
             .flex_shrink_0()
-            // No Base root sets the theme's font here (see `open`).
+            // No Root sets the theme's font for us (see `open`).
             .font_family(theme.font_family.clone())
             .flex()
             .flex_col()
@@ -848,8 +771,7 @@ impl OverlayView {
                         let id = window.window_handle().window_id();
                         let last = painted.get();
                         if takes_pointer && last != Some((id, bounds)) {
-                            // Only the pill takes the pointer; everywhere
-                            // else clicks reach whatever is below.
+                            // Only the pill takes clicks; elsewhere they fall through.
                             set_pointer_region(window, Some(bounds));
                             if last.is_some_and(|(_, last)| last.size != bounds.size) {
                                 // Clamp the new size on screen right away.
@@ -866,8 +788,7 @@ impl OverlayView {
             )
             .child(self.header(theme).opacity(content))
             .child(
-                // Only the last `max_lines` wrapped lines: anchor the text to
-                // the bottom and clip what scrolls off the top.
+                // The last `max_lines` lines: bottom-anchored, clipped at the top.
                 #[allow(clippy::cast_precision_loss)]
                 div()
                     .max_h(px(LINE_HEIGHT * self.max_lines as f32))
@@ -885,9 +806,7 @@ impl OverlayView {
             })
     }
 
-    /// A window at `origin` on `area` with the pill at `spot` in it. A
-    /// spacer between the pill and the edge it hugs gives way when growing
-    /// text would push it past the far edge.
+    /// Lays the pill out at `spot`; the spacer by the hugged edge gives way as text grows.
     fn layout(
         &self,
         pill: Div,
@@ -910,8 +829,7 @@ impl OverlayView {
             .child(div().h(placement.near))
     }
 
-    /// Re-render after `interval`; the window closing drops the entity and
-    /// ends the loop.
+    /// Re-renders after `interval`, unless the window has closed.
     fn schedule_frame(&mut self, interval: Duration, cx: &mut Context<Self>) {
         if self.frame_pending {
             return;
@@ -931,22 +849,18 @@ impl OverlayView {
 impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.life.stage() == Stage::Off {
-            // Gone from the screen: clicks go through until the pill comes
-            // back to say the insertion failed, or the window closes.
+            // Off screen: click-through until a failure brings the pill back or the window closes.
             if self.painted.take().is_some() {
                 set_pointer_region(window, None);
             }
             return div();
         }
         self.tick(window, cx);
-        // The pointer's relative motion can come after its position: catch
-        // up with it before drawing.
+        // Relative motion can arrive after the position: catch up before drawing.
         #[cfg(target_os = "linux")]
-        if let (Some(grab), Some(travel), Some(area)) = (
-            self.drag.grab(),
-            self.pointer_travel(),
-            self.area(window, cx),
-        ) && let Some(then) = grab.travel.filter(|&then| then != travel)
+        if let (Some(grab), Some(travel), Some(area)) =
+            (self.drag, self.pointer_travel(), self.area(window, cx))
+            && let Some(then) = grab.travel.filter(|&then| then != travel)
         {
             self.spot = Some(grab.at + (travel - then) - grab.offset);
             self.move_layer(area, window);
@@ -961,7 +875,7 @@ impl Render for OverlayView {
             None => (Bounds::new(Point::default(), viewport), Point::default()),
         };
         let spot = self.current_spot(area, origin);
-        let follow = self.drag.is_held().then(|| {
+        let follow = self.drag.is_some().then(|| {
             let view = cx.entity().downgrade();
             let exits = self.popup.is_none();
             canvas(
@@ -984,29 +898,23 @@ impl Render for OverlayView {
     }
 }
 
-/// Clicks reach the window only on the pill at `pill` (nowhere for `None`);
-/// everywhere else they go to whatever is below.
+/// Clicks only land on `pill` (nowhere for `None`); elsewhere they fall through.
 fn set_pointer_region(window: &Window, pill: Option<Bounds<Pixels>>) {
     window.set_input_region(Some(pill.as_slice()));
-    // With room for the shadow, the water and the glow, which the region
-    // clips on Windows.
+    // Windows clips drawing to the region too: leave room for the shadow, water and glow.
     #[cfg(windows)]
     crate::ui::platform::set_input_region(window, pill.map(|pill| pill.dilate(px(INSET))));
     #[cfg(target_os = "macos")]
     crate::ui::platform::set_input_region(window, pill);
 }
 
-/// The pill's header: the recording dot, the time recorded, the word count
-/// and `status`, if any.
+/// Recording dot, elapsed time, word count and an optional status.
 pub(crate) fn header_row(
     theme: &Theme,
     elapsed: Duration,
     words: usize,
     status: Option<&'static str>,
 ) -> Div {
-    /// Figures of one width, so the time holds still as it counts.
-    static TABULAR: LazyLock<FontFeatures> =
-        LazyLock::new(|| FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
     let dot = theme.danger;
     div()
         .flex()
@@ -1020,7 +928,7 @@ pub(crate) fn header_row(
             div()
                 .text_color(theme.foreground)
                 .font_weight(FontWeight::MEDIUM)
-                .font_features(TABULAR.clone())
+                .font_features(font::TABULAR.clone())
                 .child(format_elapsed(elapsed)),
         )
         .child(format!(
@@ -1032,10 +940,9 @@ pub(crate) fn header_row(
         })
 }
 
-/// The × in the pill's top-right corner: throws the dictation away while
-/// `live`; switching off, it only fades with the text.
+/// The × in the corner: discards while `live`, else just fades with the text.
 fn discard_button(theme: &Theme, live: bool) -> Stateful<Div> {
-    // As far from the top and right edges as the header row's centre.
+    // Same inset from the top and right, centred on the header row.
     let inset = px(PADDING_Y + (HEADER_HEIGHT - DISCARD_SIZE) / 2.);
     let (highlight, bright) = (theme.foreground.opacity(0.12), theme.foreground);
     div()
@@ -1053,16 +960,13 @@ fn discard_button(theme: &Theme, live: bool) -> Stateful<Div> {
         .when(live, |this| {
             this.cursor(CursorStyle::PointingHand)
                 .hover(move |style| style.bg(highlight).text_color(bright))
-                // A press here is no drag.
+                // Not a drag.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(|_, _, cx| cx.defer(crate::ui::discard))
         })
 }
 
-/// While a drag lasts, follow the pointer anywhere (the resting window keeps
-/// it while the button is down) and end on release, on a press of another
-/// button, and, with `exits`, when the window loses the pointer. Registered
-/// each frame.
+/// Each drag frame: follow the pointer; end on release, another press or (`exits`) leaving.
 fn follow_drag(view: WeakEntity<OverlayView>, exits: bool, window: &mut Window) {
     window.set_window_cursor_style(CursorStyle::ClosedHand);
     let on = |view: &WeakEntity<OverlayView>,
@@ -1161,8 +1065,7 @@ mod tests {
         Bounds::new(point(spot.x, top), size(px(WIDTH), px(height)))
     }
 
-    /// Whether `pill` keeps `EDGE_GAP` inside `area`, give or take float
-    /// rounding.
+    /// `pill` is `gap` inside `area`, give or take float rounding.
     fn inside(pill: Bounds<Pixels>, area: Bounds<Pixels>, gap: f32) -> bool {
         let gap = px(gap - 1e-3);
         pill.left() >= area.left() + gap
@@ -1181,13 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_rolls_over_minutes() {
-        assert_eq!(format_elapsed(Duration::from_millis(59_999)), "0:59");
-        assert_eq!(format_elapsed(Duration::from_secs(61)), "1:01");
-        assert_eq!(format_elapsed(Duration::from_secs(600)), "10:00");
-    }
-
-    #[test]
     fn home_is_centred_margin_from_the_configured_edge() {
         let bottom = home_spot(screen(), OverlayPosition::Bottom);
         assert_eq!(
@@ -1201,10 +1097,14 @@ mod tests {
             let home = home_spot(screen(), position);
             let pill = size(px(WIDTH), window_size(5).height - px(2. * INSET));
             assert_eq!(clamp_spot(home, pill, screen(), position), home);
-            // ...and the layer-shell home window shows the pill there, to
-            // the compositor's whole pixel.
-            let area = Bounds::new(Point::default(), screen().size);
+            // ...the popup's home window shows the pill there...
             let window = window_size(3);
+            assert_eq!(
+                hug(popup_origin(home, window, position), window, position),
+                home
+            );
+            // ...and so does layer-shell's, to the compositor's whole pixel.
+            let area = Bounds::new(Point::default(), screen().size);
             let shown = hug(
                 layer_home_origin(area.size, window, position),
                 window,
@@ -1213,19 +1113,6 @@ mod tests {
             let home = home_spot(area, position);
             assert!((shown.x - home.x).abs() < px(1.) && (shown.y - home.y).abs() < px(1.));
         }
-    }
-
-    #[test]
-    fn popup_is_centred_and_keeps_its_margin_from_the_anchored_edge() {
-        let window = window_size(3);
-        let spot = home_spot(screen(), OverlayPosition::Bottom);
-        let bottom = popup_origin(spot, window, OverlayPosition::Bottom);
-        assert_eq!(bottom.x + px(INSET), px(1000. + (1920. - WIDTH) / 2.));
-        // The pill itself sits `MARGIN` from the edge, its inset inside that.
-        assert_eq!(bottom.y + window.height - px(INSET), px(1080. - MARGIN));
-        let spot = home_spot(screen(), OverlayPosition::Top);
-        let top = popup_origin(spot, window, OverlayPosition::Top);
-        assert_eq!(top, point(bottom.x, px(MARGIN - INSET)));
     }
 
     #[test]
@@ -1269,8 +1156,7 @@ mod tests {
         );
     }
 
-    /// Lay a pill `height` tall out at `spot` in a window at `origin` the
-    /// way the flex column does, in window coordinates.
+    /// Where the flex column lays a pill `height` tall, in window coordinates.
     #[cfg(target_os = "linux")]
     fn laid_out(
         spot: Point<Pixels>,

@@ -1,12 +1,6 @@
-//! earwig's core: everything except pixels. The [`controller`] owns the
-//! dictation state; commands come in and [`events::Event`]s go out through
-//! [`ipc`] and [`controller::Handle`].
-//!
-//! Each OS fills the same slots: [`audio`] (`input_devices`, `open`),
-//! [`desktop`] (`probe`), [`insert`] (`backends`), [`paths`], [`ipc`]
-//! (transport) and [`hooks`] (process tree), each with a `linux`, `macos`
-//! and `windows` module behind one signature. [`hotkey`] watches the
-//! keyboard through earwig-keys, which does the same per OS.
+//! earwig without the pixels: the [`controller`] owns the dictation state;
+//! commands come in and [`events::Event`]s go out through [`ipc`] and
+//! [`controller::Handle`].
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("earwig runs on Linux, macOS and Windows");
@@ -32,10 +26,9 @@ pub mod spectrum;
 #[cfg(windows)]
 mod win32;
 
-/// Sample rate of all audio handed to an engine: 16 kHz mono `f32`.
+/// Audio handed to an engine is 16 kHz mono `f32`.
 pub const SAMPLE_RATE: u32 = 16_000;
 
-/// earwig's application id: the desktop entry's basename, the id XDG portals
-/// know earwig by (GNOME rejects portal requests from host apps without an
-/// installed desktop file of that name) and the settings window's app id.
+/// The desktop entry's basename and earwig's app id, for XDG portals and the
+/// settings window. GNOME refuses portal calls from apps without that entry.
 pub const APP_ID: &str = "io.github.adeci.earwig";

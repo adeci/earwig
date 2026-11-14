@@ -1,12 +1,6 @@
-# Dictation end to end on KDE Plasma 6 (Wayland), chosen by capability only:
-# KWin offers layer-shell and data-control but no input-method-v2 or virtual
-# keyboard, so earwig inserts through the RemoteDesktop + Clipboard portals
-# over libei and takes its hotkey from the GlobalShortcuts portal. The test
-# accepts both consent dialogs once, taps a real key, and checks the text in
-# KWrite and Konsole, the overlay as a layer-shell surface, and that the
-# restore token skips the dialog after a daemon restart.
-#
-# Session setup follows nixpkgs nixos/tests/plasma6.nix.
+# Dictation end to end on Plasma 6 without keyboard access: KWin has no input-method-v2, so
+# insertion goes through the RemoteDesktop portal and the hotkey through GlobalShortcuts; the
+# restore token must skip the consent dialog after a restart. Setup as in nixpkgs' plasma6 test.
 { self }:
 let
   common = import ./common.nix { inherit self; };

@@ -1,19 +1,7 @@
-//! Tap-or-hold: turns hotkey edges into recording actions.
-//!
-//! Pure state; the caller passes the time of each edge, so the rules are
-//! testable without clocks or threads.
-//!
-//! - [`ActivationMode::HoldOrToggle`]: a press starts recording. Releasing
-//!   after `hold_threshold` stops it (push to talk); releasing sooner latches
-//!   recording on until the next press.
-//! - [`ActivationMode::Hold`]: recording lasts as long as the key is held.
-//! - [`ActivationMode::Toggle`]: each press starts or stops.
-//!
-//! [`Input::Toggle`] (press-only bindings) starts a latched recording or
-//! stops one in every mode. [`Input::Chord`] takes back the press of a key
-//! that turned out to be part of a key combination. A pressed key ignores further presses until it is
-//! released, which absorbs compositor key repeat and the release that follows
-//! a stopping press.
+//! Tap-or-hold: turns hotkey edges into recording actions (see
+//! [`ActivationMode`]). Pure state: the caller passes each edge's time. A
+//! pressed key ignores further presses until its release, which absorbs key
+//! repeat and the release that follows a stopping press.
 
 use std::time::{Duration, Instant};
 
@@ -31,8 +19,9 @@ pub enum Input {
 /// What the caller should do after an input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Start recording.
-    Start { latched: bool },
+    Start {
+        latched: bool,
+    },
     /// The recording continues, now latched on until the next press.
     Latch,
     /// Stop recording and produce the final text. Call

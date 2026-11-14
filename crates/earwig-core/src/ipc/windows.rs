@@ -1,9 +1,6 @@
-//! Named pipe transport (Windows).
-//!
-//! Message-type pipes, so that an empty message can stand in for the
-//! half-close a pipe lacks: a read that returns it is end of input. Handles
-//! are overlapped, which lets writes give up after [`WRITE_TIMEOUT`]. Only the
-//! user who runs the daemon may open the pipe, and only locally.
+//! Named pipes (Windows): message-type, so an empty message stands in for
+//! the half-close a pipe lacks, and overlapped, so writes can give up after
+//! [`WRITE_TIMEOUT`]. Only the daemon's user may open one, and only locally.
 
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
