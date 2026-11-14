@@ -1,11 +1,6 @@
-# Dictation end to end on GNOME 50 (Wayland), the portal-only desktop:
-# virtual mic -> earwig -> focused GNOME Text Editor and GNOME Console.
-#
-# What GNOME exercises that the wlroots tests do not: the RemoteDesktop
-# portal + libei inserter (consent dialog once, Ctrl+V / Ctrl+Shift+V by
-# AT-SPI role), the GlobalShortcuts portal as the hotkey source (bind dialog,
-# Activated/Deactivated), and the overlay as an override-redirect X11 popup
-# through XWayland (Mutter has no layer-shell).
+# Dictation end to end on GNOME (Wayland) without keyboard access: the GlobalShortcuts portal
+# for the hotkey, RemoteDesktop + libei for insertion (Ctrl+V or Ctrl+Shift+V by AT-SPI role),
+# and the overlay as an override-redirect X11 popup (Mutter has no layer-shell).
 { self }:
 let
   common = import ./common.nix { inherit self; };
@@ -54,8 +49,6 @@ in
         }
       ];
 
-      # No portal_trigger here: the test binds earwig's default, which must
-      # not collide with GNOME's own shortcuts.
       systemd.user.services.earwig.environment.RUST_LOG = "info,earwig_core=debug";
     };
 

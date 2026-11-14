@@ -1,7 +1,4 @@
-//! On Windows, the app icon goes into the program's resources. On macOS,
-//! the app's Info.plist goes into the binary: run outside its app bundle,
-//! `earwig` still has its bundle id and the microphone usage text macOS
-//! shows when asking for access.
+//! Embeds the icon (Windows), or Info.plist so a bare binary keeps its bundle id (macOS).
 
 use std::env;
 use std::fs;

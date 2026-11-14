@@ -1,5 +1,4 @@
-//! evdev input devices and uinput clones of them, through ioctls
-//! (`linux/input.h`, `linux/uinput.h`).
+//! evdev devices and their uinput clones, through raw ioctls (`linux/input.h`, `linux/uinput.h`).
 
 use std::ffi::{CString, c_int, c_void};
 use std::io;
@@ -26,8 +25,7 @@ const ABS_X: u16 = 0;
 /// `phys` of earwig's own uinput clones, so it never reads them back.
 const OWN_PHYS: &str = "earwig-keys";
 
-/// `struct input_event` on 64-bit Linux, where `struct timeval` is two
-/// 64-bit numbers.
+/// `struct input_event` on 64-bit Linux (`timeval` is two i64s).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct InputEvent {
@@ -52,8 +50,7 @@ impl InputEvent {
         Self::new(EV_SYN, SYN_REPORT, 0)
     }
 
-    /// When it happened in microseconds of `CLOCK_MONOTONIC` (see
-    /// [`Device::open`]).
+    /// `CLOCK_MONOTONIC` microseconds (see [`Device::open`]).
     pub(super) fn micros(&self) -> i64 {
         self.sec * 1_000_000 + self.usec
     }
@@ -135,8 +132,7 @@ unsafe impl Ioctl for Raw {
 
 /// # Safety
 ///
-/// `arg` must be what `opcode` expects: a pointer to its argument, or the
-/// argument itself for ioctls that take an integer.
+/// `arg` must be what `opcode` expects: a pointer to its argument, or the integer itself.
 unsafe fn ioctl(fd: impl AsFd, opcode: Opcode, arg: *mut c_void) -> io::Result<IoctlOutput> {
     // SAFETY: the caller's.
     Ok(unsafe { rustix::ioctl::ioctl(fd, Raw { opcode, arg }) }?)
@@ -145,8 +141,7 @@ unsafe fn ioctl(fd: impl AsFd, opcode: Opcode, arg: *mut c_void) -> io::Result<I
 /// An evdev ioctl that reads into `buf` (`EVIOCGNAME`, `EVIOCGBIT`, …).
 fn read_into(fd: impl AsFd, number: u8, buf: &mut [u8]) -> io::Result<usize> {
     let opcode = opcode::from_components(rustix::ioctl::Direction::Read, b'E', number, buf.len());
-    // SAFETY: the kernel writes at most `buf.len()` bytes, the size encoded
-    // in the opcode.
+    // SAFETY: the kernel writes at most `buf.len()` bytes, the size in the opcode.
     let read = unsafe { ioctl(fd, opcode, buf.as_mut_ptr().cast()) }?;
     Ok(usize::try_from(read).unwrap_or(0))
 }
@@ -192,7 +187,6 @@ pub(super) struct Device {
     pub fd: OwnedFd,
     pub name: String,
     id: InputId,
-    /// The keys it has.
     pub keys: KeyBits,
     leds: Bits<2>,
     scan_codes: bool,
@@ -205,8 +199,7 @@ pub(super) struct Device {
 }
 
 impl Device {
-    /// The device at `path` if it has keys earwig names and is not one of
-    /// its own clones.
+    /// `None` if it has no keys earwig names or is one of our clones.
     pub(super) fn open(path: &Path) -> io::Result<Option<Self>> {
         let flags = OFlags::NONBLOCK | OFlags::CLOEXEC;
         let (fd, writable) = match rustix::fs::open(path, flags | OFlags::RDWR, Mode::empty()) {
@@ -290,8 +283,7 @@ impl Device {
     }
 }
 
-/// A uinput keyboard like a [`Device`], which carries its keys on while it
-/// is grabbed. Destroyed when dropped.
+/// A uinput clone of a [`Device`] that carries its keys on while it's grabbed; destroyed on drop.
 pub(super) struct Uinput {
     pub fd: OwnedFd,
 }
@@ -310,8 +302,7 @@ pub(super) struct SetUp {
 }
 
 impl Uinput {
-    /// Configure a clone of `device`. Fails without access to
-    /// `/dev/uinput`.
+    /// Configure a clone of `device`; fails without access to `/dev/uinput`.
     pub(super) fn set_up(device: &Device) -> io::Result<SetUp> {
         let flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let fd = rustix::fs::open("/dev/uinput", flags, Mode::empty())?;
@@ -332,8 +323,7 @@ impl Uinput {
             }
         }
         let phys = CString::new(OWN_PHYS).unwrap_or_default();
-        // SAFETY: UI_SET_PHYS takes a NUL-terminated string, copied before
-        // it returns.
+        // SAFETY: UI_SET_PHYS copies the NUL-terminated string before it returns.
         unsafe {
             ioctl(
                 &fd,
@@ -341,8 +331,7 @@ impl Uinput {
                 phys.as_ptr().cast_mut().cast(),
             )?;
         }
-        // The same name and ids, so compositor settings for the keyboard
-        // (a layout for "1:1:AT_Translated_Set_2_keyboard") still apply.
+        // Same name and ids, so compositor settings for the keyboard still apply.
         let mut setup = UinputSetup {
             id: device.id,
             name: [0; 80],
@@ -383,8 +372,7 @@ impl SetUp {
 
 impl Drop for Uinput {
     fn drop(&mut self) {
-        // SAFETY: UI_DEV_DESTROY takes no argument. The kernel releases the
-        // keys still down on it.
+        // SAFETY: UI_DEV_DESTROY takes no argument; the kernel releases keys still down.
         let _ = unsafe { ioctl(&self.fd, opcode::none(b'U', 2), std::ptr::null_mut()) };
     }
 }

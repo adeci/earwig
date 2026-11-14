@@ -1,18 +1,8 @@
-//! The daemon's heart: one thread that owns the dictation state and talks to
-//! the microphone, engine and inserter; everything else holds a [`Handle`].
-//!
-//! Threads:
-//! - `earwig-controller`: the [`Session`] state machine, commands, events,
-//!   and the status snapshot. Never blocks on audio, decoding or insertion,
-//!   so Release and Cancel are handled at once.
-//! - `earwig-engine`: owns the loaded [`Model`]; loads, feeds, finishes.
-//! - `earwig-output`: owns the [`Inserter`]; runs the `[hooks]` filter,
-//!   inserts, appends history, runs `on_insert`. Between deliveries it
-//!   replaces the inserter when the `[insert]` settings change.
-//! - `earwig-audio`: the [`Capture`] worker.
-//!
-//! Every recording gets an id; results for an older (cancelled) recording
-//! are dropped.
+//! The daemon's heart: one thread owns the dictation state and never blocks,
+//! so Release and Cancel land at once; everything else holds a [`Handle`].
+//! Workers: `earwig-engine` owns the [`Model`], `earwig-output` the
+//! [`Inserter`] (filter hook, insert, history, `on_insert`), `earwig-audio`
+//! the [`Capture`]. Results of an older (cancelled) recording are dropped.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,8 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEvent, Capture, Source};
-use crate::config::{AudioConfig, BackendSetting, Config, ConfigStore, InsertConfig};
-use crate::engine::{Backend, EngineFactory, EngineOptions, Model, ModelInfo, Partial};
+use crate::config::{AudioConfig, Config, ConfigStore, InsertConfig};
+use crate::engine::{EngineFactory, EngineOptions, Model, ModelInfo, Partial};
 use crate::events::{Command, DictationState, Event, InsertMethod, ModelStatus, Status};
 use crate::history::{History, HistoryEntry};
 use crate::hooks;
@@ -31,9 +21,8 @@ use crate::models::{ModelError, ModelManager, ModelSpec};
 use crate::session::{Action, Input, Phase, Session};
 use crate::spectrum::Feed;
 
-/// Builds the inserter for the `[insert]` settings. It may block (a consent
-/// dialog) and never fails: where no method works it returns a stand-in that
-/// fails every insertion.
+/// Builds the inserter for `[insert]`. May block on a consent dialog; never
+/// fails (where nothing works, a stand-in fails each insertion instead).
 pub type InserterFactory = dyn Fn(&InsertConfig) -> Box<dyn Inserter> + Send;
 
 pub struct Parts {
@@ -61,9 +50,8 @@ impl Bus {
         self.lock().retain(|tx| tx.send(event.clone()).is_ok());
     }
 
-    /// A new subscriber that first receives `first()`. It runs under the
-    /// subscriber lock, so no publish can slip between it and registration.
-    /// After [`Bus::close`] the receiver disconnects right after it.
+    /// A new subscriber whose first event is `first()`, made under the lock so
+    /// no publish slips in between; after [`Bus::close`] it disconnects next.
     fn subscribe(&self, first: impl FnOnce() -> Event) -> flume::Receiver<Event> {
         let (tx, rx) = flume::unbounded();
         let mut subscribers = self.lock();
@@ -141,9 +129,8 @@ impl Handle {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        // The user grants these in System Settings, not through earwig.
+        // These change on their own, outside earwig.
         status.permissions = crate::permissions::check();
-        // Access and the keyboards plugged in change on their own too.
         status.hotkey = crate::hotkey::status();
         status
     }
@@ -267,15 +254,10 @@ fn wanted_model(models: &ModelManager, config: &Config) -> ModelRequest {
         .unwrap_or_else(|| ModelSpec::Curated {
             id: models.default_model().id.clone(),
         });
-    let backend = match config.model.backend {
-        BackendSetting::Auto => Backend::Auto,
-        BackendSetting::Cpu => Backend::Cpu,
-        BackendSetting::Gpu => Backend::Gpu,
-    };
     ModelRequest {
         spec,
         options: EngineOptions {
-            backend,
+            backend: config.model.backend,
             language: config.model.language.clone(),
         },
     }
@@ -639,14 +621,14 @@ impl Controller {
             .clone()
     }
 
-    fn update_status(&self, edit: impl FnOnce(&mut Status)) {
+    fn update_status<R>(&self, edit: impl FnOnce(&mut Status) -> R) -> R {
         edit(
             &mut self
                 .shared
                 .status
                 .write()
                 .unwrap_or_else(PoisonError::into_inner),
-        );
+        )
     }
 
     fn set_state(&self, state: DictationState) {
@@ -662,13 +644,10 @@ impl Controller {
     /// The insertion methods have no event of their own: front ends get a
     /// fresh snapshot.
     fn set_insert_methods(&self, methods: Vec<InsertMethod>) {
-        self.update_status(|s| s.insert_methods = methods);
-        let status = self
-            .shared
-            .status
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let status = self.update_status(|s| {
+            s.insert_methods = methods;
+            s.clone()
+        });
         self.publish(&Event::Status { status });
     }
 
@@ -1021,9 +1000,6 @@ mod tests {
     struct FakeEngine(Arc<AtomicUsize>);
 
     impl EngineFactory for FakeEngine {
-        fn name(&self) -> &'static str {
-            "fake"
-        }
         fn supports_architecture(&self, arch: &str) -> bool {
             arch == "fake"
         }

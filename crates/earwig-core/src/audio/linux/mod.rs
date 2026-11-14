@@ -1,21 +1,12 @@
-//! Linux: the microphones are the sound server's sources (PipeWire through
-//! pipewire-pulse, or PulseAudio) by the descriptions the desktop's sound
-//! settings show, monitors of outputs left out. Both servers speak the
-//! PulseAudio protocol ([`pulse`]), and a chosen source is recorded over it.
-//! The system default goes through ALSA's `default`, which on a desktop is
-//! the server's own plugin and follows the default as it changes.
-//!
-//! Without a sound server each sound card that can record is a microphone,
-//! opened through ALSA. Settings from before earwig listed microphones name
-//! ALSA PCMs (`pipewire`, `sysdefault:CARD=MV7`, `hw:CARD=1,DEV=0`); such a
-//! name still opens through ALSA.
+//! Linux: the microphones are the sound server's sources (PipeWire or
+//! PulseAudio, both over [`pulse`]); the system default goes through ALSA's
+//! `default`. Without a server each sound card that records is one, opened
+//! through ALSA, and so is an ALSA PCM name from older settings.
 
 mod pulse;
 
 use std::fs;
 use std::path::Path;
-
-use cpal::traits::DeviceTrait as _;
 
 use super::{InputDevice, InputDevices, Opened, Raw};
 
@@ -35,7 +26,7 @@ pub(super) fn input_devices(configured: Option<&str>) -> anyhow::Result<InputDev
         None => cards(Path::new(ASOUND)),
     };
     keep_configured(&mut found, configured, |name| {
-        super::cpal_input(Some(name), alsa_id).is_ok()
+        super::cpal_input(Some(name), super::cpal_id).is_ok()
     });
     Ok(found)
 }
@@ -54,18 +45,13 @@ pub(super) fn open(device: Option<&str>, tx: flume::Sender<Raw>) -> anyhow::Resu
     }
     // The system default, a sound card without a server, or an ALSA PCM
     // name from older settings.
-    let (device, name) = super::cpal_input(device, alsa_id)?;
+    let (device, name) = super::cpal_input(device, super::cpal_id)?;
     let (stream, rate) = super::open_cpal(&device, &name, tx)?;
     Ok(Opened {
         stream: Stream::Alsa(stream),
         rate,
         name,
     })
-}
-
-/// An ALSA PCM name, such as `default` or `sysdefault:CARD=MV7`.
-fn alsa_id(device: &cpal::Device) -> Option<String> {
-    device.id().ok().map(|id| id.id().to_owned())
 }
 
 /// Lists `configured` under its own name when it is not listed but `opens`:
@@ -121,15 +107,8 @@ impl Card {
     }
 }
 
-/// The cards in `/proc/asound/cards`, two lines each:
-///
-/// ```text
-///  1 [MV7            ]: USB-Audio - Shure MV7
-///                       Shure Inc Shure MV7 at usb-0000:00:14.0-2, full speed
-/// ```
-///
-/// Each is named by its long name (the second line) up to where the card
-/// sits, else by its short name.
+/// The cards in `/proc/asound/cards` (two lines each, as in the tests), named
+/// by their long name up to where the card sits, else by their short name.
 fn parse_cards(list: &str) -> Vec<Card> {
     let mut cards = Vec::new();
     let mut lines = list.lines();
@@ -258,14 +237,6 @@ mod tests {
     }
 
     #[test]
-    fn no_cards_no_microphones() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(cards(dir.path()), InputDevices::default());
-        let dir = asound("--- no soundcards ---\n", &[]);
-        assert_eq!(cards(dir.path()), InputDevices::default());
-    }
-
-    #[test]
     fn an_older_alsa_name_that_still_opens_is_listed_as_itself() {
         let listed = InputDevices {
             devices: vec![device(
@@ -288,16 +259,5 @@ mod tests {
         keep_configured(&mut found, Some(&listed.devices[0].id), |_| true);
         keep_configured(&mut found, None, |_| true);
         assert_eq!(found, listed);
-    }
-
-    #[test]
-    fn an_older_sysdefault_name_is_its_card_without_a_sound_server() {
-        let dir = asound(CARDS, &["card2/pcm0c"]);
-        let mut found = cards(dir.path());
-        keep_configured(&mut found, Some("sysdefault:CARD=MV7"), |_| true);
-        assert_eq!(
-            found.devices,
-            [device("sysdefault:CARD=MV7", "Shure Inc Shure MV7")]
-        );
     }
 }

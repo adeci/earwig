@@ -10,7 +10,7 @@ pub(super) type Stream = cpal::Stream;
 /// `configured` adds nothing: every device that opens is listed.
 pub(super) fn input_devices(_configured: Option<&str>) -> anyhow::Result<InputDevices> {
     super::cpal_devices(|device| {
-        let id = uid(device)?;
+        let id = super::cpal_id(device)?;
         let name = device
             .description()
             .map_or_else(|_| id.clone(), |d| d.name().to_owned());
@@ -25,15 +25,11 @@ pub(super) fn open(device: Option<&str>, tx: flume::Sender<Raw>) -> anyhow::Resu
             crate::permissions::Permission::Microphone
         ));
     }
-    let (device, id) = super::cpal_input(device, uid)?;
+    let (device, id) = super::cpal_input(device, super::cpal_id)?;
     let (stream, rate) = super::open_cpal(&device, &id, tx)?;
     Ok(Opened {
         stream,
         rate,
         name: id,
     })
-}
-
-fn uid(device: &cpal::Device) -> Option<String> {
-    device.id().ok().map(|id| id.id().to_owned())
 }

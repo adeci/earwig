@@ -110,19 +110,15 @@ in
     ];
     boot.kernelModules = lib.mkIf cfg.keyboardAccess [ "uinput" ];
 
-    # Insertion through the RemoteDesktop portal tells terminals apart by the
-    # accessibility role of the focused widget, and Qt apps only export that
-    # over AT-SPI when asked. Without this, Konsole (on any desktop that uses
-    # the portal path) gets Ctrl+V, a literal ^V, instead of Ctrl+Shift+V.
+    # The portal inserter spots terminals by their AT-SPI role, which Qt only exports when asked;
+    # without this Konsole gets Ctrl+V (a literal ^V) instead of Ctrl+Shift+V.
     environment.sessionVariables.QT_LINUX_ACCESSIBILITY_ALWAYS_ON = lib.mkDefault "1";
 
     systemd.user.services.earwig = {
       description = "earwig dictation daemon";
       partOf = [ "graphical-session.target" ];
-      # The daemon probes the portal frontend once at startup. At login it is
-      # still being D-Bus activated (GNOME and KDE VMs: no answer within
-      # 3 s, so no GlobalShortcuts and no RemoteDesktop), so start it first.
-      # Harmless where no portal is installed.
+      # The daemon probes the portal once at startup, and at login the portal is still being
+      # D-Bus activated, so start after it. Harmless where there's no portal.
       after = [
         "graphical-session.target"
         "xdg-desktop-portal.service"
@@ -131,8 +127,7 @@ in
       wantedBy = [ "graphical-session.target" ];
       # Restarting picks up a new model or settings after a rebuild.
       restartTriggers = [ configFile ];
-      # A daemon that keeps failing (no model, broken config) gives up
-      # instead of looping for the whole session.
+      # Give up on a daemon that keeps failing (no model, broken config) instead of looping.
       startLimitBurst = 5;
       startLimitIntervalSec = 60;
       serviceConfig = {

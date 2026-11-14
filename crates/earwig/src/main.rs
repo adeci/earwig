@@ -5,7 +5,9 @@ mod daemon;
 mod ui;
 
 use clap::{Parser, Subcommand};
+use earwig_core::config::ModelConfig;
 use earwig_core::events::Command;
+use earwig_core::models::{ModelManager, ModelSpec};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -82,32 +84,39 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Let the daemon bring its settings window to the front. Windows hands the
-/// foreground over only with leave from the process that has it, which this
-/// command, run from the active terminal, is.
+/// Windows only lets the foreground process (us) hand focus to the settings window.
 #[cfg(windows)]
 fn allow_foreground() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
-    // SAFETY: no preconditions; it fails, changing nothing, when this
-    // process cannot give the foreground away.
+    // SAFETY: no preconditions; it just fails if we can't give focus away.
     unsafe { AllowSetForegroundWindow(ASFW_ANY) };
 }
 
-/// The units of [`human_size`] past bytes.
-const SIZE_UNITS: [&str; 4] = [" kB", " MB", " GB", " TB"];
-
-/// Byte count in decimal units, as the Hugging Face Hub shows them.
-fn human_size(bytes: u64) -> String {
-    decimal(bytes, " B", &SIZE_UNITS)
+/// The configured model, or the catalog's default.
+fn configured_model(models: &ModelManager, config: &ModelConfig) -> ModelSpec {
+    config.model.clone().unwrap_or_else(|| ModelSpec::Curated {
+        id: models.default_model().id.clone(),
+    })
 }
 
-/// `part` of `whole` bytes in `whole`'s unit, "312 of 740 MB": the whole as
-/// [`human_size`] writes it, the part rounded down so that it never reads
-/// as done before it is.
+const SIZE_UNITS: [&str; 4] = [" kB", " MB", " GB", " TB"];
+
+/// Decimal units, as the Hugging Face Hub shows them.
+#[allow(clippy::cast_precision_loss)]
+fn human_size(bytes: u64) -> String {
+    match magnitude(bytes) {
+        None => format!("{bytes} B"),
+        Some((divisor, unit, places)) => {
+            format!("{:.places$}{}", bytes as f64 / divisor, SIZE_UNITS[unit])
+        }
+    }
+}
+
+/// "312 of 740 MB": the part rounded down in the whole's unit, so it never looks done early.
 #[allow(clippy::cast_precision_loss)]
 fn human_size_of(part: u64, whole: u64) -> String {
     let part = part.min(whole);
-    let Some((divisor, unit, places)) = magnitude(whole, SIZE_UNITS.len()) else {
+    let Some((divisor, unit, places)) = magnitude(whole) else {
         return format!("{part} of {whole} B");
     };
     let shift = if places == 0 { 1.0 } else { 10.0 };
@@ -116,20 +125,8 @@ fn human_size_of(part: u64, whole: u64) -> String {
     format!("{part:.places$} of {whole:.places$}{}", SIZE_UNITS[unit])
 }
 
-/// `n` followed by `one` below a thousand; above, in thousands, millions
-/// and so on (`units`), to three significant digits.
-#[allow(clippy::cast_precision_loss)]
-fn decimal(n: u64, one: &str, units: &[&str]) -> String {
-    match magnitude(n, units.len()) {
-        None => format!("{n}{one}"),
-        Some((divisor, unit, places)) => format!("{:.places$}{}", n as f64 / divisor, units[unit]),
-    }
-}
-
-/// How [`decimal`] writes `n` with `units` units: divided by `divisor`, in
-/// unit `unit` (0 for thousands), to `places` decimals; `None` below a
-/// thousand.
-fn magnitude(n: u64, units: usize) -> Option<(f64, usize, usize)> {
+/// Divisor, `SIZE_UNITS` index and decimals for 3 significant digits; `None` under 1000.
+fn magnitude(n: u64) -> Option<(f64, usize, usize)> {
     if n < 1000 {
         return None;
     }
@@ -137,12 +134,11 @@ fn magnitude(n: u64, units: usize) -> Option<(f64, usize, usize)> {
     let n = n as f64;
     let mut divisor = 1000.0;
     let mut unit = 0;
-    // Up a unit before rounding would show 1000 of this one.
-    while n / divisor >= 999.5 && unit < units - 1 {
+    // Go up a unit when rounding would show 1000.
+    while n / divisor >= 999.5 && unit < SIZE_UNITS.len() - 1 {
         divisor *= 1000.0;
         unit += 1;
     }
-    // One decimal below a hundred of the unit.
     let places = usize::from(n / divisor < 99.95);
     Some((divisor, unit, places))
 }

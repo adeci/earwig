@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/adeci/earwig"
-rust-version = "1.92"
+rust-version = "1.95"
 
 [workspace.dependencies]
 earwig-core = { path = "crates/earwig-core" }

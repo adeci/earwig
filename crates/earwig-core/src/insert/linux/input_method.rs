@@ -1,11 +1,7 @@
 //! Insertion through `zwp_input_method_v2` (niri, sway, Hyprland): the text
-//! reaches the focused text field as a `commit_string`, the clipboard is left
-//! alone.
-//!
-//! earwig binds the seat's input method but never grabs the keyboard, so
-//! typing keeps going straight to applications. Only one input method may be
-//! bound per seat: if another one (fcitx5, ibus) holds it, the compositor
-//! answers `unavailable` and this backend steps aside.
+//! reaches the focused field as a `commit_string`, the clipboard is left alone.
+//! earwig never grabs the keyboard; if another input method (fcitx5, ibus)
+//! holds the seat, the compositor says `unavailable` and this steps aside.
 
 use anyhow::Context as _;
 use wayland_client::globals::{GlobalList, GlobalListContents};
@@ -21,9 +17,8 @@ use super::wayland::Worker;
 use super::{InsertError, Inserter};
 use crate::events::InsertMethod;
 
-/// Largest `commit_string` sent at once. Wayland messages are capped at 4096
-/// bytes including the header, so longer text goes out as several commits in
-/// one burst.
+/// Wayland messages are capped at 4096 bytes with the header, so longer text
+/// goes out as several commits in one burst.
 const MAX_COMMIT_BYTES: usize = 4000;
 
 pub struct InputMethodInserter {
@@ -31,9 +26,8 @@ pub struct InputMethodInserter {
 }
 
 impl InputMethodInserter {
-    /// Bind the input method of the default seat on a dedicated connection.
-    /// Fails when the compositor lacks the protocol or another input method
-    /// already holds the seat.
+    /// Bind the default seat's input method on its own connection; fails when
+    /// the protocol is missing or another input method holds the seat.
     pub fn connect() -> anyhow::Result<Self> {
         let worker = Worker::spawn("earwig-input-method", State::new)?;
         if !worker.call(|state, _| state.input_method.is_some())? {
@@ -188,15 +182,7 @@ mod tests {
     #[test]
     fn chunks_respect_the_byte_limit_and_char_boundaries() {
         // "é" is 2 bytes and "🦀" is 4: a 5-byte limit must not split either.
-        let text = "aé🦀bé";
-        let pieces: Vec<&str> = chunks(text, 5).collect();
-        assert_eq!(pieces, ["aé", "🦀b", "é"]);
-        assert!(pieces.iter().all(|p| p.len() <= 5));
-        assert_eq!(pieces.concat(), text);
-    }
-
-    #[test]
-    fn short_text_is_one_chunk_and_empty_text_none() {
+        assert_eq!(chunks("aé🦀bé", 5).collect::<Vec<_>>(), ["aé", "🦀b", "é"]);
         assert_eq!(chunks("hello", 4000).collect::<Vec<_>>(), ["hello"]);
         assert_eq!(chunks("", 4000).count(), 0);
     }

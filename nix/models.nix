@@ -1,6 +1,5 @@
-# Every curated model from models.toml as a pinned fixed-output download, so
-# NixOS users can pre-install them (`services.earwig.models`) and run offline.
-# `default` is the catalog default.
+# Every curated model in models.toml as a pinned download, for `services.earwig.models` and
+# offline installs; `default` is the catalog's default.
 { lib, fetchurl }:
 let
   catalog = (lib.importTOML ../crates/earwig-core/models.toml).model;

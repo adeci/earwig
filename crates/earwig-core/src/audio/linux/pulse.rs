@@ -1,7 +1,6 @@
-//! The sound server over the PulseAudio protocol, which PipeWire's
-//! pipewire-pulse speaks too: its sources, and recording from one. Plain
-//! blocking calls on its socket, with timeouts, so a hung server costs an
-//! error rather than a stuck thread.
+//! The sound server over the PulseAudio protocol (pipewire-pulse speaks it
+//! too): blocking calls with timeouts, so a hung server is an error, not a
+//! stuck thread.
 
 use std::ffi::{CStr, CString};
 use std::io::{self, BufReader, Read as _};
@@ -15,20 +14,14 @@ use pulseaudio::protocol::{self, Command, ProtocolError, PulseError};
 
 use crate::audio::{InputDevice, InputDevices, Raw};
 
-/// How long the server may take to answer.
 const TIMEOUT: Duration = Duration::from_secs(2);
-/// Audio arrives in 20 ms fragments, like a capture period: the overlay
-/// follows the voice, and the server need not wake earwig more often.
+/// 20 ms fragments, like a capture period.
 const FRAGMENTS_PER_SECOND: u32 = 50;
-/// Bytes in a frame of the recording: one `f32`.
 const FRAME_BYTES: u32 = 4;
-/// No message earwig gets comes near this; a longer one means a broken
-/// connection, not worth the memory.
+/// Anything longer is a broken connection.
 const MAX_MESSAGE: usize = 16 << 20;
-/// The length of the cookie a client authenticates with.
 const COOKIE_LENGTH: usize = 256;
 
-/// A connection to the sound server.
 pub(super) struct Server {
     socket: BufReader<UnixStream>,
     version: u16,
@@ -105,7 +98,6 @@ impl Server {
         Ok(microphones(&sources, server.default_source_name.as_deref()))
     }
 
-    /// The source called `name`, if there is one.
     pub(super) fn source(&mut self, name: &str) -> anyhow::Result<Option<protocol::SourceInfo>> {
         let Ok(name) = CString::new(name) else {
             return Ok(None);
@@ -122,8 +114,7 @@ impl Server {
     }
 
     /// Record `source` as mono `f32` at its own rate into `tx` until the
-    /// [`Recording`] is dropped; returns it and the rate. If the source goes
-    /// away, so does the recording, rather than moving to another one.
+    /// [`Recording`] drops; if the source goes away, so does the recording.
     pub(super) fn record(
         mut self,
         source: &protocol::SourceInfo,
@@ -252,9 +243,8 @@ impl Drop for Recording {
     }
 }
 
-/// The microphones among the server's `sources`, by the descriptions the
-/// desktop's sound settings show: every source but the monitors of outputs.
-/// The default is named even when it is a monitor.
+/// The server's `sources` but the monitors of outputs, by the descriptions
+/// the desktop shows; the default is named even when it is a monitor.
 fn microphones(sources: &[protocol::SourceInfo], default: Option<&CStr>) -> InputDevices {
     let device = |source: &protocol::SourceInfo| {
         let id = source.name.to_string_lossy().into_owned();

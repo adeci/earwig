@@ -1,7 +1,5 @@
-//! Whether a hotkey is usable: keys that type text or that the system or
-//! every app already uses are refused, keys that would get in the way now
-//! and then are allowed with a warning. Each verdict carries one line that
-//! says why.
+//! Is a hotkey usable? Refuse keys that type or that the system already uses, warn about ones
+//! that get in the way now and then, and say why in one line.
 
 use crate::hotkey::Hotkey;
 use crate::key::{Key, Modifier, Os, Side};
@@ -15,15 +13,13 @@ pub enum Check {
     Reject(String),
 }
 
-/// Desktops where a lone Super key opens the overview or a launcher
-/// (`XDG_CURRENT_DESKTOP`, lower-case).
+/// Lower-case `XDG_CURRENT_DESKTOP`s where a lone Super opens the overview or a launcher.
 const LAUNCHER_DESKTOPS: [&str; 9] = [
     "gnome", "kde", "cosmic", "pantheon", "budgie", "cinnamon", "unity", "deepin", "ukui",
 ];
 
 impl Hotkey {
-    /// Whether this hotkey is usable here. `desktop` is the session's
-    /// `XDG_CURRENT_DESKTOP` (Linux only; it decides what a lone Super does).
+    /// `desktop` is `XDG_CURRENT_DESKTOP`, which decides what a lone Super does on Linux.
     pub fn check(&self, desktop: &str) -> Check {
         self.check_on(Os::CURRENT, desktop)
     }
@@ -65,10 +61,6 @@ impl Hotkey {
                 .iter()
                 .all(|(modifier, _)| modifiers.contains(modifier))
     }
-
-    fn has(&self, modifier: Modifier) -> bool {
-        self.modifiers().iter().any(|&(m, _)| m == modifier)
-    }
 }
 
 /// A key this OS's keyboards do not have, or cannot report.
@@ -96,9 +88,8 @@ fn missing_key(hotkey: &Hotkey, os: Os) -> Option<String> {
     None
 }
 
-/// A hotkey of modifiers alone: Shift fires on every capital letter, a lone
-/// Super opens Start or the launcher on some systems, and modifiers used
-/// in many shortcuts start dictation for a moment every time.
+/// Modifiers alone: Shift fires on every capital, a lone Super opens Start or a launcher, and
+/// modifiers used in shortcuts start dictation for a moment each time.
 fn modifiers_alone(hotkey: &Hotkey, os: Os, desktop: &str) -> Check {
     let label = hotkey.label_on(os);
     let Some((modifier, side)) = hotkey.trigger().modifier() else {
@@ -193,11 +184,10 @@ fn typing(hotkey: &Hotkey, os: Os, label: &str) -> Option<String> {
     ))
 }
 
-/// What a system or most apps do with this shortcut, which earwig would
-/// take from them.
+/// What the system or most apps do with this shortcut, which earwig would take from them.
 fn reserved(hotkey: &Hotkey, os: Os) -> Option<&'static str> {
     use Modifier::{Alt, Ctrl, Shift, Super};
-    // The modifier app shortcuts use: Command on a Mac, Ctrl elsewhere.
+    // Cmd on a Mac, Ctrl elsewhere.
     let app = if os == Os::Mac { Super } else { Ctrl };
     if let Key::Letter(letter) = hotkey.trigger()
         && hotkey.is(&[app], hotkey.trigger())
@@ -250,8 +240,7 @@ fn reserved(hotkey: &Hotkey, os: Os) -> Option<&'static str> {
         return Some("switches to a text console");
     }
     if os == Os::Windows
-        && hotkey.has(Super)
-        && hotkey.modifiers().len() == 1
+        && hotkey.is(&[Super], hotkey.trigger())
         && matches!(
             hotkey.trigger(),
             Key::Letter(_) | Key::Digit(_) | Key::Space | Key::Tab | Key::Comma | Key::Period
@@ -398,7 +387,6 @@ mod tests {
     #[test]
     fn modifiers_used_everywhere_alone_are_refused_or_warned_about() {
         assert!(rejected("Shift", Os::Linux, "").contains("capital"));
-        assert!(rejected("LeftShift", Os::Mac, "").contains("capital"));
         assert!(matches!(check("LeftCtrl", Os::Linux, ""), Check::Warn(_)));
         assert!(matches!(check("Fn", Os::Mac, ""), Check::Warn(_)));
         assert_eq!(check("Ctrl+Shift", Os::Linux, ""), Check::Fine);

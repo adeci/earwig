@@ -1,42 +1,26 @@
-//! The pill powering on and switching off like an old CRT screen, in the
-//! overlay's own calm palette. On: its first frame is a squashed bar at
-//! full width that springs open while the text fades in. Off, once a
-//! dictation is finished: the text fades, the pill squeezes to a thin line
-//! across its middle and springs as it lands, the line shrinks to a dot in
-//! the centre, and the dot closes like a droplet, releasing one faint
-//! ripple. Pure curves of the time since the pill's first frame or the
-//! finish; [`pill::paint_crt`](crate::ui::pill::paint_crt) draws them.
+//! The pill's CRT power-on and switch-off as pure curves of time; `pill::paint_crt` draws them.
 
 use std::time::Duration;
 
-/// From the pill's first frame to it standing open.
 pub const OPEN: Duration = Duration::from_millis(90);
-/// The height it opens from, a share of its own...
+/// Opens from this share of its height on a spring (rad/s, damping), eased in from `SETTLE`.
 const OPEN_FROM: f32 = 0.6;
-/// ...on a spring (rad/s, damping ratio) that has nearly settled by then,
-/// eased onto the full height over the last share of the opening.
 const OPENING: (f32, f32) = (60., 0.75);
 const SETTLE: f32 = 0.6;
 
-/// From the finish to the window closing: a few frames past the ripple's
-/// last trace at [`END`], so the window goes on an empty frame.
+/// A few frames past `END`, so the window closes on an empty frame.
 pub const DURATION: Duration = Duration::from_millis(400);
-/// Seconds to the last trace of the ripple.
+/// When the ripple's last trace is gone.
 const END: f32 = 0.38;
 
-/// Seconds the text and the × take to fade, gone before the pill they sit
-/// on has squeezed past them.
+/// Text fade, done before the pill squeezes past it.
 const FADE: f32 = 0.05;
-/// The squeeze is a spring from the whole pill to the line, from rest: its
-/// natural frequency (rad/s) and damping ratio. Its overshoot thins the
-/// line a moment before it settles.
+/// The squeeze to a line: a spring (rad/s, damping ratio) whose overshoot thins the line.
 const COLLAPSE: (f32, f32) = (32., 0.7);
-/// How much thinner the overshoot makes the line, on a log scale of the
-/// pill's height.
+/// How much the overshoot thins the line, on a log scale of the pill's height.
 const SPRING_THIN: f32 = 1.5;
 
-/// The power-on `t` seconds into the pill's first frame, for a pill `width`
-/// by `height` pixels: the faint glow fades as it opens; `None` once open.
+/// The power-on `t` seconds in; `None` once open.
 pub fn opening(t: f32, width: f32, height: f32) -> Option<Frame> {
     let open = OPEN.as_secs_f32();
     let t = t.max(0.);
@@ -56,46 +40,40 @@ pub fn opening(t: f32, width: f32, height: f32) -> Option<Frame> {
     })
 }
 
-/// Opacity of the text and the × `t` seconds into powering on.
+/// Text opacity during the power-on.
 pub fn opening_content(t: f32) -> f32 {
     smoothstep(t / OPEN.as_secs_f32())
 }
-/// Thickness of the line and diameter of the dot, in pixels.
-pub const LINE: f32 = 3.;
-pub const DOT: f32 = LINE;
+
+/// Line thickness and dot diameter.
+const LINE: f32 = 3.;
+const DOT: f32 = LINE;
 /// How much wider the pill grows as it flattens.
 const STRETCH: f32 = 0.03;
-/// Seconds since the finish over which the line shrinks to the dot.
+/// Seconds over which the line shrinks to the dot.
 const SHRINK: (f32, f32) = (0.13, 0.265);
-/// The pill takes on the line's soft tint as it thins below this share of
-/// its height.
+/// The tint comes in below this share of the height.
 const TINTS_FROM: f32 = 0.3;
-/// The dot closes from the end of the shrink to this, like a droplet
-/// drawn in.
+/// When the dot has closed.
 const CLOSED: f32 = 0.315;
-/// The ripple spreads from the whole dot as it starts to close, this wide
-/// (pixels), this strong at most, that strong this soon (a share of its
-/// life).
+/// The ripple's final diameter, peak opacity, and the share of its life it takes to rise.
 const RIPPLE_SIZE: f32 = 34.;
 const RIPPLE_OPACITY: f32 = 0.55;
 const RIPPLE_RISE: f32 = 0.15;
 
-/// The pill `t` seconds into switching off.
+/// One frame of the power-on or switch-off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
-    /// The pill's size in pixels, centred where it was.
+    /// Centred where the pill was.
     pub width: f32,
     pub height: f32,
-    /// What is left of the pill as it was: 1 whole, 0 once it is a line.
-    /// Its ripples and wide shadow shrink with it.
+    /// What's left of the pill's picture: 1 whole, 0 a line.
     pub picture: f32,
     /// From the pill's own colours (0) to the line's soft tint (1).
     pub tint: f32,
-    /// Strength of the faint halo around the pill, 0..1.
+    /// Halo strength.
     pub glow: f32,
-    /// Opacity of the pill, which goes as the dot closes.
     pub alpha: f32,
-    /// The ripple the closing dot releases, once it has.
     pub ripple: Option<Ripple>,
 }
 
@@ -106,13 +84,12 @@ pub struct Ripple {
     pub opacity: f32,
 }
 
-/// Opacity of the text and the × `t` seconds into switching off.
+/// Text opacity during the switch-off.
 pub fn content(t: f32) -> f32 {
     1. - smoothstep(t / FADE)
 }
 
-/// The switch-off `t` seconds in for a pill `width` by `height` pixels;
-/// `None` once nothing is left.
+/// The switch-off `t` seconds in; `None` once nothing is left.
 pub fn at(t: f32, width: f32, height: f32) -> Option<Frame> {
     let t = t.max(0.);
     if t >= END {
@@ -130,8 +107,7 @@ pub fn at(t: f32, width: f32, height: f32) -> Option<Frame> {
     let shrink = progress(t, SHRINK.0, SHRINK.1);
     let stretched = width * (1. + STRETCH * (1. - picture));
     let long = stretched + (DOT - stretched) * smoothstep(shrink);
-    // Never taller than it is wide: the line keeps its thickness, and ends
-    // as a dot as round as it is thick.
+    // Never taller than wide, so the line ends as a round dot.
     let mut size = (long, collapsed.min(long));
     // The dot contracts evenly while it fades.
     let close = progress(t, SHRINK.1, CLOSED);
@@ -158,9 +134,7 @@ pub fn at(t: f32, width: f32, height: f32) -> Option<Frame> {
     })
 }
 
-/// A spring from 1 toward 0, starting from rest, with natural frequency
-/// `omega` (rad/s) and damping ratio `zeta`: under its overshoot it dips
-/// below 0.
+/// Damped spring from 1 at rest toward 0; dips below 0 when it overshoots.
 fn spring(t: f32, (omega, zeta): (f32, f32)) -> f32 {
     let damped = omega * (1. - zeta * zeta).sqrt();
     (-zeta * omega * t).exp() * ((damped * t).cos() + zeta * omega / damped * (damped * t).sin())
@@ -171,7 +145,6 @@ fn progress(x: f32, from: f32, to: f32) -> f32 {
     ((x - from) / (to - from)).clamp(0., 1.)
 }
 
-/// Eased in and out over 0..1.
 fn smoothstep(x: f32) -> f32 {
     let x = x.clamp(0., 1.);
     x * x * (3. - 2. * x)
@@ -220,8 +193,7 @@ mod tests {
 
     #[test]
     fn nothing_jumps_from_one_millisecond_to_the_next() {
-        // The line sweeps in at up to about 6 px/ms; a jump would be the
-        // whole pill, or a whole step of colour, at once.
+        // The line sweeps in at up to ~6 px/ms; a jump would be a whole pill or colour step.
         let mut last = frame(0.);
         for (t, before) in times(0.001).skip(1).zip(times(0.001)) {
             let now = frame(t);
@@ -259,8 +231,7 @@ mod tests {
         );
         assert!(line.tint > 0.99, "{line:?}");
         assert_eq!((line.picture, content(SHRINK.0)), (0., 0.));
-        // From then on it only gets smaller: the line into the dot, the dot
-        // to nothing.
+        // From then on it only shrinks: the line into the dot, the dot to nothing.
         let ends: Vec<Frame> = times(0.001).filter(|&t| t >= SHRINK.0).map(frame).collect();
         assert!(ends.windows(2).all(|w| w[1].width <= w[0].width));
         // The whole tail: never taller than it is wide, no bead.
@@ -297,8 +268,7 @@ mod tests {
     fn powering_on_springs_a_squashed_pill_open_within_five_frames() {
         let open = OPEN.as_secs_f32();
         let first = opening(0., PILL.0, PILL.1).unwrap();
-        // Already plainly the pill: full width, a little over half its
-        // height, its own colours, no text yet, the faint glow on.
+        // Already the pill: full width, ~60% height, own colours, no text yet, glow on.
         assert_eq!((first.width, first.tint, first.glow), (PILL.0, 0., 1.));
         assert!(
             (0.55..=0.65).contains(&(first.height / PILL.1)),

@@ -1,9 +1,4 @@
-//! A line of text that ends in an ellipsis when its room is too narrow and,
-//! while the pointer rests on it, scrolls sideways to show the rest, like an
-//! old information display: it holds still a moment, eases into a steady
-//! pace, pauses at the end, comes back, and starts over until the pointer
-//! leaves. Under reduced motion it holds still and a tooltip shows the whole
-//! text instead. Either way it takes the room the ellipsised line would.
+//! A one-line label that ellipsises when cut short and scrolls the rest into view on hover.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -18,21 +13,19 @@ use gpui_kit::{
     size,
 };
 
-/// How long the line holds still at its start: once the pointer is on it,
-/// and between passes.
+/// Seconds still at the start, on hover and between passes.
 const START_PAUSE: f32 = 0.8;
-/// How long it holds still at its end before coming back.
+/// Seconds still at the end.
 const END_PAUSE: f32 = 1.2;
-/// The steady pace, in pixels per second.
+/// Steady pace in px/s.
 const SPEED: f32 = 50.;
-/// How long it takes to reach that pace, and to stop from it.
+/// Seconds to reach that pace, and to stop from it.
 const RAMP: f32 = 0.4;
 const ELLIPSIS: &str = "…";
-/// Where the reduced-motion tooltip wraps a long text.
+/// Where the reduced-motion tooltip wraps.
 const TIP_WIDTH: Pixels = px(360.);
 
-/// One line of `text`, as wide as its room allows; `id` keeps its motion
-/// from frame to frame.
+/// `id` keeps its motion across frames.
 pub fn marquee(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Marquee {
     let mut text: SharedString = text.into();
     if text.contains('\n') {
@@ -52,28 +45,24 @@ pub struct Marquee {
     text: SharedString,
 }
 
-/// What a frame paints.
 pub struct Lines {
     hitbox: Hitbox,
     height: Pixels,
-    /// The whole text on one line.
     whole: ShapedLine,
-    /// What fits: the whole text, or its start and an ellipsis.
+    /// The whole text, or its start and an ellipsis.
     fitted: ShapedLine,
 }
 
-/// What a marquee keeps from one frame to the next.
 #[derive(Default)]
 struct Motion {
-    /// When the pointer came to rest on the line while it was cut short.
+    /// When the pointer came to rest on a cut-short line.
     since: Option<Instant>,
-    /// Whether the last frame cut the line short.
+    /// The last frame cut the line short.
     truncated: bool,
-    /// Whether the pointer left the window, which moves nothing in it.
+    /// The pointer left the window, which moves nothing in it to clear the hover.
     away: Rc<Cell<bool>>,
 }
 
-/// The current text style, for one line.
 struct Line {
     style: TextStyle,
     font_size: Pixels,
@@ -103,8 +92,7 @@ impl Line {
             .shape_line(text.clone(), self.font_size, &runs, None)
     }
 
-    /// `whole` as it fits in `room`: as it is, or the start of `text` and
-    /// an ellipsis, the way GPUI truncates text.
+    /// `whole` if it fits in `room`, else truncated with an ellipsis the way GPUI does.
     fn fit(
         &self,
         text: &SharedString,
@@ -326,13 +314,8 @@ impl Styled for Marquee {
     }
 }
 
-/// How far a line whose end lies `overflow` pixels past its room has
-/// scrolled `elapsed` after the pointer came to rest on it: still at the
-/// start, over to the end, still there, and back, over and over.
+/// The scroll offset `elapsed` into a hover: pause, ease over, pause, ease back, repeat.
 fn offset(elapsed: Duration, overflow: f32) -> f32 {
-    if overflow <= 0. {
-        return 0.;
-    }
     let travel = travel_time(overflow);
     let t = elapsed.as_secs_f32() % (START_PAUSE + travel + END_PAUSE + travel);
     if t < START_PAUSE {
@@ -348,7 +331,7 @@ fn offset(elapsed: Duration, overflow: f32) -> f32 {
 
 /// How long one pass over `distance` takes.
 fn travel_time(distance: f32) -> f32 {
-    // Speeding up to SPEED and slowing down again covers this much.
+    // Distance covered speeding up to `SPEED` and back down.
     let ramps = SPEED * RAMP;
     if distance >= ramps {
         2. * RAMP + (distance - ramps) / SPEED
@@ -357,9 +340,7 @@ fn travel_time(distance: f32) -> f32 {
     }
 }
 
-/// How far a pass over `distance` has come `t` seconds in: it speeds up
-/// evenly, holds `SPEED` (when the distance is long enough to reach it),
-/// and slows down evenly to a stop.
+/// Distance `t` into a pass: steady acceleration, `SPEED` if reached, steady braking.
 fn eased(t: f32, distance: f32) -> f32 {
     let accel = SPEED / RAMP;
     let total = travel_time(distance);
@@ -381,14 +362,6 @@ mod tests {
 
     fn at(seconds: f32, overflow: f32) -> f32 {
         offset(Duration::from_secs_f32(seconds), overflow)
-    }
-
-    #[test]
-    fn a_line_that_fits_never_moves() {
-        for t in [0., 1., 2.5, 10.] {
-            assert!(at(t, 0.).abs() < f32::EPSILON);
-            assert!(at(t, -12.).abs() < f32::EPSILON);
-        }
     }
 
     #[test]

@@ -1,31 +1,17 @@
-# Curated models shipped with this release, in the order the settings
-# window lists them. Exactly one entry is the default. Anything else the
-# engine can load is reachable through Hugging Face search or a local path.
+# Curated models, in the order the settings window lists them; exactly one is
+# the default. Fields come from the Hub: `revision` is a full commit, `sha256`
+# and `size` the LFS object of `file` there, `license` the card's
+# `license_name` (or its SPDX `license`). `language_hint` marks models that
+# take `[model] language`.
 #
-# Every field comes from the Hub: `revision` is a full commit, `sha256` and
-# `size` are the LFS object of `file` at that commit, `license` is the card's
-# `license_name` (or `license` when it is an SPDX id). `language_hint = true`
-# marks a model that takes a language hint (`[model] language`); only those
-# get a Language row in the settings window.
-#
-# `role` is the tag Handy's picks give a model for English dictation
-# (`recommended`, `faster` or `accurate`, from @handy-computer/models); the
-# rest have none.
-#
-# `[model.benchmark]` is Handy's measurement of the very same file (the
-# sha256 Handy benchmarked), copied from Handy's catalog: github.com/
-# cjpais/Handy at commit 73cc8579cff74e97e08de9d86035a92e4335ff7f,
-# src-tauri/src/catalog/catalog.json (the same file as catalog.json in
-# @handy-computer/models 0.2.3). `english_error` is
-# `results.<id>.accuracy.en.error`: the percentage of words wrong in English
-# on FLEURS (test split). `gpu_speed` and `cpu_speed` are
-# `results.<id>.performance.accelerated` and `.cpu`: how many times faster
-# than real time the Q8_0 file transcribes on a Ryzen 4750U laptop with
-# Vulkan, and on its processor alone. Handy's id for the 110M is
-# `parakeet-tdt_ctc-110m`. The settings window grades them as that package
-# does: `accuracyGrade` (Handy's A to F) and `speedMeterLevel` (five steps of
-# the seconds 30 s of speech take). A model Handy hasn't measured gets no
-# table, and no meters.
+# `role` and `[model.benchmark]` are Handy's, for the very same files: its
+# catalog at github.com/cjpais/Handy 73cc8579cff74e97e08de9d86035a92e4335ff7f,
+# src-tauri/src/catalog/catalog.json (@handy-computer/models 0.2.3), where the
+# 110M is `parakeet-tdt_ctc-110m`. `english_error` is
+# `results.<id>.accuracy.en.error` (% of words wrong, FLEURS test split);
+# `gpu_speed` and `cpu_speed` are `results.<id>.performance.accelerated` and
+# `.cpu` (times faster than real time for the Q8_0 file on a Ryzen 4750U with
+# Vulkan, and on its CPU). No table: Handy hasn't measured it.
 
 [[model]]
 id = "parakeet-unified-en-0.6b"

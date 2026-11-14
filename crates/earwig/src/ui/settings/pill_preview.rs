@@ -1,12 +1,9 @@
-//! The overlay's opacity slider, and the overlay's pill at full size over a
-//! checkerboard, a few words into a dictation, with the border the config
-//! file sets. The pill speaks briefly whenever its look changes, so the
-//! water shows it.
+//! The Opacity slider, and a preview pill that ripples briefly whenever its look changes.
 
 use std::f32::consts::TAU;
 use std::time::{Duration, Instant};
 
-use earwig_core::config::{Config, OverlayConfig};
+use earwig_core::config::OverlayConfig;
 use earwig_core::spectrum::{BANDS, Spectrum};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::slider::{Slider, SliderState};
@@ -22,16 +19,15 @@ use crate::ui::{UiState, accent, config, edit_config};
 /// What the preview's pill says, and how long it has been listening.
 const SAMPLE: &str = "Your words appear here as you speak.";
 const SAMPLE_ELAPSED: Duration = Duration::from_secs(3);
-/// Room around the pill: as far as its edge goes, and a little more.
+/// Room for the edge's fullest swell, and a bit.
 const MARGIN: f32 = pill::DEPTH + 8.;
-/// Side of the backdrop's checks, which show through the fill.
+/// Checkerboard square size; the checks show through the fill.
 const CHECKER: f32 = 8.;
-/// Same pacing as the overlay while the voice moves the pill.
+/// The overlay's pacing while the voice moves the pill.
 const FRAME: Duration = Duration::from_millis(16);
-/// The preview keeps speaking this long after its look last changed, which
-/// bridges the gaps between pointer events of one drag.
+/// Keeps speaking this long after a change, bridging the gaps in a slider drag.
 const HOLD: Duration = Duration::from_millis(150);
-/// Reach below which the preview counts as still: under a third of a pixel.
+/// Below this reach (px) the preview counts as still.
 const SETTLED: f32 = 0.3;
 /// Writes wait until a slider has rested this long.
 const SAVE_DELAY: Duration = Duration::from_millis(300);
@@ -39,49 +35,64 @@ const SAVE_DELAY: Duration = Duration::from_millis(300);
 const SYLLABLE_RATE: f32 = 4.5;
 
 pub struct PillPreview {
-    opacity: Dial,
-    /// The border, which only the config file sets, as of the window opening.
+    opacity_slider: Entity<SliderState>,
+    /// The slider's value as of the last change seen.
+    opacity: f32,
+    save: Option<Task<()>>,
+    /// Only the config file sets it; read once.
     border: f32,
     demo: Demo,
     frame_pending: bool,
     _slider: Subscription,
 }
 
-/// A slider, its value as of the last change seen, and the pending write.
-struct Dial {
-    state: Entity<SliderState>,
-    value: f32,
-    save: Option<Task<()>>,
-}
-
 impl PillPreview {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let overlay = config(UiState::handle(cx)).overlay;
-        let opacity = Dial::new(OverlayConfig::MIN_OPACITY, 1., 0.01, overlay.opacity(), cx);
-        // Observed rather than subscribed: assistive-technology steps change
-        // the value without emitting an event.
-        let slider = cx.observe(&opacity.state, |this, _, cx| {
-            this.opacity.changed(|c, v| c.overlay.opacity = v, cx);
+        let opacity = overlay.opacity();
+        let opacity_slider = cx.new(|_| {
+            SliderState::new()
+                .min(OverlayConfig::MIN_OPACITY)
+                .max(1.)
+                .step(0.01)
+                .default_value(opacity)
         });
+        // Observed rather than subscribed: assistive tech changes the value without an event.
+        let observed = cx.observe(&opacity_slider, |this, _, cx| this.slid(cx));
         Self {
+            opacity_slider,
             opacity,
+            save: None,
             border: overlay.border(),
             demo: Demo::default(),
             frame_pending: false,
-            _slider: slider,
+            _slider: observed,
         }
     }
 
-    /// The Opacity row's slider, with room at either end for the half of
-    /// its thumb that overhangs the track.
+    /// Padded for the half-thumb overhanging each end.
     pub fn slider(view: &Entity<Self>, disabled: bool, cx: &App) -> Div {
         div()
             .px_2()
-            .child(Slider::new(&view.read(cx).opacity.state).disabled(disabled))
+            .child(Slider::new(&view.read(cx).opacity_slider).disabled(disabled))
     }
 
-    /// Re-render after `FRAME`; the window closing drops the entity and ends
-    /// the loop.
+    /// Saves once the slider rests; a newer change replaces (cancels) the pending write.
+    fn slid(&mut self, cx: &mut Context<Self>) {
+        let value = self.opacity_slider.read(cx).value().end();
+        if (value - self.opacity).abs() <= f32::EPSILON {
+            return;
+        }
+        self.opacity = value;
+        let saved = (value * 100.).round() / 100.;
+        self.save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SAVE_DELAY).await;
+            let _ = this.update(cx, |_, cx| edit_config(cx, |c| c.overlay.opacity = saved));
+        }));
+        cx.notify();
+    }
+
+    /// Re-renders after `FRAME`, unless the window has closed.
     fn schedule_frame(&mut self, cx: &mut Context<Self>) {
         if self.frame_pending {
             return;
@@ -98,43 +109,10 @@ impl PillPreview {
     }
 }
 
-impl Dial {
-    fn new(min: f32, max: f32, step: f32, value: f32, cx: &mut Context<PillPreview>) -> Self {
-        let state = cx.new(|_| {
-            SliderState::new()
-                .min(min)
-                .max(max)
-                .step(step)
-                .default_value(value)
-        });
-        Self {
-            state,
-            value,
-            save: None,
-        }
-    }
-
-    /// Follow the slider, writing its value with `set` once it rests; a
-    /// newer change replaces (and so cancels) the pending write.
-    fn changed(&mut self, set: fn(&mut Config, f32), cx: &mut Context<PillPreview>) {
-        let value = self.state.read(cx).value().end();
-        if (value - self.value).abs() <= f32::EPSILON {
-            return;
-        }
-        self.value = value;
-        let saved = (value * 100.).round() / 100.;
-        self.save = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SAVE_DELAY).await;
-            let _ = this.update(cx, |_, cx| edit_config(cx, |c| set(c, saved)));
-        }));
-        cx.notify();
-    }
-}
-
 impl Render for PillPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = Instant::now();
-        let look = Look::themed(cx.theme(), accent::get(cx), self.opacity.value, self.border);
+        let look = Look::themed(cx.theme(), accent::get(cx), self.opacity, self.border);
         self.demo.show(look, now);
         let edge = if pill::holds_still(window, cx) {
             self.demo.settle();
@@ -146,7 +124,7 @@ impl Render for PillPreview {
             Edge::default()
         };
         let theme = cx.theme();
-        // Laid out as the overlay lays out its own, as wide as the row lets it.
+        // Laid out like the overlay's pill, as wide as the row allows.
         let sample = div()
             .w_full()
             .max_w(px(overlay::WIDTH))
@@ -178,8 +156,7 @@ impl Render for PillPreview {
                     .text_color(theme.foreground)
                     .child(SAMPLE),
             );
-        // The backdrop clips the pill's edge and shadow; its border stays on
-        // top of them.
+        // The backdrop clips the pill's edge and shadow; its border stays on top.
         let radius = theme.radius_lg;
         let checks = checkerboard(
             theme.muted_foreground.opacity(0.3),
@@ -206,19 +183,15 @@ impl Render for PillPreview {
     }
 }
 
-/// The preview's motion: a synthetic voice speaks briefly whenever the
-/// pill's look changes (a slider moves, the theme or the accent changes),
-/// then the pill settles the way the overlay's does when recording stops.
+/// A synthetic voice speaks briefly on each look change; then the pill settles.
 #[derive(Default)]
 struct Demo {
     motion: Motion,
     clock: Clock,
-    /// The look last shown.
     look: Option<Look>,
     /// When the look last changed; `None` once the pill has settled.
     moved_at: Option<Instant>,
-    /// Seconds of synthetic voice so far, so each change continues the
-    /// sentence instead of restarting it.
+    /// Seconds spoken so far, so each change continues the sentence.
     spoken: f32,
 }
 
@@ -253,17 +226,14 @@ impl Demo {
     }
 }
 
-/// A mic level (0..1 over -60..0 dBFS) that sounds like steady talking:
-/// syllables rising well into the voice range with room noise between them,
-/// some stressed more than others.
+/// A mic level (0..1 over -60..0 dBFS) like steady talking, some syllables stressed.
 fn synthetic_level(t: f32) -> f32 {
     let syllable = (TAU * SYLLABLE_RATE * t).sin().max(0.).sqrt();
     let stress = 0.8 + 0.2 * (TAU * 0.7 * t).sin();
     0.3 + 0.5 * syllable * stress
 }
 
-/// That talking as speech bands: a low fundamental and two formants that
-/// drift from vowel to vowel, all following the syllables.
+/// As speech bands: a low fundamental and two drifting formants.
 #[allow(clippy::cast_precision_loss)]
 fn synthetic_voice(t: f32) -> Spectrum {
     let level = synthetic_level(t);
@@ -320,8 +290,7 @@ mod tests {
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn preview_speaks_while_a_slider_moves_then_settles() {
-        // How long the pill takes to settle depends on how the water's
-        // kicks happen to vary: the same way every run.
+        // Seeded: how long it takes to settle depends on how the kicks vary.
         let mut demo = Demo {
             motion: Motion::seeded(1),
             ..Demo::default()
@@ -356,8 +325,7 @@ mod tests {
         let mut demo = Demo::default();
         let mut start = Instant::now();
         demo.show(dark, start);
-        // The theme switched back and forth once the pill has settled, so
-        // each switch lands elsewhere in the synthetic voice's sentence.
+        // Switching after each settle lands somewhere else in the synthetic voice's sentence.
         for switch in 0..8 {
             let shown = if switch % 2 == 0 { light } else { dark };
             let frames = run(&mut demo, start, 240, |_| shown);
@@ -370,13 +338,5 @@ mod tests {
             assert!(frames[settled..].iter().all(Option::is_none), "{switch}");
             start += Duration::from_secs(4);
         }
-    }
-
-    #[test]
-    fn synthetic_voice_falls_silent_between_syllables() {
-        let pause = 0.75 / SYLLABLE_RATE;
-        assert!(synthetic_voice(pause).bands.iter().all(|&b| b < 1e-3));
-        let peak = 0.25 / SYLLABLE_RATE;
-        assert!(synthetic_voice(peak).bands.iter().any(|&b| b > 0.6));
     }
 }

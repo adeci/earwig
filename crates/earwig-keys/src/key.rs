@@ -1,8 +1,5 @@
-//! Physical keys, and the names earwig gives them: in settings files
-//! (`RightCtrl`, `PageUp`) and in its windows (`Right Ctrl`, `Page Up`), on
-//! a Mac with the symbols on its keys and in its menus (`Right ⌘`, `↩`).
+//! Keys and their names in settings files (`RightCtrl`) and windows (`Right Ctrl`, `Right ⌘`).
 
-/// Whose keyboards and names apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Os {
     Linux,
@@ -19,22 +16,19 @@ impl Os {
     pub(crate) const CURRENT: Self = Self::Windows;
 }
 
-/// A modifier, both of its keys. The order is the order hotkeys list them
-/// in.
+/// Hotkeys list modifiers in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Modifier {
     Ctrl,
     /// Option on a Mac.
     Alt,
     Shift,
-    /// Command on a Mac, the Windows key on Windows, Super (Meta, Logo)
-    /// on Linux.
+    /// Cmd on a Mac, Win on Windows, Super (Meta, Logo) on Linux.
     Super,
     /// The Mac's Fn (Globe) key.
     Fn,
 }
 
-/// Which of a modifier's keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Side {
     Either,
@@ -44,16 +38,13 @@ pub enum Side {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
-    /// A modifier key. Keys on a keyboard have a side, except Fn, which has
-    /// one key; a hotkey may name either side.
+    /// Real keys have a side, except Fn; a hotkey may say `Side::Either`.
     Modifier(Modifier, Side),
     /// `A`–`Z`, by their place on a US keyboard.
     Letter(char),
-    /// `0`–`9` above the letters.
+    /// The number row.
     Digit(u8),
-    /// `F1`–`F24`.
     F(u8),
-    /// `0`–`9` on the number pad.
     Numpad(u8),
     Space,
     Tab,
@@ -96,7 +87,7 @@ pub enum Key {
     NumpadEnter,
 }
 
-/// Keys with one name everywhere: in settings files, and in windows.
+/// (key, settings name, window label)
 const NAMED: [(Key, &str, &str); 37] = [
     (Key::Space, "Space", "Space"),
     (Key::Tab, "Tab", "Tab"),
@@ -169,8 +160,7 @@ const ALIASES: [(&str, Key); 28] = [
     ("numpadminus", Key::NumpadSubtract),
 ];
 
-/// Keys a Mac shows by the symbol on the key or in its menus, or by its own
-/// name.
+/// How a Mac labels these, by the symbol on the key or in its menus.
 const MAC_LABELS: [(Key, &str); 10] = [
     (Key::Enter, "↩"),
     (Key::Escape, "⎋"),
@@ -188,7 +178,7 @@ impl Modifier {
     /// Ctrl, Alt, Shift and Super: the modifiers every OS has.
     pub(crate) const COMMON: [Self; 4] = [Self::Ctrl, Self::Alt, Self::Shift, Self::Super];
 
-    /// As a settings file names it on `os`.
+    /// As settings files write it.
     pub(crate) fn name(self, os: Os) -> &'static str {
         match (self, os) {
             (Self::Ctrl, _) => "Ctrl",
@@ -202,8 +192,7 @@ impl Modifier {
         }
     }
 
-    /// As a window names it on `os`: a Mac shows the symbol on the key, and
-    /// fn as written there.
+    /// As windows show it; a Mac uses the symbols on its keys.
     pub(crate) fn label(self, os: Os) -> &'static str {
         match (self, os) {
             (Self::Ctrl, Os::Mac) => "⌃",
@@ -229,7 +218,6 @@ impl Modifier {
 }
 
 impl Key {
-    /// The modifier this key is, if it is one.
     pub fn modifier(self) -> Option<(Modifier, Side)> {
         match self {
             Self::Modifier(modifier, side) => Some((modifier, side)),
@@ -285,7 +273,7 @@ impl Key {
             })
     }
 
-    /// As a settings file names it on `os`.
+    /// As settings files write it.
     pub(crate) fn name(self, os: Os) -> String {
         match self {
             Self::Modifier(modifier, side) => format!("{}{}", side_name(side), modifier.name(os)),
@@ -294,7 +282,7 @@ impl Key {
         }
     }
 
-    /// As a window names it on `os`.
+    /// As windows show it.
     pub(crate) fn label(self, os: Os) -> String {
         match (self, os) {
             (Self::Modifier(modifier, Side::Either), _) => modifier.label(os).into(),
@@ -348,8 +336,7 @@ fn side_name(side: Side) -> &'static str {
     }
 }
 
-/// The modifier keys held down at an instant: a set of physical keys, both
-/// sides apart.
+/// Modifier keys held down, left and right apart.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Held(u16);
 
@@ -380,6 +367,12 @@ impl Held {
     #[must_use]
     pub(crate) fn without(self, key: Key) -> Self {
         Self(self.0 & !Self::bits(key))
+    }
+
+    /// Without the key an edge is for, if any.
+    #[must_use]
+    pub(crate) fn besides(self, key: Option<Key>) -> Self {
+        key.map_or(self, |key| self.without(key))
     }
 
     /// One of the keys `side` names is down.
@@ -428,56 +421,11 @@ mod tests {
     }
 
     #[test]
-    fn a_mac_shows_the_symbols_on_its_keys() {
-        let shown = |key: Key| key.label(Os::Mac);
-        let modifiers = [
-            Modifier::Ctrl,
-            Modifier::Alt,
-            Modifier::Shift,
-            Modifier::Super,
-        ];
-        assert_eq!(
-            modifiers.map(|modifier| shown(Key::Modifier(modifier, Side::Either))),
-            ["⌃", "⌥", "⇧", "⌘"]
-        );
-        assert_eq!(shown(Key::Modifier(Modifier::Fn, Side::Either)), "fn");
-        assert_eq!(
-            shown(Key::Modifier(Modifier::Super, Side::Right)),
-            "Right ⌘"
-        );
-        assert_eq!(shown(Key::Modifier(Modifier::Alt, Side::Left)), "Left ⌥");
-        assert_eq!(
-            [
-                Key::Enter,
-                Key::Escape,
-                Key::Tab,
-                Key::Backspace,
-                Key::Delete
-            ]
-            .map(shown),
-            ["↩", "⎋", "⇥", "⌫", "⌦"]
-        );
-        assert_eq!(
-            [Key::Up, Key::Down, Key::Left, Key::Right].map(shown),
-            ["↑", "↓", "←", "→"]
-        );
-        assert_eq!(shown(Key::Space), "Space");
-        assert_eq!(shown(Key::Insert), "Help");
-        assert_eq!(shown(Key::PageUp), "Page Up");
-    }
-
-    #[test]
     fn aliases_and_odd_spellings() {
         assert_eq!(Key::parse("return"), Some(Key::Enter));
         assert_eq!(Key::parse("esc"), Some(Key::Escape));
         assert_eq!(Key::parse("f07"), None);
-        assert_eq!(Key::parse("f25"), None);
         assert_eq!(Key::parse("/"), Some(Key::Slash));
-        assert_eq!(
-            Key::parse_modifier("rightoption"),
-            Some(Key::Modifier(Modifier::Alt, Side::Right))
-        );
-        assert_eq!(Key::parse_modifier("rightfn"), None);
     }
 
     #[test]

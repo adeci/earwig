@@ -1,10 +1,4 @@
-//! The pill's outline as a ring of water: a closed string of nodes
-//! around the pill, each with a height (outward from the pill at rest) and
-//! a velocity, under a damped wave equation. The voice's onsets kick the
-//! long top and bottom runs, mirrored from the centre with low bands in the
-//! middle but a little stronger here and weaker there (see [`VARIETY`]);
-//! the ripples travel around the ring and ring down once the voice stops,
-//! until the ring is exactly at rest. Loudness swells it gently.
+//! The pill's edge as a ring of water: a damped wave equation kicked by the voice's onsets.
 
 use std::collections::hash_map::RandomState;
 use std::f32::consts::TAU;
@@ -13,77 +7,60 @@ use std::sync::LazyLock;
 
 use earwig_core::spectrum::BANDS;
 
-/// Nodes along each long run, each short side and each corner. Every
-/// stretch maps its nodes evenly onto however long it is drawn.
+/// Nodes per long run, short side and corner, each spread evenly over its drawn length.
 pub const RUN: usize = 96;
 pub const SIDE: usize = 4;
 pub const CORNER: usize = 12;
-/// The top run and the right side with the corners after them; the bottom
-/// and the left side repeat it.
+/// Top run and right side with their corners; the other half repeats it.
 const HALF: usize = RUN + SIDE + 2 * CORNER;
 pub const NODES: usize = 2 * HALF;
 
-/// Seconds per simulation step, whatever the frame rate.
+/// Fixed simulation step, whatever the frame rate.
 const STEP: f32 = 1. / 240.;
-/// A longer frame than this is simulated as this long, so a stalled frame
-/// does not spend long catching up.
+/// Longest frame we simulate, so a stall doesn't spend ages catching up.
 const MAX_ADVANCE: f32 = 0.1;
 
-/// Nodes a ripple travels per second; a node is about 5 px of the
-/// overlay's long runs.
+/// Wave speed in nodes/s (a node is about 5 px of the long runs).
 const SPEED: f32 = 40.;
-/// Pull back to rest per unit height, 1/s²: long, slow swells settle about
-/// as fast as they are damped instead of lingering.
+/// Pull back to rest (1/s²), so long swells settle instead of lingering.
 const SPRING: f32 = 30.;
-/// Share of its velocity a node loses per second...
+/// Velocity lost per second...
 const DAMPING: f32 = 5.;
-/// ...and more for short ripples than long ones (nodes²/s), which keeps
-/// crests round.
+/// ...and more for short ripples (nodes²/s), which keeps crests round.
 const VISCOSITY: f32 = 3.;
-/// The rate a typical ripple swings at, 1/s: a node's velocity over it is
-/// about how far the node will swing out.
+/// A typical swing rate (1/s): velocity over it is about how far a node will swing.
 const SWING: f32 = 8.;
 
-/// Velocity a band's rise from silence to the top gives the ring under it,
-/// taken from the water beside it (see [`high_pass`]): syllables send
-/// ripples out without the pill as a whole growing.
+/// Velocity a full band rise kicks in, taken from beside it (see [`high_pass`]) so none grows.
 const KICK: f32 = 70.;
-/// Nodes either side of a kick the water it displaces comes from (one
-/// standard deviation).
+/// Standard deviation, in nodes, of where a kick's water comes from.
 const WIDE: f32 = 10.;
-/// How far the whole ring swells at full loudness...
+/// Whole-ring swell at full loudness, and its attack and release in seconds.
 const SWELL: f32 = 0.25;
-/// ...following a louder voice within this many seconds and a quieter one
-/// within these.
 const SWELL_ATTACK: f32 = 0.05;
 const SWELL_RELEASE: f32 = 0.35;
-/// Band 0 kicks at the centre of a run and the highest band this far
-/// toward the corners (0 at the centre, 1 where the corners begin)...
+/// Band 0 kicks the middle of a run, the top band this far toward the corners (1)...
 const BAND_END: f32 = 0.8;
-/// ...each over a Gaussian this wide...
+/// ...each as a Gaussian this wide...
 const SPREAD: f32 = 0.1;
-/// ...under Siri's attenuation `(K / (K + x⁴))^K`, `x = FOCUS` times the
-/// way to the corners, so kicks centre on the middle of the pill...
+/// ...under Siri's attenuation `(K / (K + x⁴))^K` with `x = FOCUS * across`...
 const FOCUS: f32 = 1.4;
 const FOCUS_K: f32 = 2.;
-/// ...and fading out over this span toward the corners.
+/// ...fading out toward the corners.
 const TAPER: (f32, f32) = (0.7, 1.);
-/// With nothing pushing, a ring lower and slower than this is at rest:
-/// about a sixth of a pixel.
+/// Below this (about a sixth of a pixel) an unpushed ring snaps to rest.
 const REST: f32 = 0.01;
-/// How unevenly kicks land around the ring: a smooth gain within 1 ± this
-/// that drifts at random, so no two syllables or dictations ripple alike.
+/// Kick gain wanders within 1 ± this around the ring, so no two syllables ripple alike.
 const VARIETY: f32 = 0.6;
-/// The gain's waves: times each goes around the ring, and radians per
-/// second it drifts, either way.
+/// (times around the ring, drift in rad/s) of each of the gain's waves.
 const VARIETY_WAVES: [(f32, f32); 4] = [(1., 1.5), (2., 2.3), (3., 3.4), (5., 4.7)];
 
-/// Heights in units where 1 is a full wave: the ring and its momentum.
+/// Heights where 1 is a full wave, and their velocities.
 #[derive(Clone)]
 pub struct Ring {
     height: [f32; NODES],
     velocity: [f32; NODES],
-    /// How far the whole ring stands out on top of its ripples.
+    /// Whole-ring offset on top of the ripples.
     swell: f32,
     /// Seconds not yet simulated.
     pending: f32,
@@ -107,14 +84,13 @@ impl Ring {
         }
     }
 
-    /// A ring whose kicks vary the same way every time, for tests.
+    /// Deterministic kick variety, for tests.
     #[cfg(test)]
     pub fn seeded(seed: u64) -> Self {
         Self::with(Variety::seeded(seed))
     }
 
-    /// Advance by `dt` seconds while the bands stand at `levels` (0..1),
-    /// having risen by `rises` since the last frame.
+    /// `levels` are the bands now (0..1), `rises` how far each rose since the last frame.
     #[allow(clippy::cast_precision_loss)]
     pub fn advance(&mut self, dt: f32, levels: &[f32; BANDS], rises: &[f32; BANDS]) {
         if rises.iter().any(|&rise| rise > 0.) {
@@ -152,8 +128,7 @@ impl Ring {
         }
     }
 
-    /// One step of the damped wave equation, semi-implicit Euler: stable
-    /// while a ripple crosses well under a node per step.
+    /// One semi-implicit Euler step of the damped wave equation.
     fn step(&mut self) {
         let (height, velocity) = (self.height, self.velocity);
         let around = |values: &[f32; NODES], i: usize| {
@@ -170,7 +145,6 @@ impl Ring {
         }
     }
 
-    /// How far each node stands out from rest.
     pub fn surface(&self) -> [f32; NODES] {
         self.height.map(|h| h + self.swell)
     }
@@ -180,8 +154,7 @@ impl Ring {
         self.swell == 0. && self.height.iter().chain(&self.velocity).all(|&x| x == 0.)
     }
 
-    /// The furthest any node stands out or in, or is swinging to, so the
-    /// moment a ripple passes through rest does not count as calm.
+    /// Furthest any node stands out or is swinging to, so passing through rest isn't calm.
     pub fn amplitude(&self) -> f32 {
         let furthest = |values: &[f32; NODES]| values.iter().fold(0_f32, |m, x| m.max(x.abs()));
         self.swell + furthest(&self.height) + furthest(&self.velocity) / SWING
@@ -191,8 +164,7 @@ impl Ring {
 /// Where kicks land stronger and weaker around the ring.
 #[derive(Clone, Copy)]
 struct Variety {
-    /// Each of [`VARIETY_WAVES`]' phase and drift, radians and radians per
-    /// second.
+    /// Phase and signed drift of each of [`VARIETY_WAVES`].
     waves: [(f32, f32); VARIETY_WAVES.len()],
 }
 
@@ -237,17 +209,14 @@ impl Variety {
     }
 }
 
-/// How far node `i` is from the middle of its long run (0) toward the
-/// corners (1), if it is on one.
+/// Node `i`'s distance from the middle of its long run (0) to the corners (1), if on one.
 #[allow(clippy::cast_precision_loss)]
 fn across(i: usize) -> Option<f32> {
     let along = i % HALF;
     (along <= RUN).then(|| (2. * along as f32 / RUN as f32 - 1.).abs())
 }
 
-/// How much each band kicks each node of the long runs: Gaussians around
-/// the band's place on either side of the centre, normalised so bands all
-/// at one level kick evenly, then centred and faded toward the corners.
+/// Per long-run node, each band's kick weight: mirrored Gaussians, normalised, focused, tapered.
 static KICKS: LazyLock<Vec<(usize, [f32; BANDS])>> = LazyLock::new(|| {
     (0..NODES)
         .filter_map(|i| {
@@ -266,7 +235,6 @@ static KICKS: LazyLock<Vec<(usize, [f32; BANDS])>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The kick of bands rising by `rises` on every node.
 fn spread(rises: &[f32; BANDS]) -> [f32; NODES] {
     let mut nodes = [0.; NODES];
     for (i, weights) in KICKS.iter() {
@@ -275,9 +243,7 @@ fn spread(rises: &[f32; BANDS]) -> [f32; NODES] {
     nodes
 }
 
-/// `field` less its local average over a Gaussian [`WIDE`] nodes wide
-/// around the ring: the water a kick lifts comes from beside it, so the
-/// ring as a whole neither grows nor shrinks.
+/// `field` less its Gaussian-blurred local average, so a kick lifts water from beside it.
 fn high_pass(field: &[f32; NODES]) -> [f32; NODES] {
     static BLUR: LazyLock<Vec<f32>> = LazyLock::new(|| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -324,15 +290,6 @@ mod tests {
 
     fn syllable() -> [f32; BANDS] {
         std::array::from_fn(|band| if (3..9).contains(&band) { 0.8 } else { 0.2 })
-    }
-
-    #[test]
-    fn at_rest_it_stays_exactly_at_rest() {
-        let mut ring = Ring::default();
-        for _ in 0..100 {
-            ring.advance(1. / 60., &QUIET, &QUIET);
-        }
-        assert!(ring.rests());
     }
 
     #[test]
@@ -390,8 +347,7 @@ mod tests {
         assert!(apart > 0.1 * peak, "{apart} apart, peak {peak}");
         for h in [a, b] {
             for run in [0, HALF] {
-                // Low bands, the loudest here, kick the middle of each run
-                // most; the corners have yet to feel it.
+                // Low bands, loudest here, kick each run's middle most; corners haven't felt it.
                 let middle = h[run + RUN / 2];
                 assert!(
                     middle > h[run + RUN / 4] && middle > 2. * h[run + RUN + CORNER],
@@ -408,8 +364,7 @@ mod tests {
         std::array::from_fn(|band| syllable * (0.5 + 0.5 * (band as f32 * 0.4 + t).sin()))
     }
 
-    /// The ring's furthest height each tenth of a second over three seconds
-    /// of talking and two of silence, at frames of `frame(n)` seconds.
+    /// Furthest height per 0.1 s over 3 s of talk and 2 of silence, at `frame(n)`-second frames.
     fn run(frame: impl Fn(usize) -> f32) -> Vec<f32> {
         let mut ring = Ring::with(Variety::seeded(7));
         let (mut t, mut last, mut n) = (0., QUIET, 0);

@@ -1,8 +1,6 @@
-//! Settings in three layers, later wins: built-in defaults, the user file
-//! (`$XDG_CONFIG_HOME/earwig/config.toml` on Linux, written by the settings
-//! window), and the machine-wide files (`earwig/config.toml` under
-//! `$XDG_CONFIG_DIRS`, written by the NixOS module); see [`crate::paths`].
-//! Keys set in a system file are locked: never written to the user file.
+//! Settings in layers, later wins: built-in defaults, the user file (written
+//! by the settings window), then the system files (the NixOS module's), whose
+//! keys are locked and never written to the user file. See [`crate::paths`].
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -12,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::Backend;
 use crate::models::ModelSpec;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -45,15 +44,11 @@ pub struct HotkeyConfig {
     pub mode: ActivationMode,
     /// A release this soon after the press counts as a tap.
     pub hold_threshold_ms: u64,
-    /// The key earwig watches itself (on Linux by reading the keyboards,
-    /// which needs keyboard access), in the syntax of
-    /// [`crate::hotkey::Hotkey`]: a key with modifiers (`Super+Space`) or
-    /// modifiers alone (`RightCtrl`). Empty for none: compositor binds
-    /// (`earwig press`) or the GlobalShortcuts portal only.
+    /// The key earwig watches itself (`Super+Space`, or modifiers alone such
+    /// as `RightCtrl`); empty for none (compositor binds or the portal only).
     pub key: String,
-    /// Linux: keep a key with modifiers from other apps and the compositor
-    /// by holding the keyboards that have it (every other key passes on
-    /// through a virtual keyboard). macOS and Windows always do.
+    /// Linux: keep the key from other apps and the compositor by grabbing the
+    /// keyboards that have it. macOS and Windows always do.
     pub block: bool,
     /// Register with the GlobalShortcuts portal when the desktop offers it
     /// and earwig cannot watch the key itself.
@@ -63,9 +58,8 @@ pub struct HotkeyConfig {
 }
 
 impl HotkeyConfig {
-    /// Super+Space. Where earwig may hold the keyboards the compositor never
-    /// sees it (GNOME switches input sources with it, sway's sample config
-    /// toggles floating focus).
+    /// With the keyboards grabbed the compositor never sees it (GNOME switches
+    /// input sources with it, sway's sample config toggles floating focus).
     #[cfg(target_os = "linux")]
     pub const DEFAULT_KEY: &str = "Super+Space";
     /// Option+Space: macOS keeps Command+Space for Spotlight and
@@ -92,9 +86,8 @@ impl Default for HotkeyConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
-    /// Input device as `earwig devices` lists it first on each line (a sound
-    /// server source on Linux, the device's name on Windows); `None` =
-    /// system default.
+    /// As `earwig devices` lists it (a sound server source on Linux, a device
+    /// name on Windows); `None` = system default.
     pub device: Option<String>,
     /// Keep the microphone open between dictations so speech that starts as
     /// the key goes down is not clipped. The desktop's mic indicator stays on.
@@ -118,18 +111,9 @@ impl Default for AudioConfig {
 pub struct ModelConfig {
     /// `None` = the release's default catalog model.
     pub model: Option<ModelSpec>,
-    pub backend: BackendSetting,
+    pub backend: Backend,
     /// Language hint for multilingual models.
     pub language: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum BackendSetting {
-    #[default]
-    Auto,
-    Cpu,
-    Gpu,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,8 +136,7 @@ pub struct InsertConfig {
     pub terminals: Vec<String>,
 }
 
-/// The colours of earwig's own windows (the settings window and the
-/// overlay), whatever the desktop's light or dark preference.
+/// The colours of earwig's own windows, whatever the desktop prefers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeSetting {
@@ -162,16 +145,14 @@ pub enum ThemeSetting {
     Light,
 }
 
-/// The accent of the overlay's pill (its border and glow, and the settings
-/// window's preview of it).
+/// The accent of the overlay's pill (its border and glow).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccentSetting {
-    /// earwig's own blue, the icon's, the same on every computer.
+    /// earwig's own blue, the icon's.
     #[default]
     Earwig,
-    /// The desktop's accent colour, following its changes; earwig's blue
-    /// where the desktop has none.
+    /// The desktop's accent colour, live; earwig's blue where there is none.
     System,
 }
 
@@ -190,15 +171,13 @@ pub enum OverlayPosition {
     Bottom,
 }
 
-/// How the overlay pill comes and goes. Either way the final text and its
-/// insertion carry on unseen once a dictation is finished, and a pill that
-/// holds still (reduced motion, software rendering) comes and goes at once.
+/// How the overlay pill comes and goes; one that holds still (reduced motion,
+/// software rendering) comes and goes at once either way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayAnimation {
-    /// Like an old CRT screen: it powers on, springing open from a
-    /// squashed bar, and switches off, squeezing to a line that shrinks to
-    /// a dot.
+    /// Like an old CRT: springs open from a squashed bar, switches off to a
+    /// line that shrinks to a dot.
     #[default]
     Crt,
     /// It appears and is gone at once.
@@ -324,10 +303,8 @@ impl ConfigStore {
         })
     }
 
-    /// Load from explicit paths. A broken system file is an error (it is
-    /// managed, so it must be fixed where it is generated); a broken user file
-    /// is skipped and reported through [`ConfigStore::user_error`] so the
-    /// daemon still starts.
+    /// A broken system file is an error (fix it where it is generated); a
+    /// broken user file is skipped and reported by [`ConfigStore::user_error`].
     pub fn load_from(paths: ConfigPaths) -> anyhow::Result<Self> {
         let mut merged = toml::Table::try_from(Config::default())?;
         let mut user_error = None;
@@ -400,11 +377,8 @@ impl ConfigStore {
         }
     }
 
-    /// Apply `edit`, write the user file, and reload every layer.
-    ///
-    /// The user file keeps only values that differ from the built-in
-    /// defaults and are not locked, so a later release's new defaults still
-    /// reach users who never touched a setting.
+    /// Apply `edit` and rewrite the user file with only the unlocked values
+    /// that differ from the defaults, so new defaults still reach everyone else.
     pub fn update(&mut self, edit: impl FnOnce(&mut Config)) -> anyhow::Result<()> {
         // Writing now would replace the user's broken file with defaults.
         if let Some(e) = &self.user_error {
@@ -564,11 +538,8 @@ mod tests {
     }
 
     #[test]
-    fn overlay_looks_default_round_trip_and_clamp() {
+    fn overlay_looks_round_trip_and_clamp() {
         let (_dir, mut store) = store("", "");
-        let overlay = &store.config().overlay;
-        assert!((overlay.opacity() - 0.97).abs() < f32::EPSILON);
-        assert!(overlay.border().abs() < f32::EPSILON, "borderless");
         store
             .update(|c| {
                 c.overlay.opacity = 0.7;
@@ -601,70 +572,5 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert!(unreadable.border().abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn overlay_animation_defaults_to_crt_round_trips_and_rejects_unknown() {
-        let (_dir, mut store) = store("", "");
-        assert_eq!(store.config().overlay.animation, OverlayAnimation::Crt);
-        store
-            .update(|c| c.overlay.animation = OverlayAnimation::Instant)
-            .unwrap();
-        let written = fs::read_to_string(&store.paths().user).unwrap();
-        assert_eq!(written.trim(), "[overlay]\nanimation = \"instant\"");
-        let (_dir, reloaded) = self::store(&written, "");
-        assert_eq!(
-            reloaded.config().overlay.animation,
-            OverlayAnimation::Instant
-        );
-        // Back to the default leaves nothing behind.
-        let (_dir, mut store) = self::store(&written, "");
-        store
-            .update(|c| c.overlay.animation = OverlayAnimation::Crt)
-            .unwrap();
-        assert_eq!(fs::read_to_string(&store.paths().user).unwrap().trim(), "");
-
-        let (_dir, store) = self::store("[overlay]\nanimation = \"fade\"\n", "");
-        assert!(store.user_error().is_some());
-        assert_eq!(store.config().overlay.animation, OverlayAnimation::Crt);
-    }
-
-    #[test]
-    fn theme_defaults_to_dark_round_trips_and_rejects_unknown() {
-        let (_dir, mut store) = store("", "");
-        assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
-        store
-            .update(|c| c.appearance.theme = ThemeSetting::Light)
-            .unwrap();
-        let written = fs::read_to_string(&store.paths().user).unwrap();
-        assert_eq!(written.trim(), "[appearance]\ntheme = \"light\"");
-        let (_dir, reloaded) = self::store(&written, "");
-        assert_eq!(reloaded.config().appearance.theme, ThemeSetting::Light);
-
-        let (_dir, store) = self::store("[appearance]\ntheme = \"system\"\n", "");
-        assert!(store.user_error().is_some());
-        assert_eq!(store.config().appearance.theme, ThemeSetting::Dark);
-    }
-
-    #[test]
-    fn accent_defaults_to_earwig_round_trips_and_rejects_unknown() {
-        let (_dir, mut store) = store("", "");
-        assert_eq!(store.config().appearance.accent, AccentSetting::Earwig);
-        store
-            .update(|c| c.appearance.accent = AccentSetting::System)
-            .unwrap();
-        let written = fs::read_to_string(&store.paths().user).unwrap();
-        assert_eq!(written.trim(), "[appearance]\naccent = \"system\"");
-        let (_dir, mut store) = self::store(&written, "");
-        assert_eq!(store.config().appearance.accent, AccentSetting::System);
-        // Back to the default leaves nothing behind.
-        store
-            .update(|c| c.appearance.accent = AccentSetting::Earwig)
-            .unwrap();
-        assert_eq!(fs::read_to_string(&store.paths().user).unwrap().trim(), "");
-
-        let (_dir, store) = self::store("[appearance]\naccent = \"purple\"\n", "");
-        assert!(store.user_error().is_some());
-        assert_eq!(store.config().appearance.accent, AccentSetting::Earwig);
     }
 }

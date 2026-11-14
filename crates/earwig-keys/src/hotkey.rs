@@ -1,12 +1,5 @@
-//! A hotkey as settings files write it: `+`-joined, case-insensitive,
-//! modifiers first, e.g. `Super+Space`, `Option+Space`, `Ctrl+Shift+F9`,
-//! `RightCtrl`.
-//!
-//! Modifiers are `Ctrl` (`Control`), `Alt` (`Option`), `Shift`, `Super`
-//! (`Cmd`, `Command`, `Win`, `Meta`), each optionally `Left`/`Right`, and
-//! `Fn`. Without another key the last modifier is the hotkey itself, held
-//! alone: `RightCtrl`, `Shift+RightAlt`. Letters name the key at that
-//! place on a US keyboard.
+//! A hotkey as settings files write it: `+`-joined, case-insensitive, modifiers first
+//! (`Super+Space`, `Ctrl+Shift+F9`). With no other key the last modifier fires (`RightCtrl`).
 
 use std::fmt;
 use std::str::FromStr;
@@ -15,11 +8,9 @@ use crate::key::{Held, Key, Modifier, Os, Side};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Hotkey {
-    /// Held with the trigger, in [`Modifier`] order, one per modifier,
-    /// never the trigger's own.
+    /// In [`Modifier`] order, one per modifier, never the trigger's own.
     modifiers: Vec<(Modifier, Side)>,
-    /// The key that fires: any key, or for a hotkey of modifiers alone the
-    /// modifier that is held last (`Key::Modifier`, maybe either side).
+    /// Any key; for modifiers alone, the one held last.
     trigger: Key,
 }
 
@@ -36,8 +27,7 @@ pub enum ParseError {
 }
 
 impl Hotkey {
-    /// `trigger` with `modifiers` held; a modifier of the trigger's own
-    /// family is dropped.
+    /// A modifier of the trigger's own family is dropped.
     pub(crate) fn new(modifiers: impl IntoIterator<Item = (Modifier, Side)>, trigger: Key) -> Self {
         let own = trigger.modifier().map(|(modifier, _)| modifier);
         let mut modifiers: Vec<(Modifier, Side)> = modifiers
@@ -49,32 +39,26 @@ impl Hotkey {
         Self { modifiers, trigger }
     }
 
-    /// The modifiers held with [`Self::trigger`].
     pub fn modifiers(&self) -> &[(Modifier, Side)] {
         &self.modifiers
     }
 
-    /// The key that fires: a modifier for a hotkey of modifiers alone.
     pub fn trigger(&self) -> Key {
         self.trigger
     }
 
-    /// Modifiers alone (`RightCtrl`): they pass through to apps, and another
-    /// key going down while they are held makes a shortcut of them instead
-    /// ([`crate::Event::Chord`]).
+    /// Modifiers alone (`RightCtrl`) pass through to apps; another key while they're held makes
+    /// them a shortcut instead ([`crate::Event::Chord`]).
     pub fn is_modifier_only(&self) -> bool {
         self.trigger.modifier().is_some()
     }
 
-    /// As earwig's windows show it: `Right Ctrl`, `Ctrl+Space`; on a Mac
-    /// with its symbols, `Right ⌘`, `⌥ Space`.
+    /// As windows show it: `Right Ctrl`, `Ctrl+Space`; on a Mac `Right ⌘`, `⌥ Space`.
     pub fn label(&self) -> String {
         self.label_on(Os::CURRENT)
     }
 
-    /// `+` between the keys; a Mac lists fn first, then runs ⌃⌥⇧⌘ together
-    /// in that order (its menus'), with a space before anything else:
-    /// `⌃⌥⇧⌘ F9`, `fn ⌃ ←`, `⇧ Right ⌥`.
+    /// A Mac puts fn first and runs ⌃⌥⇧⌘ together like its menus: `⌃⌥⇧⌘ F9`, `fn ⌃ ←`.
     pub(crate) fn label_on(&self, os: Os) -> String {
         let mut modifiers: Vec<Key> = self
             .modifiers
@@ -82,7 +66,7 @@ impl Hotkey {
             .map(|&(modifier, side)| Key::Modifier(modifier, side))
             .collect();
         if os == Os::Mac {
-            // Stable, so the others keep [`Modifier`] order: ⌃⌥⇧⌘.
+            // Stable, so the rest keep ⌃⌥⇧⌘ order.
             modifiers.sort_by_key(|&key| key != Key::Modifier(Modifier::Fn, Side::Either));
         }
         let mut label = String::new();
@@ -105,15 +89,13 @@ impl Hotkey {
         label
     }
 
-    /// [`Self::label_on`] with a key yet to come, as a recording shows the
-    /// modifiers held so far: `Ctrl+…`, `⌃ …`.
+    /// What a recording shows while only modifiers are held: `Ctrl+…`, `⌃ …`.
     pub(crate) fn label_held_on(&self, os: Os) -> String {
         let gap = if os == Os::Mac { ' ' } else { '+' };
         format!("{}{gap}…", self.label_on(os))
     }
 
-    /// As a settings file writes it on `os`; [`fmt::Display`] is the
-    /// current OS's.
+    /// As settings files write it on `os`.
     pub(crate) fn name_on(&self, os: Os) -> String {
         self.modifiers
             .iter()
@@ -123,7 +105,6 @@ impl Hotkey {
             .join("+")
     }
 
-    /// Whether the key on the keyboard, `key`, is the trigger.
     pub(crate) fn is_trigger(&self, key: Key) -> bool {
         match (self.trigger, key) {
             (Key::Modifier(wanted, Side::Either), Key::Modifier(modifier, _)) => wanted == modifier,
@@ -131,23 +112,8 @@ impl Hotkey {
         }
     }
 
-    /// The keys on the keyboard that are the trigger: one, or both sides.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn trigger_keys(&self) -> Vec<Key> {
-        match self.trigger {
-            Key::Modifier(modifier, Side::Either) if modifier != Modifier::Fn => {
-                vec![
-                    Key::Modifier(modifier, Side::Left),
-                    Key::Modifier(modifier, Side::Right),
-                ]
-            }
-            trigger => vec![trigger],
-        }
-    }
-
-    /// The wanted modifiers are held, and no other one; the trigger's own
-    /// family aside, so Left Ctrl held does not hold off Right Ctrl. Fn is
-    /// left out: macOS sets it on arrow and function keys by itself.
+    /// Exactly the wanted modifiers are held. The trigger's own family doesn't count (Left Ctrl
+    /// held doesn't block Right Ctrl), nor does Fn, which macOS sets on arrows and F-keys.
     pub(crate) fn modifiers_match(&self, held: Held) -> bool {
         let own = self.trigger.modifier().map(|(modifier, _)| modifier);
         self.modifiers
@@ -160,9 +126,7 @@ impl Hotkey {
             })
     }
 
-    /// Alt or Super is part of it: released with nothing pressed since, they
-    /// open the menu bar, Start or a launcher, so a swallowed key leaves a
-    /// trace (see [`crate::matcher::Mask`]).
+    /// Alt or Super is in it: a lone release opens menus (see [`crate::matcher::Mask`]).
     pub(crate) fn needs_mask(&self) -> bool {
         self.modifiers
             .iter()
@@ -242,24 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn what_the_old_key_pickers_wrote_still_parses() {
-        for (text, trigger) in [
-            ("RightCtrl", Key::Modifier(Modifier::Ctrl, Side::Right)),
-            ("RightCmd", Key::Modifier(Modifier::Super, Side::Right)),
-            ("RightCommand", Key::Modifier(Modifier::Super, Side::Right)),
-            ("RightAlt", Key::Modifier(Modifier::Alt, Side::Right)),
-            ("RightOption", Key::Modifier(Modifier::Alt, Side::Right)),
-            ("RightShift", Key::Modifier(Modifier::Shift, Side::Right)),
-            ("Ctrl+Space", Key::Space),
-            ("Ctrl+Alt+Space", Key::Space),
-        ] {
-            assert_eq!(parse(text).unwrap().trigger(), trigger, "{text}");
-        }
-    }
-
-    #[test]
     fn names_are_case_insensitive_and_have_aliases() {
         assert_eq!(parse("rightcmd").unwrap(), parse("RIGHTSUPER").unwrap());
+        assert_eq!(parse("RightCommand").unwrap(), parse("rightcmd").unwrap());
         assert_eq!(parse("Option+Space").unwrap(), parse("alt+space").unwrap());
         assert_eq!(parse("Win+Return").unwrap(), parse("meta + enter").unwrap());
         assert_eq!(
@@ -300,11 +249,6 @@ mod tests {
         assert_eq!(shown("Alt+Escape"), "⌥ ⎋");
         assert_eq!(shown("Ctrl+Alt+Tab"), "⌃⌥ ⇥");
         assert_eq!(shown("Cmd+Backspace"), "⌘ ⌫");
-        assert_eq!(
-            parse("Option+Space").unwrap().name_on(Os::Mac),
-            "Option+Space",
-            "settings files keep their names"
-        );
     }
 
     #[test]

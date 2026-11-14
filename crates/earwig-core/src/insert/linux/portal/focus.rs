@@ -1,10 +1,6 @@
-//! Whether a terminal has keyboard focus, from the accessibility bus
-//! (AT-SPI). The portals tell clients nothing about the focused app, yet
-//! terminals paste with Ctrl+Shift+V where everything else uses Ctrl+V.
-//!
-//! VTE terminals (GNOME Console, GNOME Terminal, Ptyxis) report the
-//! `terminal` role. Terminals without accessibility support look like any
-//! other app and get Ctrl+V.
+//! Whether a terminal has keyboard focus, from the accessibility bus (AT-SPI):
+//! the portals don't say, yet terminals paste with Ctrl+Shift+V. VTE terminals
+//! report the `terminal` role; ones without accessibility get Ctrl+V.
 
 use std::time::Duration;
 
@@ -22,11 +18,9 @@ use futures_lite::{StreamExt as _, future};
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const ROOT: &str = "/org/a11y/atspi/accessible/root";
 
-/// Bounds for [`FocusWatch::current`]: a large or unresponsive app must not
-/// hold up the watch.
+/// Bounds for [`FocusWatch::current`]: a large app must not hold up the watch,
+/// and a busy bus (KDE right after login) can take seconds to answer.
 const SEARCH_LIMIT: usize = 2000;
-// Runs in the background at startup; a busy accessibility bus (KDE right
-// after login or a restart) can take several seconds to answer.
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Focus changes on the accessibility bus.
@@ -96,13 +90,10 @@ impl FocusWatch {
         None
     }
 
-    /// The accessible that has focus now. Focus events only report changes,
-    /// so without this a terminal focused before the watch started (say,
-    /// across a daemon restart) would get Ctrl+V until focus moves. Walks the
-    /// showing part of the active windows, at most [`SEARCH_LIMIT`]
-    /// accessibles and [`SEARCH_TIMEOUT`]. Qt reports focus on a widget and
-    /// on whatever forwards focus to it (Konsole's terminal sits in a
-    /// `filler` that does), so the deepest focused accessible wins.
+    /// The accessible focused now: focus events only report changes, so a
+    /// terminal focused before the watch started would otherwise get Ctrl+V.
+    /// Walks the showing part of the active windows; the deepest focused one
+    /// wins, as Qt also reports focus on what forwards it (Konsole's filler).
     pub(super) async fn current(&self) -> Option<Focused> {
         let search = async {
             let mut stack = Vec::new();

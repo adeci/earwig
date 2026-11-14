@@ -1,11 +1,6 @@
-//! Resumable, verified file downloads.
-//!
-//! Bytes go to `<file>.part` while they arrive and are hashed as they are
-//! written. A later attempt re-hashes the part and asks the server for the
-//! rest with `Range`; a server that answers with the whole file instead
-//! (200) restarts it. Only a file whose SHA-256 matches is renamed into
-//! place, so a path in the store is always a verified file. A cancelled
-//! download deletes its part.
+//! Resumable, verified downloads: bytes go to `<file>.part`, hashed as they
+//! are written, and a later attempt re-hashes the part and asks for the rest
+//! with `Range`. Only a file whose SHA-256 matches is renamed into place.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -37,10 +32,8 @@ pub(crate) fn part_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// Download `src` to `dest`. `progress(downloaded, total)` is called at most
-/// every 100 ms and once at the end; `total` is 0 while unknown.
-/// Failing keeps the part for the next call to resume; cancelling deletes
-/// it.
+/// Download `src` to `dest`. `progress(downloaded, total)` runs at most every
+/// 100 ms and once at the end; `total` is 0 while unknown.
 pub(crate) fn fetch(
     agent: &Agent,
     src: &Source<'_>,

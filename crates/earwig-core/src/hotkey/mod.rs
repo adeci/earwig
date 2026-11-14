@@ -1,19 +1,8 @@
-//! Where key presses come from.
-//!
-//! The daemon owns tap-or-hold timing ([`crate::session`]); a source only
-//! reports edges as [`Command::Press`] / [`Command::Release`] (or
-//! [`Command::Toggle`] when it cannot see releases).
-//!
-//! - keyboard: earwig watches [`HotkeyConfig::key`] itself on every OS
-//!   through [`earwig_keys`] (evdev on Linux, an event tap on macOS, a
-//!   keyboard hook on Windows), and records a new key for the settings
-//!   window ([`record`]).
-//! - socket: `earwig press|release|toggle|cancel`, on every OS. Always on;
-//!   lives in [`crate::ipc`]. Compositor binds drive it on Linux (niri
-//!   `press {}`/`release {}`, sway `bindsym --release`, Hyprland `bindr`).
-//! - Linux: the XDG GlobalShortcuts portal (GNOME 48+, KDE) where earwig
-//!   may not read the keyboards, or watches no key. `Activated`/
-//!   `Deactivated` map to press/release.
+//! Where key presses come from. A source only reports edges as
+//! [`Command::Press`]/[`Command::Release`] ([`Command::Toggle`] without
+//! releases); [`crate::session`] owns the timing. Sources: the keyboard
+//! through [`earwig_keys`], the control socket ([`crate::ipc`]), and on Linux
+//! the GlobalShortcuts portal.
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -179,9 +168,8 @@ fn portal_bound() -> bool {
     }
 }
 
-/// Record a hotkey for the settings window: from now on the keyboard goes to
-/// `sink` instead of the hotkey, until it reports [`Recorded::Done`] or
-/// [`Recorded::Cancelled`], or [`stop_recording`].
+/// Record a new hotkey for the settings window: keys go to `sink` instead,
+/// until it reports done or cancelled, or [`stop_recording`].
 pub fn record(sink: impl FnMut(Recorded) + Send + 'static) {
     KEYBOARD.record(sink);
 }

@@ -1,7 +1,5 @@
-//! macOS: a `CGEventTap` on the session's key events. Seeing keys needs
-//! Accessibility (which spares asking for Input Monitoring); until the user
-//! grants it the tap cannot be made, and [`run`] keeps trying. The tap only
-//! listens, unless the hotkey is a key with modifiers, which it swallows.
+//! macOS: a `CGEventTap` on the session's keys, which needs Accessibility; [`run`] keeps trying
+//! until it's granted. The tap only swallows a key-with-modifiers hotkey.
 
 use std::ffi::c_void;
 use std::io;
@@ -82,8 +80,7 @@ unsafe extern "C" {
     safe fn AXIsProcessTrusted() -> bool;
 }
 
-/// Stops the tap's run loop, so [`run`] makes the tap again for a changed
-/// hotkey, or ends.
+/// Stops the tap's run loop so [`run`] remakes the tap for a new hotkey, or ends.
 #[derive(Default)]
 pub(crate) struct Waker(Mutex<Option<RunLoop>>);
 
@@ -100,8 +97,7 @@ impl Waker {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
         {
-            // SAFETY: the run loop lives as long as its thread, which clears
-            // this before it ends.
+            // SAFETY: the run loop lives as long as its thread, which clears this first.
             unsafe { CFRunLoopStop(run_loop.0) };
         }
     }
@@ -134,8 +130,7 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
             .hotkey
             .as_ref()
             .is_some_and(|h| !h.is_modifier_only());
-        // Without Accessibility a listening tap would make macOS ask for
-        // Input Monitoring as well; ask for one permission only.
+        // Without Accessibility a tap would make macOS ask for Input Monitoring too; ask for one.
         if !can_see_keys() {
             shared.set_status(Status::NoAccess);
             thread::sleep(RETRY);
@@ -148,8 +143,7 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
             done: false,
         };
         let interest = (1 << KEY_DOWN) | (1 << KEY_UP) | (1 << FLAGS_CHANGED);
-        // SAFETY: `context` outlives the tap: the tap is invalidated before
-        // this iteration ends.
+        // SAFETY: `context` outlives the tap, which is invalidated before this iteration ends.
         let port = unsafe {
             CGEventTapCreate(
                 TAP_SESSION,
@@ -171,22 +165,15 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
             Blocking::PassThrough
         }));
         context.port = port;
-        // SAFETY: the port is valid until invalidated below; the source and
-        // run loop belong to this thread.
+        // SAFETY: the port is valid until invalidated below; source and run loop are this thread's.
         unsafe {
             let source = CFMachPortCreateRunLoopSource(std::ptr::null(), port, 0);
             let run_loop = CFRunLoopGetCurrent();
             CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
             shared.waker.set(Some(RunLoop(run_loop)));
             // A change before the run loop was known.
-            if shared.snapshot().stop
-                || shared
-                    .snapshot()
-                    .hotkey
-                    .as_ref()
-                    .is_some_and(|h| !h.is_modifier_only())
-                    != filters
-            {
+            let now = shared.snapshot();
+            if now.stop || now.hotkey.as_ref().is_some_and(|h| !h.is_modifier_only()) != filters {
                 CFRunLoopStop(run_loop);
             }
             CGEventTapEnable(port, true);
@@ -233,7 +220,7 @@ unsafe extern "C" fn callback(
     let Some((key, edge)) = edge(kind, code, flags, repeat) else {
         return event;
     };
-    let held = key.map_or_else(|| held(flags), |key| held(flags).without(key));
+    let held = held(flags).besides(key);
     let action = context.shared.edge(key, edge, held);
     if let Some(hotkey_event) = action.event
         && !(context.events)(hotkey_event)
@@ -285,8 +272,7 @@ const MODIFIERS: [(u16, Key, u64); 9] = [
     (63, Key::Modifier(Modifier::Fn, Side::Either), 0x80_0000),
 ];
 
-/// `kCGEventFlagMask*` of each modifier: events from some sources set only
-/// these, which then count as the left key.
+/// `kCGEventFlagMask*`: some sources set only these, which then count as the left key.
 const FAMILY_MASKS: [(Modifier, u64); 4] = [
     (Modifier::Ctrl, 0x4_0000),
     (Modifier::Alt, 0x8_0000),
@@ -392,14 +378,13 @@ mod tests {
     const C: u16 = 8;
     const SPACE: u16 = 49;
 
-    /// Feeds tap events through `edge`, `held` and a matcher, as the
-    /// callback does.
+    /// Runs tap events through `edge`, `held` and a matcher, like the callback.
     fn events(hotkey: &str, taps: &[(u32, u16, u64)]) -> Vec<Event> {
         let mut matcher = Matcher::new(hotkey.parse::<Hotkey>().unwrap());
         taps.iter()
             .filter_map(|&(kind, code, flags)| {
                 let (key, edge) = edge(kind, code, flags, false)?;
-                let held = key.map_or_else(|| held(flags), |key| held(flags).without(key));
+                let held = held(flags).besides(key);
                 matcher.edge(key, edge, held).event
             })
             .collect()

@@ -1,6 +1,5 @@
-# earwig.app around the cargo build: Info.plist (menu-bar app, microphone
-# usage text, bundle id io.github.adeci.earwig), the icon, an ad-hoc
-# signature over the whole bundle, and `bin/earwig` for the command line.
+# earwig.app around the cargo build: Info.plist, the icon, an ad-hoc signature over the whole
+# bundle, and `bin/earwig` for the command line.
 {
   lib,
   stdenvNoCC,

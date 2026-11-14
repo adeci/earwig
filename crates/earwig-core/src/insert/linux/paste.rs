@@ -1,13 +1,8 @@
 //! Insertion by clipboard and one paste chord (wlroots compositors, niri,
-//! Hyprland): the text becomes the clipboard selection through data-control,
-//! then a `zwp_virtual_keyboard_v1` presses Ctrl+V, or Ctrl+Shift+V when the
-//! activated toplevel is a terminal. Works for clients without text-input
-//! (Electron, XWayland, most terminals' default builds).
-//!
-//! The selection is served from earwig's own Wayland thread until another
-//! client replaces it, so the transcript stays on the clipboard after the
-//! paste. Requests reach the compositor in order on one connection, so the
-//! focused client sees the new selection before the chord; no delay is needed.
+//! Hyprland): the selection is set through data-control and served from
+//! earwig's own thread (so it outlives the paste), then a virtual keyboard
+//! presses Ctrl+V, or Ctrl+Shift+V in a terminal. Requests reach the
+//! compositor in order on one connection, so no delay is needed.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -47,9 +42,9 @@ use xkbcommon::xkb;
 use super::wayland::Worker;
 use super::{InsertError, Inserter, MIME_TYPES};
 use crate::events::InsertMethod;
+use crate::insert::is_terminal;
 
-/// App ids (compared ASCII case-insensitively) that paste with Ctrl+Shift+V.
-/// `[insert] terminals` adds to this list.
+/// App ids that paste with Ctrl+Shift+V, besides `[insert] terminals`.
 const TERMINALS: &[&str] = &[
     "Alacritty",
     "com.gexperts.Tilix",
@@ -122,9 +117,8 @@ pub struct PasteInserter {
 }
 
 impl PasteInserter {
-    /// Clipboard plus paste chord. Needs data-control and a virtual keyboard;
-    /// wlr foreign-toplevel, when offered, picks the terminal chord.
-    /// `terminals` are app ids added to [`TERMINALS`].
+    /// Clipboard plus paste chord (data-control and a virtual keyboard); wlr
+    /// foreign-toplevel, when offered, tells terminals apart.
     pub fn connect(terminals: &[String]) -> anyhow::Result<Self> {
         Self::spawn(Some(terminals.to_vec()))
     }
@@ -280,7 +274,7 @@ impl State {
         // Applies the selection and brings the activated toplevel up to date.
         queue.roundtrip(self).context("clipboard roundtrip")?;
         let app_id = self.activated_app_id();
-        let terminal = app_id.is_some_and(|app_id| is_terminal(app_id, &self.terminals));
+        let terminal = app_id.is_some_and(|app_id| is_terminal(app_id, TERMINALS, &self.terminals));
         log::debug!(
             "pasting into {app_id:?} with {}",
             if terminal { "Ctrl+Shift+V" } else { "Ctrl+V" }
@@ -299,14 +293,6 @@ impl State {
             .find(|toplevel| toplevel.current.activated)
             .map(|toplevel| toplevel.current.app_id.as_str())
     }
-}
-
-fn is_terminal(app_id: &str, extra: &[String]) -> bool {
-    TERMINALS
-        .iter()
-        .copied()
-        .chain(extra.iter().map(String::as_str))
-        .any(|terminal| terminal.eq_ignore_ascii_case(app_id))
 }
 
 /// Write `text` to a paste target's pipe off the Wayland thread, so a reader
@@ -648,16 +634,5 @@ mod tests {
             state.key_get_one_sym(xkb::Keycode::new(keys.v + 8)),
             xkb::Keysym::V
         );
-    }
-
-    #[test]
-    fn terminals_match_case_insensitively_and_include_configured_ones() {
-        let extra = ["my.Custom.Term".to_owned()];
-        assert!(is_terminal("foot", &[]));
-        assert!(is_terminal("alacritty", &[]));
-        assert!(is_terminal("XTerm", &[]));
-        assert!(!is_terminal("firefox", &[]));
-        assert!(!is_terminal("my.custom.term", &[]));
-        assert!(is_terminal("my.custom.term", &extra));
     }
 }

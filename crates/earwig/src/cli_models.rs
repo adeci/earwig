@@ -9,7 +9,7 @@ use earwig_core::config::ConfigStore;
 use earwig_core::events::Command;
 use earwig_core::models::{CancelToken, DownloadProgress, ModelManager, ModelSpec};
 
-use crate::human_size;
+use crate::{configured_model, human_size};
 
 #[derive(Subcommand)]
 pub enum ModelsCmd {
@@ -53,26 +53,14 @@ pub fn run(cmd: ModelsCmd) -> anyhow::Result<()> {
     }
 }
 
-/// Whether the bundled engine loads a GGUF architecture.
 fn engine_supports(arch: &str) -> bool {
     use earwig_core::engine::EngineFactory as _;
     earwig_transcribe::TranscribeEngine::new().supports_architecture(arch)
 }
 
-fn configured(manager: &ModelManager) -> anyhow::Result<ModelSpec> {
-    let store = ConfigStore::load()?;
-    Ok(store
-        .config()
-        .model
-        .model
-        .clone()
-        .unwrap_or_else(|| ModelSpec::Curated {
-            id: manager.default_model().id.clone(),
-        }))
-}
-
 fn list(manager: &ModelManager) -> anyhow::Result<()> {
-    let current = configured(manager)?;
+    let store = ConfigStore::load()?;
+    let current = configured_model(manager, &store.config().model);
     let installed = manager.installed();
     let mark = |spec: &ModelSpec| if *spec == current { '*' } else { ' ' };
 
@@ -119,10 +107,7 @@ fn list(manager: &ModelManager) -> anyhow::Result<()> {
             println!("* {current}  ({state})");
         }
     }
-    println!(
-        "\n* = model.model in {}",
-        ConfigStore::load()?.paths().user.display()
-    );
+    println!("\n* = model.model in {}", store.paths().user.display());
     Ok(())
 }
 
@@ -168,8 +153,7 @@ fn search(manager: &ModelManager, query: &str) -> anyhow::Result<()> {
 }
 
 fn download(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
-    // Ctrl-C stops at once and leaves the partial file to resume from;
-    // cancelling the download would delete it.
+    // Exit without cancelling: that would delete the partial file we can resume from.
     ctrlc::set_handler(|| {
         eprintln!("\ninterrupted; run the same command to resume");
         std::process::exit(130);
@@ -177,17 +161,10 @@ fn download(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
     .context("installing the Ctrl-C handler")?;
 
     let mut line = ProgressLine::new();
-    match manager.download(spec, &mut |p| line.update(&p), &CancelToken::default()) {
-        Ok(path) => {
-            line.finish();
-            println!("{}", path.display());
-            Ok(())
-        }
-        Err(e) => {
-            line.finish();
-            Err(e.into())
-        }
-    }
+    let path = manager.download(spec, &mut |p| line.update(&p), &CancelToken::default());
+    line.finish();
+    println!("{}", path?.display());
+    Ok(())
 }
 
 fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
@@ -220,7 +197,7 @@ fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
         println!("model.model unset in {user}: the default, {spec}, is used");
     }
     if manager.resolve(spec).is_ok() {
-        // A running daemon switches now; without one there is nothing to do.
+        // A running daemon switches now.
         if let Err(e) = crate::daemon::send(&Command::ReloadConfig) {
             log::debug!("daemon not told to reload: {e}");
         }
@@ -232,8 +209,7 @@ fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One self-overwriting progress line on a terminal, a line per 10%
-/// otherwise (logs, CI).
+/// Redraws one line on a terminal, else prints a line per 10% (logs, CI).
 struct ProgressLine {
     tty: bool,
     start: Instant,

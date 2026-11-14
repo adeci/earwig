@@ -1,14 +1,7 @@
-//! Insertion through the XDG RemoteDesktop (version 2) and Clipboard portals
-//! and libei (GNOME, KDE): the text is set as the clipboard through the
-//! portal, then one paste chord goes out over libei.
-//!
-//! One session is opened at daemon start; the user approves it once and the
-//! restore token in `<state_dir>/remote-desktop.token` brings it back without
-//! a dialog. Every portal step before the dialog is time bounded, so a backend
-//! that is advertised but cannot work fails fast instead of blocking.
-//!
-//! The portal and libei live on a dedicated thread with its own executor,
-//! which also answers clipboard transfers and EIS pings between dictations.
+//! Insertion through the RemoteDesktop (v2) and Clipboard portals plus libei
+//! (GNOME, KDE): the clipboard is set through the portal, then one paste chord
+//! goes out over libei. The session is approved once; the restore token in
+//! `<state_dir>/remote-desktop.token` brings it back without a dialog.
 
 use std::cell::Cell;
 use std::fs;
@@ -79,12 +72,9 @@ pub(crate) async fn bounded<T>(
     .with_context(|| what.to_owned())
 }
 
-/// Tell xdg-desktop-portal which app this process is. Since 1.21 host apps
-/// without an app id are refused by GlobalShortcuts, and GNOME keys
-/// RemoteDesktop restore data by it.
-///
-/// It has to be the first portal call on the process-wide D-Bus connection
-/// and may happen only once, so every portal user calls this first.
+/// Tell xdg-desktop-portal which app this is (1.21+ refuses GlobalShortcuts
+/// to host apps without an id; GNOME keys restore data by it). It must be the
+/// first portal call on the process's D-Bus connection, and happen once.
 pub(crate) fn register_app_id() {
     static REGISTERED: LazyLock<()> = LazyLock::new(|| {
         let result = async_io::block_on(bounded(SETUP_TIMEOUT, "portal registry", async {
@@ -365,8 +355,8 @@ impl Worker {
         }
         match started.restore_token() {
             Some(token) => {
-                if let Err(e) = save_token(token_file, token) {
-                    log::warn!("saving {}: {e:#}", token_file.display());
+                if let Err(e) = crate::paths::write_atomic(token_file, token.as_bytes()) {
+                    log::warn!("saving {}: {e}", token_file.display());
                 }
             }
             None => log::debug!("the portal returned no restore token"),
@@ -582,11 +572,10 @@ impl Worker {
             return Ok(());
         }
         self.selection = Some(text);
-        // The portal may answer before the compositor has made the selection
-        // current (xdg-desktop-portal-kde hands it to KWin over data-control
-        // without a roundtrip), and a paste chord sent then pastes the
-        // previous clipboard. Wait until the portal reports this session as
-        // the owner; subscribe first, as the signal can precede the reply.
+        // The portal may answer before the compositor made the selection
+        // current (KDE's hands it to KWin without a roundtrip), and a chord
+        // then pastes the old clipboard: wait until this session owns it,
+        // subscribing first as the signal can precede the reply.
         let owner_changes = portal
             .clipboard
             .receive_selection_owner_changed::<RemoteDesktop>()
@@ -694,14 +683,6 @@ async fn next_or_pending<S: Stream + Unpin>(stream: &mut Option<S>) -> Option<S:
         Some(stream) => stream.next().await,
         None => future::pending().await,
     }
-}
-
-fn save_token(path: &Path, token: &str) -> anyhow::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    fs::write(path, token)?;
-    Ok(())
 }
 
 /// libei timestamps: CLOCK_MONOTONIC in microseconds.

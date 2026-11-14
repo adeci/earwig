@@ -1,12 +1,6 @@
-//! XDG GlobalShortcuts portal (any desktop whose portal backend implements
-//! it, e.g. GNOME 48+, KDE).
-//!
-//! Binds two shortcuts: `dictate` (preferred trigger from
-//! [`HotkeyConfig::portal_trigger`](crate::config::HotkeyConfig)) and
-//! `cancel` (no default; the user picks one in the desktop's settings).
-//! The desktop asks the user to confirm the bindings once and remembers them
-//! per app id, which is why [`register_app_id`] runs first. When the portal
-//! does not work, [`HotkeySource::run`] logs at info and returns `Ok`.
+//! The XDG GlobalShortcuts portal (GNOME 48+, KDE): `dictate`, suggesting
+//! [`HotkeyConfig::portal_trigger`](crate::config::HotkeyConfig), and `cancel`.
+//! Desktops remember the bindings per app id, hence [`register_app_id`] first.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -43,19 +37,15 @@ impl PortalShortcuts {
     }
 
     async fn serve(self, commands: flume::Sender<Command>) -> anyhow::Result<()> {
-        // A portal can be advertised by a backend that cannot work on this
-        // compositor (xdg-desktop-portal-gnome outside GNOME); setup then
-        // fails or never answers. Give up quietly: compositor binds and the
-        // socket still work.
+        // A backend may advertise a portal it can't serve here (the GNOME one
+        // outside GNOME); give up quietly, compositor binds and the socket work.
         let setup = bounded(SETUP_TIMEOUT, "GlobalShortcuts session setup", async {
             let portal = GlobalShortcuts::new().await?;
             let session = portal
                 .create_session(ashpd::desktop::CreateSessionOptions::default())
                 .await?;
-            // Subscribe before binding so no activation is missed. Signals
-            // reach only the connection that owns the session, and this
-            // process has one GlobalShortcuts session, so they need no
-            // filtering.
+            // Subscribe before binding so no activation is missed. Signals only
+            // reach this connection, and this is its one session: no filtering.
             let activated = portal.receive_activated().await?;
             let deactivated = portal.receive_deactivated().await?;
             Ok((portal, session, activated, deactivated))

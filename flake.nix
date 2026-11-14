@@ -8,6 +8,12 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # mkEffect for the release effect (herculesCI below).
+    nixbot = {
+      url = "github:Mic92/nixbot";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.treefmt-nix.follows = "treefmt-nix";
+    };
   };
 
   outputs =
@@ -16,6 +22,7 @@
       nixpkgs,
       crane,
       treefmt-nix,
+      nixbot,
     }:
     let
       inherit (nixpkgs) lib;
@@ -106,5 +113,26 @@
           vm-gnome = vmTest ./nix/tests/gnome.nix;
         }
       );
+
+      # nixbot's effects: a pushed v* tag gets its GitHub release once its commit built green.
+      # Branches get none (`runIf false` would still build its inputs on every push), so their
+      # builds stay the checks above.
+      herculesCI =
+        { primaryRepo, ... }:
+        {
+          onPush.default.outputs.effects =
+            lib.optionalAttrs (primaryRepo.tag != null && lib.hasPrefix "v" primaryRepo.tag)
+              {
+                release =
+                  let
+                    # Effects run on the nixbot host.
+                    pkgs = nixpkgs.legacyPackages.x86_64-linux;
+                  in
+                  pkgs.callPackage ./nix/release.nix {
+                    inherit (nixbot.lib.effects { inherit pkgs; }) mkEffect;
+                    inherit primaryRepo;
+                  };
+              };
+        };
     };
 }

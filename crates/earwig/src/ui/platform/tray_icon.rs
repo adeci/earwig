@@ -1,7 +1,4 @@
-//! The tray icon through `tray-icon`: the notification area on Windows, the
-//! menu bar on macOS.
-//! It lives on the main thread, inside GPUI's run loop, which also pumps its
-//! messages; clicks go straight to the daemon or the UI's channel.
+//! The `tray-icon` tray (Windows, macOS), living on the main thread in GPUI's run loop.
 
 use earwig_core::controller::Handle;
 use earwig_core::events::{Command, DictationState};
@@ -12,10 +9,8 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
 
 use crate::ui::{Local, icon};
 
-/// Pixels of the icon handed to the OS, which scales it to the tray.
 const ICON_SIZE: u32 = if cfg!(target_os = "macos") { 36 } else { 32 };
 
-/// Updates the tray from the UI thread.
 pub(crate) struct TrayHandle {
     tray: TrayIcon,
     toggle: MenuItem,
@@ -33,8 +28,7 @@ impl TrayHandle {
         } else {
             (&self.busy, "Stop dictation", "earwig: finishing")
         };
-        // On macOS the idle icon is a template, drawn in the menu bar's own
-        // colour; the dictating one stays red.
+        // On macOS the idle icon is a template the menu bar tints; dictating stays red.
         #[cfg(target_os = "macos")]
         let set = if idle {
             self.tray.set_icon_templated(Some(icon.clone()))
@@ -51,8 +45,7 @@ impl TrayHandle {
     }
 }
 
-/// Start the tray; `None` (logged) when the OS has none. Call from inside the
-/// GPUI application, on the main thread.
+/// `None` (logged) if the OS has no tray. Call inside the GPUI app, on the main thread.
 pub(crate) fn spawn(handle: Handle, local: flume::Sender<Local>) -> Option<TrayHandle> {
     match build(handle, local) {
         Ok(tray) => Some(tray),
@@ -88,8 +81,7 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
             handle.send(Command::Quit);
         }
     }));
-    // On Windows a left click opens the settings, as on Linux, and the menu
-    // is on the right button; a macOS status item opens its menu.
+    // Windows: a left click opens settings (as on Linux), the menu is on the right button.
     #[cfg(windows)]
     TrayIconEvent::set_event_handler(Some(move |event| {
         if let TrayIconEvent::Click {

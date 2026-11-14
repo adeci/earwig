@@ -1,11 +1,6 @@
-//! Microphone capture as 16 kHz mono `f32`. The capture callback only
-//! downmixes; a worker thread analyses the raw input for the overlay (see
-//! [`crate::spectrum`]), resamples, keeps the pre-roll, and reopens a failed
-//! input until it works again.
-//!
-//! Each OS module lists the microphones and opens one, behind
-//! `input_devices(configured)` and `open(device, tx)`: Linux the sound
-//! server's sources, macOS and Windows cpal's devices.
+//! Microphone capture as 16 kHz mono `f32`. The callback only downmixes; a
+//! worker analyses the raw input for the overlay ([`crate::spectrum`]),
+//! resamples, keeps the pre-roll, and reopens a failed input.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -36,8 +31,7 @@ use crate::SAMPLE_RATE;
 use crate::config::AudioConfig;
 use crate::spectrum::{Analyzer, Feed, Spectrum};
 
-/// Starts every [`AudioEvent::Error`], so the microphone's failures stand
-/// out among the daemon's [`crate::events::Event::Error`]s.
+/// Starts every [`AudioEvent::Error`], setting mic failures apart from others.
 pub const MIC_ERROR_PREFIX: &str = "microphone: ";
 
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
@@ -55,7 +49,6 @@ pub struct InputDevice {
     pub name: String,
 }
 
-/// The microphones there are now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InputDevices {
     pub devices: Vec<InputDevice>,
@@ -64,10 +57,8 @@ pub struct InputDevices {
     pub default: Option<InputDevice>,
 }
 
-/// The microphones there are now. `configured`, the current
-/// `[audio] device`, is among them under its own name when it is an older
-/// kind of name that still opens (an ALSA PCM name on Linux), so settings
-/// can show it without calling it missing.
+/// The microphones there are now, plus `configured` under its own name when
+/// it is an older kind of name that still opens (an ALSA PCM on Linux).
 pub fn input_devices(configured: Option<&str>) -> anyhow::Result<InputDevices> {
     os::input_devices(configured)
 }
@@ -106,6 +97,13 @@ fn cpal_input(
     };
     let id = id(&device).unwrap_or_else(|| "unknown".into());
     Ok((device, id))
+}
+
+/// cpal's id for `device`: an ALSA PCM name on Linux, a Core Audio UID on
+/// macOS.
+#[cfg(not(windows))]
+fn cpal_id(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.id().to_owned())
 }
 
 /// Read a WAV file as 16 kHz mono `f32`, whatever its rate, channel count or
@@ -281,9 +279,8 @@ struct Worker {
     failing: bool,
     preroll: VecDeque<f32>,
     recording: Option<Recording>,
-    /// Hears everything the input delivers, recording or not, so it knows
-    /// the noise floor before the first word; made afresh for each new
-    /// input, and for each recording of a clip.
+    /// Hears all input, recording or not, to know the noise floor before the
+    /// first word; fresh for each new input, and each recording of a clip.
     analyzer: Option<Analyzer>,
 }
 
@@ -467,9 +464,8 @@ impl Worker {
         }
     }
 
-    /// Feed `pcm`, audio at `rate` just heard, to the analyzer, which learns
-    /// the noise floor from all of it; while recording, levels go to the
-    /// controller and the spectrum to the overlay.
+    /// The analyzer learns the noise floor from all input; while recording,
+    /// levels go to the controller and the spectrum to the overlay.
     fn analyze(&mut self, rate: u32, pcm: &[f32]) {
         let analyzer = self.analyzer.get_or_insert_with(|| Analyzer::new(rate));
         let recording = self.recording.as_ref().map(|r| r.id);
@@ -545,10 +541,8 @@ fn open_cpal(
     let channels = usize::from(supported.channels());
     let rate = supported.sample_rate();
     let config = supported.config();
-    // The device's own period, never a fixed one: cpal rings only two
-    // periods, and when PipeWire's graph runs another quantum (512 frames
-    // against 480 asked for) the difference is lost every cycle, chopping
-    // the voice the engine hears.
+    // The device's own period, never a fixed one: cpal rings only two periods,
+    // so one off PipeWire's quantum (480 vs 512) chops the voice every cycle.
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => build::<f32>(device, config, channels, tx),
         cpal::SampleFormat::F64 => build::<f64>(device, config, channels, tx),

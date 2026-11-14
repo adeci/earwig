@@ -1,20 +1,14 @@
-//! Recording a hotkey: the user presses what they want.
-//!
-//! - A key with modifiers held is recorded as it goes down, the modifiers
-//!   on either side: Left Ctrl and Space make `Ctrl+Space`.
-//! - Modifiers alone are recorded when the first of them is let go, the
-//!   last one pressed on its own side: Right Ctrl makes `RightCtrl`.
-//! - Escape alone cancels.
+//! Recording a hotkey. A key records as it goes down, with its modifiers on either side (Left Ctrl
+//! and Space make `Ctrl+Space`); modifiers alone record when one is let go, the last keeping its
+//! side (`RightCtrl`). Escape alone cancels.
 
 use crate::hotkey::Hotkey;
 use crate::key::{Held, Key, Modifier, Os, Side};
 use crate::matcher::Edge;
 
-/// What a recording has come to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Recorded {
-    /// Modifiers are held: as a window shows them, with a key yet to come
-    /// (`Ctrl+…`, `⌃ …`); letting go records them alone.
+    /// Only modifiers held so far, as windows show them (`Ctrl+…`); letting go records them.
     Holding(String),
     /// The user's hotkey. It may still fail [`Hotkey::check`].
     Done(Hotkey),
@@ -29,8 +23,7 @@ pub(crate) struct Recorder {
 }
 
 impl Recorder {
-    /// One edge of `key` (`None`: a key earwig has no name for, which it
-    /// skips); `held` is the modifier keys down besides it.
+    /// Keys earwig can't name (`None`) are skipped; `held` is the other modifiers down.
     pub(crate) fn edge(&mut self, key: Option<Key>, edge: Edge, held: Held) -> Option<Recorded> {
         let key = key?;
         match (key.modifier(), edge) {
@@ -60,8 +53,7 @@ impl Recorder {
         }
     }
 
-    /// The modifiers pressed so far as a hotkey: the last one, with the
-    /// others on either side.
+    /// The last modifier pressed, with the others on either side.
     fn hotkey(&self) -> Option<Hotkey> {
         let (&trigger, others) = self.pressed.split_last()?;
         let modifiers = others

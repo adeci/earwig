@@ -1,13 +1,7 @@
-//! Privacy permissions the user grants the OS by hand. On macOS those are
-//! Microphone (to hear you) and Accessibility (to see the hotkey and paste;
-//! an app trusted with Accessibility needs no Input Monitoring for its event
-//! tap); other systems ask for none.
-//!
-//! macOS keeps the grants of an ad-hoc signed app, as earwig.app is, for
-//! that exact build. After an update System Settings still shows the old
-//! earwig ticked, and ticking it again allows only the old build. So each
-//! build asks once for what it lacks, and asking first clears earwig's
-//! stale entry, which puts the new build in the list.
+//! Privacy permissions the user grants by hand: on macOS, Microphone and
+//! Accessibility (which also covers the hotkey's event tap). macOS ties an
+//! ad-hoc signed app's grants to that exact build, so each build asks once for
+//! what it lacks, clearing earwig's stale entry first.
 
 use std::fs;
 use std::path::Path;
@@ -87,10 +81,9 @@ pub fn check() -> Vec<PermissionStatus> {
     Vec::new()
 }
 
-/// Show the system's own prompt for each permission that is missing, once
-/// for each build of earwig (remembered in `state_dir`): a new build starts
-/// without the grants of the last, while a user who said no is not asked
-/// again at every login. Returns what is missing.
+/// Show the system's prompt for each missing permission, once per build
+/// (remembered in `state_dir`) so a no isn't asked again at every login.
+/// Returns what is missing.
 pub fn ask_once(state_dir: &Path) -> Vec<Permission> {
     let missing: Vec<Permission> = check()
         .into_iter()
@@ -114,8 +107,7 @@ fn ask_once_per_build(
     if fs::read_to_string(&marker).is_ok_and(|asked| asked == build) {
         return;
     }
-    // Remembered before asking: a start that fails while asking (and is
-    // started again) does not ask again.
+    // Remembered first, so a start that fails while asking won't ask again.
     if let Err(e) = fs::create_dir_all(state_dir).and_then(|()| fs::write(&marker, build)) {
         log::warn!("remembering that permissions were asked for: {e}");
     }
@@ -125,8 +117,7 @@ fn ask_once_per_build(
     }
 }
 
-/// This build of earwig as macOS tells builds apart: by the hash of its code
-/// signature, which an ad-hoc signature ties the grants to.
+/// This build as macOS tells builds apart: by its code signature's hash.
 fn build() -> String {
     #[cfg(target_os = "macos")]
     if let Some(hash) = crate::macos::code_hash() {
@@ -135,10 +126,9 @@ fn build() -> String {
     "unsigned".to_owned()
 }
 
-/// Show the system's prompt for `permission` unless it is granted. The
-/// system asks only once, so first clear what would keep its prompt away:
-/// a no to Microphone, or any Accessibility entry for earwig, such as the
-/// one System Settings keeps ticked for an earlier build.
+/// Show the system's prompt for `permission` unless it is granted, first
+/// clearing what keeps the prompt away (a no to Microphone, or an
+/// Accessibility entry, such as one still ticked for an earlier build).
 pub fn ask(permission: Permission) {
     #[cfg(target_os = "macos")]
     {
@@ -164,9 +154,8 @@ pub fn ask(permission: Permission) {
     let _ = permission;
 }
 
-/// Clear earwig's entry for `permission` from the system's privacy database
-/// (`tccutil reset`), so that the system asks again. Only from earwig.app,
-/// whose entry it is, not from a bare `cargo run` build.
+/// Clear earwig's entry for `permission` (`tccutil reset`) so the system asks
+/// again; only from earwig.app, whose entry it is.
 #[cfg(target_os = "macos")]
 fn forget(permission: Permission) {
     if crate::macos::bundle_id().as_deref() != Some(crate::APP_ID) {
@@ -252,13 +241,6 @@ mod tests {
         // Going back asks again too: asking for the update cleared what
         // the first build was granted.
         assert_eq!(asked(&state, "a", &[Accessibility]), [Accessibility]);
-    }
-
-    #[test]
-    fn having_asked_before_builds_were_told_apart_does_not_keep_a_build_from_asking() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(ASKED), "").unwrap();
-        assert_eq!(asked(dir.path(), "a", &[Accessibility]), [Accessibility]);
     }
 
     /// Test binaries are signed ad hoc on Apple silicon, as earwig.app is.

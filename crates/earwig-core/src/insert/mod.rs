@@ -1,14 +1,6 @@
-//! Getting the final text into whatever has keyboard focus, in one step.
-//!
-//! Each OS module provides `backends(config, caps)`: the inserters for this
-//! session, best first, which [`auto`] chains. Linux has three (see
-//! `linux/mod.rs`), macOS pastes (`macos.rs`); Windows has none yet, so the
-//! daemon keeps every dictation in history and says no insertion method
-//! exists.
-//!
-//! [`Inserter::insert`] returns [`InsertError::NotApplicable`] when a backend
-//! cannot handle the current focus, so the chain moves on; any other error is
-//! a real failure.
+//! Getting the final text into whatever has keyboard focus, in one step. Each
+//! OS module's `backends` are chained best first: one that can't serve the
+//! focus says [`InsertError::NotApplicable`] and the next one tries.
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
@@ -35,24 +27,21 @@ pub trait Inserter: Send {
     /// Deliver `text` to the focused application.
     fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError>;
 
-    /// Put `text` on the clipboard only. Used when insertion failed so the
-    /// user can paste by hand.
+    /// Put `text` on the clipboard only, to paste by hand when insertion failed.
     fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError>;
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum InsertError {
-    /// This backend cannot serve the current focus (no active text field, no
-    /// protocol). Try the next one.
+    /// This backend cannot serve the current focus; try the next one.
     #[error("not applicable: {0}")]
     NotApplicable(String),
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
 }
 
-/// The inserter for this session: the configured method, or for `auto` every
-/// usable backend best first. A configured method that cannot connect is an
-/// error, and so is an OS without any.
+/// The configured method, or for `auto` every usable backend best first. A
+/// configured method that cannot connect is an error.
 pub fn auto(config: &InsertConfig, caps: &DesktopCaps) -> anyhow::Result<Box<dyn Inserter>> {
     let chain = Chain {
         backends: os::backends(config, caps)?,
@@ -118,6 +107,17 @@ fn reasons(skipped: &[String], none: &str) -> String {
     } else {
         skipped.join("; ")
     }
+}
+
+/// Whether `app` is one of `builtin` or `extra` (terminals pasting with
+/// Ctrl+Shift+V), ignoring ASCII case.
+#[cfg(not(target_os = "macos"))]
+fn is_terminal(app: &str, builtin: &[&str], extra: &[String]) -> bool {
+    builtin
+        .iter()
+        .copied()
+        .chain(extra.iter().map(String::as_str))
+        .any(|terminal| terminal.eq_ignore_ascii_case(app))
 }
 
 #[cfg(test)]
@@ -244,5 +244,15 @@ mod tests {
             chain.copy_to_clipboard("x"),
             Err(InsertError::Failed(_))
         ));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn terminals_match_case_insensitively_and_include_configured_ones() {
+        let extra = ["my.Custom.Term".to_owned()];
+        assert!(is_terminal("XTerm", &["foot", "xterm"], &[]));
+        assert!(!is_terminal("firefox", &["foot", "xterm"], &[]));
+        assert!(!is_terminal("my.custom.term", &["foot"], &[]));
+        assert!(is_terminal("my.custom.term", &["foot"], &extra));
     }
 }

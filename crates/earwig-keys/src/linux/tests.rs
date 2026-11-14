@@ -1,8 +1,7 @@
 use super::evdev::{EV_KEY, EV_MSC, InputEvent};
-use super::{codes, passed_on, swallows};
+use super::{codes, passed_on, swallows, trigger_codes};
 use crate::matcher::Mask;
 
-const KEY_SPACE: u16 = 57;
 const KEY_LEFTMETA: u16 = 125;
 
 fn scan(code: i32) -> InputEvent {
@@ -66,5 +65,5 @@ fn only_keys_with_modifiers_and_masked_modifiers_take_a_grab() {
     assert!(swallows(&"Super+Space".parse().unwrap()));
     assert!(swallows(&"RightAlt".parse().unwrap()), "masked");
     assert!(!swallows(&"RightCtrl".parse().unwrap()));
-    assert_eq!(codes::key(KEY_SPACE), Some(crate::Key::Space));
+    assert_eq!(trigger_codes(&"Alt".parse().unwrap()), [56, 100]);
 }

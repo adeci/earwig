@@ -1,5 +1,4 @@
-//! Small helpers for the Win32 calls of [`crate::ipc`], [`crate::hooks`]
-//! and [`crate::insert`].
+//! Small helpers for the Win32 calls.
 
 use std::ffi::OsStr;
 use std::io;

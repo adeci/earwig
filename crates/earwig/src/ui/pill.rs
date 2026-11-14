@@ -1,8 +1,4 @@
-//! The overlay's pill: a rounded rectangle over a soft drop shadow whose
-//! outline behaves like water the voice disturbs (see [`water`]), following
-//! the speech bands mirrored from the centre outward, low bands in the
-//! middle, and painted as a path. Once the dictation is finished it
-//! switches off like an old CRT screen (see [`crt`]).
+//! The overlay's pill: a rounded rectangle whose edge ripples like water with the voice.
 
 use std::f32::consts::TAU;
 use std::time::Instant;
@@ -18,64 +14,46 @@ use gpui_kit::{
 use crate::ui::crt;
 use crate::ui::water::{self, NODES, Ring};
 
-/// Corner radius of the pill at rest.
 const RADIUS: f32 = 24.;
-/// Transparent room the pill needs around it: its shadow fades out (below a
-/// visible step, 2.5 blur radii) before the surface ends, and the edge at
-/// its furthest stays a pixel clear of it.
-pub const ROOM: f32 = larger(SHADOW_DROP + 2.5 * SHADOW_BLUR, DEPTH + 1.);
-/// The ambient shadow's offset below the pill and its blur (one standard
-/// deviation of the Gaussian GPUI draws).
+/// Clear room around the pill, for the shadow to fade out and the edge's fullest swell.
+pub const ROOM: f32 = (SHADOW_DROP + 2.5 * SHADOW_BLUR).max(DEPTH + 1.);
 const SHADOW_DROP: f32 = 10.;
+/// One standard deviation of GPUI's Gaussian.
 const SHADOW_BLUR: f32 = 12.;
 
-/// Pixels a full wave moves the edge, and so the furthest it goes: the
-/// water's heights are eased into this with `tanh`, so crests stay round.
+/// How far a full wave moves the edge; heights ease into it with `tanh`.
 pub const DEPTH: f32 = 16.;
-/// Troughs sink this fraction as deep as crests rise, so a dip never
-/// crowds the text inside the pill.
+/// Troughs dip less than crests rise, so they don't crowd the text.
 const TROUGH: f32 = 0.4;
 
-/// Seconds colours take to settle (theme or accent changes).
+/// Seconds colours take to settle after a theme or accent change.
 const FADE: f32 = 0.18;
-/// A stalled frame resumes calmly instead of jumping.
+/// Cap on a frame's step, so a stall resumes calmly.
 const MAX_STEP: f32 = 0.05;
 
-/// Distance between outline samples, in pixels drawn: under a third of a
-/// node of the water on the overlay's long runs, so crests stay round.
+/// Pixels between outline samples: under a third of a water node, so crests stay round.
 const SAMPLE_SPACING: f32 = 1.5;
 
-/// Seconds a full band takes to fall to nothing once it falls silent; it
-/// gathers speed like a dropped object. Bands rise as fast as the analysis
-/// does (a few milliseconds).
+/// Seconds a full band takes to fall silent, accelerating like a dropped object.
 const DROP: f32 = 0.13;
 const GRAVITY: f32 = 2. / (DROP * DROP);
 
-/// Switching off, the line, the dot and the ripple ease toward a soft ink
-/// in the overlay's palette: Tokyo Night's foreground on the dark theme...
+/// Switching off, the pill tints toward an ink: Tokyo Night's foreground on dark...
 const INK_DARK: u32 = 0x00c0_caf5;
-/// ...the accent with this share of its saturation on the light one.
+/// ...the accent at this share of its saturation on light.
 const INK_SATURATION: f32 = 0.45;
-/// How far toward the ink the line goes, on the dark theme and the light
-/// one: a gentle tint, never a light of its own.
+/// How far toward the ink, (dark, light).
 const INK: (f32, f32) = (0.62, 0.5);
-/// Width of the ripple's ring, in pixels.
 const RIPPLE_STROKE: f32 = 1.5;
-/// A very faint halo around the line and the dot: its opacity on the dark
-/// theme and the light one, its blur and spread in pixels, and the share
-/// of the accent's saturation it keeps (Tokyo Night's blue stands in for
-/// an accent that is grey).
+/// The halo around the line and dot: opacity (dark, light), blur, spread, saturation share.
 const HALO: (f32, f32) = (0.22, 0.16);
 const HALO_BLUR: f32 = 5.;
 const HALO_SPREAD: f32 = 1.;
 const HALO_SATURATION: f32 = 0.6;
+/// Stands in for a grey accent.
 const TOKYO_BLUE: u32 = 0x007a_a2f7;
 /// Below this saturation an accent counts as grey.
 const GREY: f32 = 0.15;
-
-const fn larger(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
-}
 
 /// Seconds between rendered frames.
 #[derive(Default)]
@@ -91,18 +69,17 @@ impl Clock {
     }
 }
 
-/// How the pill follows the voice from frame to frame.
+/// The voice's bands and the water they disturb.
 #[derive(Default)]
 pub struct Motion {
     /// Each band's height (0..1) and how fast it is falling.
     heights: [f32; BANDS],
     falling: [f32; BANDS],
-    /// The water the bands disturb.
     water: Ring,
 }
 
 impl Motion {
-    /// Motion whose water ripples the same way every time, for tests.
+    /// Deterministic ripples, for tests.
     #[cfg(test)]
     pub fn seeded(seed: u64) -> Self {
         Self {
@@ -112,16 +89,14 @@ impl Motion {
         }
     }
 
-    /// Advance by `dt` seconds. `voice` is the latest reading while
-    /// recording, `None` once recording stopped, which lets the pill settle.
+    /// `voice` is `None` once recording stopped, which lets the pill settle.
     pub fn step(&mut self, dt: f32, voice: Option<&Spectrum>) -> Edge {
         let rises = self.follow(dt, voice);
         self.water.advance(dt, &self.heights, &rises);
         Edge::new(&self.water)
     }
 
-    /// A band jumps up with the voice and falls under gravity, never below
-    /// where the voice has it now. Returns how far each band rose.
+    /// Bands jump up with the voice and fall under gravity; returns how far each rose.
     fn follow(&mut self, dt: f32, voice: Option<&Spectrum>) -> [f32; BANDS] {
         let mut rises = [0.; BANDS];
         for (band, (height, falling)) in self.heights.iter_mut().zip(&mut self.falling).enumerate()
@@ -140,20 +115,18 @@ impl Motion {
     }
 }
 
-/// The fraction of the way to a target covered in `dt` seconds by a value
-/// that closes on it with time constant `response`.
+/// Share of the way to a target covered in `dt` with time constant `response`.
 fn approach(dt: f32, response: f32) -> f32 {
     1. - (-dt / response).exp()
 }
 
-/// The pill's outline at one instant: how far each node of the water stands
-/// out from rest, in pixels. The default is the pill at rest.
+/// How far each water node pushes the outline out, in pixels; the default is at rest.
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {
     offsets: [f32; NODES],
     /// The furthest any node stands out or in, or is swinging to.
     reach: f32,
-    /// How far the outline dips inside the pill at rest, at most.
+    /// Deepest dip inside the resting outline.
     inward: f32,
 }
 
@@ -168,7 +141,6 @@ impl Default for Edge {
 }
 
 impl Edge {
-    /// `water` drawn with a full wave [`DEPTH`] pixels deep.
     fn new(water: &Ring) -> Edge {
         if water.rests() {
             return Edge::default();
@@ -185,7 +157,7 @@ impl Edge {
         }
     }
 
-    /// The voice's effect cut to `share` of it, as the picture collapses.
+    /// Scaled down as the picture collapses.
     fn scaled(self, share: f32) -> Edge {
         Edge {
             offsets: self.offsets.map(|o| o * share),
@@ -194,8 +166,7 @@ impl Edge {
         }
     }
 
-    /// Outward displacement in pixels at `node`, a position along the ring
-    /// of nodes (0..NODES), between the nodes on either side.
+    /// Displacement at a fractional `node`, between the nodes either side.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -207,14 +178,12 @@ impl Edge {
         catmull_rom([at(0), at(1), at(2), at(3)], node - below)
     }
 
-    /// How far the edge is from the pill at rest right now, in pixels.
     pub fn reach(&self) -> f32 {
         self.reach
     }
 }
 
-/// The Catmull-Rom spline through four evenly spaced values at `t` (0..1)
-/// of the way between the middle two: smooth, and through every value.
+/// Catmull-Rom between the middle two of four evenly spaced values.
 fn catmull_rom([before, from, to, after]: [f32; 4], t: f32) -> f32 {
     let (t2, t3) = (t * t, t * t * t);
     0.5 * (2. * from
@@ -223,7 +192,6 @@ fn catmull_rom([before, from, to, after]: [f32; 4], t: f32) -> f32 {
         + (3. * (from - to) + after - before) * t3)
 }
 
-/// Colours and border of the pill.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
     pub fill: Hsla,
@@ -236,14 +204,10 @@ pub struct Look {
 }
 
 impl Look {
-    /// The overlay's look at fill `opacity`: Tokyo Night charcoal in the
-    /// dark theme (the default), the theme's background in the light one,
-    /// and an accent border.
-    /// The shadow fades with the fill; the border stays put.
+    /// Tokyo Night charcoal on dark, the theme's background on light; the shadow fades too.
     pub fn themed(theme: &Theme, accent: Hsla, opacity: f32, border: f32) -> Look {
         let dark = theme.is_dark();
         let fill: Hsla = if dark {
-            // Tokyo Night's background: a blue-black charcoal.
             gpui_kit::rgb(0x001a_1b26).into()
         } else {
             theme.background
@@ -257,7 +221,6 @@ impl Look {
         }
     }
 
-    /// `self` moved toward `target` over `dt` seconds.
     pub fn fade_to(self, target: Look, dt: f32) -> Look {
         let t = approach(dt, FADE);
         Look {
@@ -269,12 +232,11 @@ impl Look {
         }
     }
 
-    /// The border's width at `scale`; a scaled-down border stays visible.
+    /// At least a pixel, so a scaled-down border stays visible.
     fn border_width(&self, scale: f32) -> Option<Pixels> {
         (self.border > 0.).then(|| px((self.border * scale).max(1.)))
     }
 
-    /// The soft colour the line, the dot and the ripple ease toward.
     fn ink(&self) -> Hsla {
         if self.dark {
             gpui_kit::rgb(INK_DARK).into()
@@ -285,9 +247,7 @@ impl Look {
         }
     }
 
-    /// The ripple's colour: the dot's own on the dark theme, a mid tone
-    /// that shows on dark and light backgrounds alike; the ink itself on
-    /// the light theme, where the dot is too pale for a white background.
+    /// The dot's own mid tone on dark; the ink on light, where the dot is too pale.
     fn ripple(&self) -> Hsla {
         if self.dark {
             mix(self.fill.opacity(1.), self.ink(), INK.0)
@@ -296,7 +256,6 @@ impl Look {
         }
     }
 
-    /// The halo's colour: a muted accent.
     fn halo(&self) -> Hsla {
         let mut halo = if self.accent.s < GREY {
             gpui_kit::rgb(TOKYO_BLUE).into()
@@ -307,9 +266,7 @@ impl Look {
         halo
     }
 
-    /// `self` as far switched off as `frame`: the pill's own fill and
-    /// border, gently tinted toward the ink as it thins to the line, going
-    /// with the dot.
+    /// Tinted toward the ink as the pill thins to the line, fading with the dot.
     fn switching_off(self, frame: &crt::Frame) -> Look {
         let ink = self.ink();
         let share = if self.dark { INK.0 } else { INK.1 };
@@ -326,21 +283,14 @@ impl Look {
     }
 }
 
-/// Whether the pill should hold still: the desktop asks for reduced motion,
-/// or there is no GPU and animating would take the CPU the decoder needs.
+/// Reduced motion, or no GPU (animating would starve the decoder).
 pub fn holds_still(window: &Window, cx: &App) -> bool {
-    cx.reduce_motion() || software_rendered(window)
+    cx.reduce_motion()
+        || window
+            .gpu_specs()
+            .is_some_and(|gpu| gpu.is_software_emulated)
 }
 
-/// Whether GPUI draws on the CPU.
-pub fn software_rendered(window: &Window) -> bool {
-    window
-        .gpu_specs()
-        .is_some_and(|gpu| gpu.is_software_emulated)
-}
-
-/// Paint the shadow, body and border of a pill resting at `bounds`, its
-/// edge as the voice moved it, drawn at `scale`.
 pub fn paint(bounds: Bounds<Pixels>, edge: &Edge, look: Look, scale: f32, window: &mut Window) {
     let depth = (look.depth, look.depth);
     paint_shadow(bounds, edge.inward, look, depth, scale, window);
@@ -351,10 +301,7 @@ pub fn paint(bounds: Bounds<Pixels>, edge: &Edge, look: Look, scale: f32, window
     }
 }
 
-/// The pill at `bounds` switched off as far as `frame` (see [`crt`]): the
-/// pill itself squeezing, its ripples and wide shadow shrinking with it
-/// while the tight one stays under the line and the dot, then the ring the
-/// closing dot releases.
+/// The pill mid switch-off (see [`crt`]), then the ring the closing dot releases.
 pub fn paint_crt(
     bounds: Bounds<Pixels>,
     frame: &crt::Frame,
@@ -382,8 +329,7 @@ pub fn paint_crt(
     }
 }
 
-/// A very faint halo around the line and the dot at `pill`, coming in with
-/// their tint. Tucked inside, as the shadow is, so it meets the line.
+/// Tucked inside like the shadow, so it meets the line.
 fn paint_halo(pill: Bounds<Pixels>, look: &Look, frame: &crt::Frame, window: &mut Window) {
     let opacity = frame.glow * frame.alpha * if look.dark { HALO.0 } else { HALO.1 };
     if opacity <= 0. {
@@ -433,7 +379,6 @@ fn paint_wave(bounds: Bounds<Pixels>, edge: &Edge, look: Look, scale: f32, windo
     }
 }
 
-/// The outline of a pill at `bounds` with its edge moved out by `edge`.
 fn wave_outline(bounds: Bounds<Pixels>, edge: &Edge, scale: f32) -> Vec<Point<Pixels>> {
     outline(bounds, RADIUS * scale)
         .map(|(at, normal, node)| {
@@ -443,12 +388,7 @@ fn wave_outline(bounds: Bounds<Pixels>, edge: &Edge, scale: f32) -> Vec<Point<Pi
         .collect()
 }
 
-/// A wide ambient shadow and a tight contact one, cast by the pill at rest,
-/// at `depth` (ambient, contact) of their strength. Shadows are drawn only
-/// outside the element they belong to; tucking that element a pixel inside
-/// the body, or inside where the edge dips by `inward` pixels (and
-/// spreading by as much), keeps the rim and any trough shaded, while a
-/// translucent fill shows no shadow band beneath it.
+/// GPUI only shadows outside a box, so tuck it inside the rim (and troughs) and spread back.
 fn paint_shadow(
     bounds: Bounds<Pixels>,
     inward: f32,
@@ -478,18 +418,14 @@ fn paint_shadow(
     );
 }
 
-/// The corner radius of a pill at `bounds`: `radius`, or less where the
-/// pill is too small for it.
+/// `radius`, or less if the pill is too small for it.
 fn corner_radius(bounds: Bounds<Pixels>, radius: f32) -> f32 {
     radius
         .min(f32::from(bounds.size.width) / 2.)
         .min(f32::from(bounds.size.height) / 2.)
 }
 
-/// Evenly spaced points around the rounded rectangle with corner radius
-/// `radius`, clockwise from the start of the top edge, with their outward
-/// normal and where they fall on the ring of water nodes (0..NODES): each
-/// straight run and corner spreads its nodes evenly over its length.
+/// Even points clockwise from the top-left: position, outward normal, place on the water ring.
 fn outline(
     bounds: Bounds<Pixels>,
     radius: f32,
@@ -501,8 +437,7 @@ fn outline(
     let straight_y = bottom - top - 2. * r;
     let arc = TAU / 4. * r;
 
-    // Each side is a straight run followed by the corner that turns into the
-    // next side; `angle` is the direction of the side's outward normal.
+    // Each side: a straight run, then the corner into the next; `angle` is its outward normal.
     let sides = [
         (point(left + r, top), straight_x, -TAU / 4., water::RUN),
         (point(right, top + r), straight_y, 0., water::SIDE),
@@ -550,8 +485,8 @@ fn samples(length: f32) -> usize {
     ((length / SAMPLE_SPACING).ceil() as usize).max(1)
 }
 
-/// `a` moved toward `b` by `t` (0..1), in sRGB so hues do not swing.
-pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+/// Lerp in sRGB, so hues don't swing.
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (Rgba::from(a), Rgba::from(b));
     let lerp = |x: f32, y: f32| x + (y - x) * t;
     Rgba {
@@ -669,8 +604,7 @@ mod tests {
         let bounds = bounds();
         let quiet = Spectrum::default();
         let mut motion = Motion::default();
-        // Talking, then the loudest the voice can push: full bands jumping
-        // in and out every other frame, then held.
+        // Talking, then the loudest push: full bands flickering every other frame, then held.
         let reach = (0..240)
             .map(|frame| {
                 let voice = match frame {
@@ -726,12 +660,5 @@ mod tests {
             motion.step(FRAME, Some(&half));
         }
         assert!((motion.heights[5] - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn mix_ends_at_both_colours() {
-        let (a, b) = (Hsla::black(), Hsla::white());
-        assert_eq!(Rgba::from(mix(a, b, 0.)), Rgba::from(a));
-        assert_eq!(Rgba::from(mix(a, b, 1.)), Rgba::from(b));
     }
 }

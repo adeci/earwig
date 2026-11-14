@@ -1,11 +1,6 @@
-# keyd holds the keyboard from boot, with a desktop's keyd config verbatim
-# (keyd.conf): earwig reads keyd's virtual keyboard, cannot keep the hotkey
-# from apps, and says so. After Super was held through workspace switches
-# (Super+digit, as on niri), plain Spaces start no dictation; Super+Space
-# does. (earwig once retried the refused grab every 10 s and took the held
-# keyboard's keys from the kernel while Super was down. That keyboard sends
-# earwig no events, so Super stayed held for it, and every Space was
-# Super+Space.)
+# keyd holds the keyboard (a real desktop's keyd.conf): earwig watches keyd's virtual keyboard
+# and says it can't keep the hotkey from apps. After Super is held through workspace switches,
+# plain Spaces must start nothing; Super+Space still starts a dictation.
 { self }:
 let
   common = import ./common.nix { inherit self; };
@@ -68,8 +63,8 @@ in
 
     with subtest("EARWIG: Spaces after Super held through workspace switches start nothing"):
         events = watch_events()
-        # Super down on the keyboard keyd holds for longer than the old
-        # 10 s retry, keyd's events waking earwig throughout.
+        # Super held on the keyboard keyd holds for longer than a refused grab's 10 s retry,
+        # keyd's events waking earwig throughout.
         key("meta_l", True)
         for digit in "21212121":
             time.sleep(1.5)

@@ -1,7 +1,4 @@
-//! The tray icon: `assets/tray.svg`, the app icon's pill fattened to fill
-//! the square so it holds its own beside other tray icons, with a big
-//! recording dot and one bold word bar cut out; blue, red while dictating.
-//! resvg draws it at whatever size the tray asks for.
+//! The tray icon: assets/tray.svg in earwig's blue, red while dictating.
 
 use std::sync::LazyLock;
 
@@ -9,7 +6,7 @@ use resvg::{tiny_skia, usvg};
 
 use crate::ui::accent;
 
-/// The pill. Only its shape is used; the state gives the colour.
+/// Only the shape is used.
 static PILL: LazyLock<usvg::Tree> = LazyLock::new(|| {
     usvg::Tree::from_str(
         include_str!("../../../../assets/tray.svg"),
@@ -18,16 +15,13 @@ static PILL: LazyLock<usvg::Tree> = LazyLock::new(|| {
     .expect("assets/tray.svg is valid SVG")
 });
 
-/// earwig's blue, the default accent.
 const IDLE: [u8; 3] = {
     let [_, r, g, b] = accent::EARWIG.to_be_bytes();
     [r, g, b]
 };
 const DICTATING: [u8; 3] = [0xe5, 0x48, 0x4d];
 
-/// `size`×`size` pixels, RGBA, rows top to bottom, not premultiplied; clear
-/// pixels are black, since some hosts (swaybar) take the data as
-/// premultiplied and would tint the panel around the icon otherwise.
+/// Straight RGBA, clear pixels black: some hosts (swaybar) assume premultiplied.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn rgba(size: u32, recording: bool) -> Vec<u8> {
     let [r, g, b] = if recording { DICTATING } else { IDLE };
@@ -52,7 +46,6 @@ pub(crate) fn rgba(size: u32, recording: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// The pixel at `x`, `y` of a `size`×`size` icon.
     fn pixel(icon: &[u8], size: u32, x: u32, y: u32) -> [u8; 4] {
         let at = ((y * size + x) * 4) as usize;
         icon[at..at + 4].try_into().unwrap()

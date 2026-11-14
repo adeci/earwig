@@ -1,13 +1,5 @@
-//! Hugging Face Hub client: search, tree listings, GGUF header sniffing.
-//!
-//! Requests (all relative to the endpoint, `EARWIG_HF_ENDPOINT` or
-//! `https://huggingface.co`):
-//! - `GET /api/models?filter=transcribe.cpp&search=<q>&sort=downloads&limit=<n>`
-//! - `GET /api/models/<repo>/revision/main` for the commit to pin to
-//! - `GET /api/models/<repo>/tree/<commit>?recursive=true` for files, sizes
-//!   and LFS sha256s
-//! - `GET /<repo>/resolve/<commit>/<file>` with `Range` for headers and
-//!   resumed downloads
+//! Hugging Face Hub client: search, tree listings, and GGUF header sniffing
+//! with range requests.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -151,9 +143,6 @@ impl Hub {
         Ok(rev.sha)
     }
 
-    /// Repos tagged `transcribe.cpp` matching `query` (all of them, by
-    /// downloads, when empty), each with its GGUF files checked by
-    /// `supports`.
     pub fn search(
         &self,
         query: &str,

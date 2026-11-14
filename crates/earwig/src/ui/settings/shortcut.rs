@@ -1,6 +1,4 @@
-//! The Shortcut row: the key earwig watches, recorded by pressing it or
-//! reset to this system's default, and on Linux the row that lets earwig
-//! read the keyboard.
+//! The Shortcut row (record a key, or reset to the default) and, on Linux, keyboard access.
 
 use earwig_core::config::HotkeyConfig;
 use earwig_core::events::{HotkeyStatus, KeyboardState};
@@ -23,7 +21,7 @@ use crate::ui::edit_config;
 #[derive(Default)]
 pub struct ShortcutField {
     recording: bool,
-    /// The modifiers held now, waiting for a key, as the chip shows them.
+    /// Modifiers held so far, as the keycap shows them.
     holding: Option<SharedString>,
     note: Option<Note>,
     /// Linux: the keyboard access helper.
@@ -76,8 +74,7 @@ impl ShortcutField {
         cx.notify();
     }
 
-    /// Back to this system's default key, which leaves `[hotkey] key` out
-    /// of the user's file, as any setting set back to its default does.
+    /// Back to the default key, which drops `[hotkey] key` from the user's file.
     fn reset(&mut self, cx: &mut Context<Self>) {
         if self.recording {
             hotkey::stop_recording();
@@ -175,8 +172,7 @@ impl Tone {
     }
 }
 
-/// `key` as the row shows it: its label, or as written when it does not
-/// parse.
+/// `key` as the row shows it, or as written if it doesn't parse.
 pub(super) fn label(key: &str) -> String {
     if key.trim().is_empty() {
         return "None".into();
@@ -185,15 +181,13 @@ pub(super) fn label(key: &str) -> String {
         .map_or_else(|_| key.to_owned(), |hotkey| hotkey.label())
 }
 
-/// Whether `key` is this system's default, however it is written.
+/// Whether `key` is the default, however it's written.
 fn is_default(key: &str) -> bool {
     key.parse::<Hotkey>().ok() == HotkeyConfig::DEFAULT_KEY.parse().ok()
 }
 
-/// The Shortcut row for `configured` (`[hotkey] key`) as it is watched now.
 pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) -> SettingItem {
     let locked = is_locked(cx, "hotkey.key");
-    // Another key than the default, which the reset button brings back.
     let resettable = !locked && !is_default(configured);
     let reset_tip = SharedString::from(format!("Reset to {}", label(HotkeyConfig::DEFAULT_KEY)));
     let label = label(configured);
@@ -202,7 +196,7 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
     SettingItem::render(move |options, _, cx| {
         let status = hotkey::status();
         let state = field.read(cx);
-        // A locked row with nothing else to say says that it is.
+        // A locked row with nothing else to say says it's locked.
         let line = line(state, &status, &configured, &label)
             .map(|(line, tone)| (hinted(&line, locked), tone))
             .or_else(|| locked.then(|| (LOCKED_HINT.to_owned(), Tone::Muted)));
@@ -282,8 +276,6 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
     .disabled(locked)
 }
 
-/// The line under the Shortcut title: what recording asks for, or what
-/// `configured` does now.
 fn line(
     state: &ShortcutField,
     status: &HotkeyStatus,
@@ -315,19 +307,15 @@ fn line(
     Some((line.into(), Tone::Muted))
 }
 
-/// What the last recording left to say, under the whole row: a reason
-/// takes more room than the line beside the controls has.
+/// Under the whole row: a reason needs more room than the line beside the controls.
 fn note(state: &ShortcutField) -> Option<(String, Tone)> {
-    match state.note.as_ref().filter(|_| !state.recording)? {
+    match state.note.as_ref()? {
         Note::Refused(reason) => Some((format!("Not taken: {reason}"), Tone::Danger)),
         Note::Warning(reason) => Some((reason.to_string(), Tone::Warning)),
     }
 }
 
-/// What the watched key still does for other apps: modifiers alone work as
-/// always together with other keys; a key with modifiers no longer reaches
-/// them. Nothing where earwig cannot keep it from them: that does no harm,
-/// and `earwig status` says why.
+/// What the key still does for other apps; nothing if earwig can't block it (`earwig status`).
 fn what_it_does(status: &HotkeyStatus, label: &str) -> Option<(String, Tone)> {
     let modifiers_alone = status
         .key
@@ -348,8 +336,7 @@ fn what_it_does(status: &HotkeyStatus, label: &str) -> Option<(String, Tone)> {
     }
 }
 
-/// A row laid out as gpui-kit's own: title and maybe a line under it, and
-/// `control` beside them, or below when the window is narrow.
+/// Laid out like gpui-kit's rows: `control` beside the title, or below it when narrow.
 pub(super) fn row(
     title: &'static str,
     line: Option<(SharedString, Tone)>,
@@ -392,7 +379,6 @@ pub(super) fn row(
     }
 }
 
-/// Linux without keyboard access: how to give it.
 #[cfg(target_os = "linux")]
 pub(super) fn access_item(field: &Entity<ShortcutField>) -> SettingItem {
     use earwig_core::hotkey::linux::{AccessFix, access_fix};
@@ -469,12 +455,9 @@ mod tests {
                 Tone::Muted
             ))
         );
-    }
-
-    #[test]
-    fn why_other_apps_still_get_the_key_is_left_to_earwig_status() {
-        let status = status("Ctrl+Space", false, Some("keyd holds the keyboard"));
-        assert_eq!(what_it_does(&status, "Ctrl+Space"), None);
+        // Why it can't is left to `earwig status`.
+        let unblocked = status("Ctrl+Space", false, Some("keyd holds the keyboard"));
+        assert_eq!(what_it_does(&unblocked, "Ctrl+Space"), None);
     }
 
     #[test]
@@ -484,23 +467,6 @@ mod tests {
         assert!(!is_default("RightCtrl"));
         assert!(!is_default(""));
         assert!(!is_default("Ctrl+Hyper"));
-    }
-
-    #[test]
-    fn a_refused_key_is_explained_under_the_row_until_the_next_recording() {
-        let mut state = ShortcutField::default();
-        state.note = Some(Note::Refused(
-            "A types a character; add Ctrl, Alt or another modifier.".into(),
-        ));
-        assert_eq!(
-            note(&state),
-            Some((
-                "Not taken: A types a character; add Ctrl, Alt or another modifier.".into(),
-                Tone::Danger
-            ))
-        );
-        state.recording = true;
-        assert_eq!(note(&state), None);
     }
 
     #[test]

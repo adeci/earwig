@@ -1,67 +1,46 @@
-//! The voice as the overlay draws it: speech bands measured on the raw input
-//! as it arrives, before any resampling, and handed to the UI through a
-//! [`Feed`] that only ever holds the latest reading.
-//!
-//! Each band is a constant-Q band-pass filter followed by a power follower
-//! whose time constant is about a period and a half of the band, so a sound
-//! shows within a few milliseconds and low bands do not flicker. The work is
-//! per sample and allocation-free; readings are taken whenever a buffer has
-//! been analysed.
-//!
-//! The analyser hears the input between recordings too, and learns its noise
-//! floor: the quietest the input has been over the last few seconds, and
-//! each band's power while only the room sounds. A reading shows only what
-//! stands above that floor, so steady background noise draws nothing on any
-//! mic, and a quiet mic draws exactly what it always did.
+//! The voice as the overlay draws it: constant-Q band-pass filters with power
+//! followers on the raw input (before resampling), shown only where they stand
+//! above a learned noise floor, and handed over by a [`Feed`].
 
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// Number of speech bands, log-spaced from `LOWEST` to `HIGHEST` Hz.
+/// Log-spaced speech bands from `LOWEST` to `HIGHEST` Hz.
 pub const BANDS: usize = 24;
 const LOWEST: f64 = 80.;
 const HIGHEST: f64 = 5_000.;
-/// Power followers settle within about this many periods of their band...
+/// Power followers settle in about this many periods of their band, but take
+/// at least `MIN_FOLLOW` seconds so high bands don't track single cycles.
 const FOLLOW_PERIODS: f64 = 1.5;
-/// ...but never take less than this many seconds, which keeps high bands
-/// from tracking single cycles.
 const MIN_FOLLOW: f64 = 0.003;
-/// The overall level follows the voice this quickly, in seconds.
+/// Time constant of the overall level, in seconds.
 const LEVEL_FOLLOW: f64 = 0.01;
-/// Speech loses energy toward high frequencies; lifting the bands above
-/// this frequency by `TILT_PER_OCTAVE` dB per octave lets every band of a
-/// voice reach a similar height.
+/// Speech loses energy up high: bands above `TILT_FROM` Hz get this many dB
+/// per octave, so every band of a voice reaches a similar height.
 const TILT_FROM: f64 = 500.;
 const TILT_PER_OCTAVE: f64 = 4.;
-/// A band at `BAND_FLOOR` dB (after the tilt) shows nothing, one at
-/// `BAND_FLOOR + BAND_SPAN` reaches the top.
+/// A band shows from `BAND_FLOOR` dB (after the tilt), full at `+ BAND_SPAN`.
 const BAND_FLOOR: f64 = -52.;
 const BAND_SPAN: f64 = 32.;
-/// Below this overall level (dBFS) every band is zero, so a quiet room draws
-/// nothing; bands fade in over `GATE_KNEE` dB above it.
+/// Below this level (dBFS) nothing shows; bands fade in over `GATE_KNEE` dB.
 const GATE: f64 = -45.;
 const GATE_KNEE: f64 = 6.;
-/// On a noisier mic the gate stays this many dB above the noise floor: the
-/// quietest of the last `FLOOR_WINDOWS` level windows (3 s). A voice pauses
-/// well within that, so talking does not lift the floor, while a noise that
-/// stops lowers it at once.
+/// On a noisier mic the gate sits this far above the noise floor: the quietest
+/// of the last `FLOOR_WINDOWS` level windows (3 s), which a voice pauses in.
 const NOISE_MARGIN: f64 = 10.;
 const FLOOR_WINDOWS: usize = 60;
-/// The floor applies once this many windows (0.4 s) of sound have been
-/// heard; until then the gate stays at `GATE`, so a voice there from the
-/// first moment has paused before any of it is taken for noise.
+/// The floor applies after this many windows (0.4 s) of sound, so a voice
+/// there from the start has paused before any of it counts as noise.
 const SEED_WINDOWS: usize = 8;
-/// A level window below the gate and within `ROOM` dB of the floor is the
-/// room alone: each band's noise then moves `BAND_NOISE_FOLLOW` of the way
-/// to the band's power (settling in about 0.3 s). Twice that noise is taken
-/// off the band, so a hum or hiss does not stand up while someone talks.
+/// A window under the gate and within `ROOM` dB of the floor is the room alone:
+/// each band's noise moves `BAND_NOISE_FOLLOW` of the way to its power, and
+/// twice the noise is taken off the band.
 const ROOM: f64 = 6.;
 const BAND_NOISE_FOLLOW: f64 = 0.15;
 const NOISE_OVERSUBTRACT: f64 = 2.;
-/// In digital silence the filters decay toward zero without end, through
-/// subnormal floats, which are slow; below this they are zero.
+/// Decaying filters go subnormal (slow) in digital silence; below this, zero.
 const TINY: f64 = 1e-30;
-/// [`crate::events::Event::Level`] is the RMS of this many windows a second.
+/// Level windows per second, as [`crate::events::Event::Level`] reports them.
 const LEVEL_HZ: u32 = 20;
 
 /// The voice at one instant.
@@ -91,17 +70,15 @@ fn level_of(dbfs: f64) -> f64 {
 /// windowed levels of [`crate::events::Event::Level`].
 pub(crate) struct Analyzer {
     filters: [Bandpass; BANDS],
-    /// Smoothed power of each band's output, and how much of the way to a
-    /// new sample's power it moves.
+    /// Each band's smoothed power, and its follower's per-sample step.
     power: [f64; BANDS],
     follow: [f64; BANDS],
     tilt: [f64; BANDS],
     level_power: f64,
     level_follow: f64,
     window: Window,
-    /// Power of the latest level windows, the oldest at `next`; how many
-    /// windows of sound have been heard, up to `SEED_WINDOWS`; and the
-    /// overall level (dBFS) above which bands show.
+    /// Power of the latest level windows (oldest at `next`), windows of sound
+    /// heard (up to `SEED_WINDOWS`), and the level (dBFS) bands show above.
     recent: [f64; FLOOR_WINDOWS],
     next: usize,
     heard: usize,
@@ -313,10 +290,8 @@ impl Window {
     }
 }
 
-/// The latest [`Spectrum`] of the current recording, for the overlay. The
-/// audio thread overwrites it; [`Feed::wakes`] fires when there is a new
-/// one worth drawing and never holds more than one wake-up, so a busy UI
-/// reads the newest reading instead of working through a backlog.
+/// The latest [`Spectrum`] of the current recording, for the overlay.
+/// [`Feed::wakes`] holds one wake-up at most, so a busy UI skips the backlog.
 #[derive(Clone)]
 pub struct Feed {
     shared: Arc<Shared>,
@@ -464,23 +439,11 @@ mod tests {
     fn silence_and_room_noise_show_nothing() {
         let mut analyzer = Analyzer::new(RATE);
         analyzer.push(&vec![0.; RATE as usize / 2], |_| {});
-        let silent = analyzer.spectrum();
-        assert_eq!(silent.bands, [0.; BANDS]);
-        assert!(silent.is_quiet());
-
+        assert!(analyzer.spectrum().is_quiet());
         // A hum and some hiss well below speech.
-        let mut noise = tone(RATE, 120., 0.5, 0.004);
-        let mut seed = 1_u32;
-        for s in &mut noise {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            #[allow(clippy::cast_precision_loss)]
-            let white = (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
-            *s += white * 0.004;
-        }
-        analyzer.push(&noise, |_| {});
+        analyzer.push(&room_noise(RATE, 0.5, -50.), |_| {});
         let room = analyzer.spectrum();
-        assert_eq!(room.bands, [0.; BANDS], "{room:?}");
-        assert!(room.is_quiet());
+        assert!(room.is_quiet(), "{room:?}");
     }
 
     #[test]

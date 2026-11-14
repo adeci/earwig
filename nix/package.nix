@@ -57,6 +57,8 @@ let
     pname = "earwig";
     inherit ((lib.importTOML ../Cargo.toml).workspace.package) version;
     inherit src;
+    # Vendored from the real source: the dummy one is IFD, which breaks evaluating other systems.
+    cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
     strictDeps = true;
     nativeBuildInputs = [
       cmake
@@ -77,23 +79,20 @@ let
         ++ runtimeLibs
       else
         [ apple-sdk_15 ];
-    # transcribe.cpp is built through the `cmake` crate, not by a cmake
-    # configure phase.
+    # The cmake crate builds transcribe.cpp; there's no cmake configure phase.
     dontUseCmakeConfigure = true;
   }
   // lib.optionalAttrs stdenv.hostPlatform.isDarwin {
-    # ggml's Metal backend checks the OS version at run time (`@available`)
-    # because the deployment target is older than the APIs it uses; rustc
-    # links without clang's runtime library, which holds that check.
+    # ggml's Metal backend checks the OS version at run time (`@available`), and rustc links
+    # without clang's runtime library, which has that check.
     NIX_LDFLAGS = "${llvmPackages.compiler-rt}/lib/darwin/libclang_rt.osx.a";
   };
 
   cargoArtifacts = craneLib.buildDepsOnly (
     removeAttrs commonArgs [ "src" ]
     // {
-      # The patched GPUI crates (vendor/) are path dependencies, which the
-      # dependency build would otherwise stub out like the workspace's own
-      # crates.
+      # The patched GPUI crates (vendor/) are path dependencies, which would get stubbed out
+      # like the workspace's own crates.
       dummySrc = craneLib.mkDummySrc {
         inherit src;
         extraDummyScript = ''
@@ -127,7 +126,7 @@ craneLib.buildPackage (
     '';
 
     passthru = {
-      inherit cargoArtifacts commonArgs runtimeLibs;
+      inherit runtimeLibs;
       tests = {
         clippy = craneLib.cargoClippy (
           commonArgs
@@ -136,8 +135,7 @@ craneLib.buildPackage (
             cargoClippyExtraArgs = "--workspace --all-targets -- --deny warnings";
           }
         );
-        # Model-dependent tests are #[ignore]d and stay that way here: the
-        # sandbox has no network and no model.
+        # Model tests stay #[ignore]d: the sandbox has no network and no model.
         tests = craneLib.cargoTest (
           commonArgs
           // {

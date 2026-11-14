@@ -7,7 +7,6 @@ use ksni::menu::{MenuItem, StandardItem};
 
 use crate::ui::Local;
 
-/// Updates the tray from the UI thread.
 pub struct TrayHandle(ksni::blocking::Handle<Tray>);
 
 impl TrayHandle {
@@ -16,7 +15,7 @@ impl TrayHandle {
     }
 }
 
-/// Start the tray; `None` (logged) when the session has no tray host.
+/// `None` (logged) without a tray host.
 pub fn spawn(handle: Handle, local: flume::Sender<Local>) -> Option<TrayHandle> {
     let tray = Tray {
         handle,
@@ -59,8 +58,7 @@ impl ksni::Tray for Tray {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         let recording = !matches!(self.state, DictationState::Idle);
-        // Hosts scale the nearest size, which blurs the cut-outs at the small
-        // ones; these cover the usual panels.
+        // Hosts scale the nearest size, blurring small cut-outs; these cover the usual panels.
         [16, 22, 24, 32, 48, 64]
             .into_iter()
             .map(|size| icon(size, recording))
