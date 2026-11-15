@@ -46,6 +46,14 @@
           pkgs.callPackage ./nix/darwin/app.nix { inherit earwig; }
         else
           earwig;
+      # What packaging/'s scripts run with: the release effect's inputs, and `nix develop .#release`
+      # on Linux to run them by hand.
+      releaseTools = pkgs: [
+        pkgs.gh
+        pkgs.rcodesign
+        pkgs.hfsprogs
+        (pkgs.callPackage ./nix/libdmg-hfsplus.nix { })
+      ];
     in
     {
       packages = forAllSystems (
@@ -74,16 +82,22 @@
 
       formatter = forAllSystems (pkgs: treefmt.${pkgs.stdenv.hostPlatform.system}.config.build.wrapper);
 
-      devShells = forAllSystems (pkgs: {
-        default = pkgs.callPackage ./nix/devshell.nix {
-          craneLib = crane.mkLib pkgs;
-          earwig =
-            let
-              earwig = self.packages.${pkgs.stdenv.hostPlatform.system}.earwig;
-            in
-            earwig.unwrapped or earwig;
-        };
-      });
+      devShells = forAllSystems (
+        pkgs:
+        {
+          default = pkgs.callPackage ./nix/devshell.nix {
+            craneLib = crane.mkLib pkgs;
+            earwig =
+              let
+                earwig = self.packages.${pkgs.stdenv.hostPlatform.system}.earwig;
+              in
+              earwig.unwrapped or earwig;
+          };
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          release = pkgs.mkShell { packages = releaseTools pkgs; };
+        }
+      );
 
       checks = forAllSystems (
         pkgs:
@@ -114,7 +128,8 @@
         }
       );
 
-      # nixbot's effects: a pushed v* tag gets its GitHub release once its commit built green.
+      # nixbot's effects: a pushed v* tag gets its GitHub release, with the notarized Mac DMG, once
+      # its commit built green.
       # Branches get none (`runIf false` would still build its inputs on every push), so their
       # builds stay the checks above.
       herculesCI =
@@ -131,6 +146,9 @@
                   pkgs.callPackage ./nix/release.nix {
                     inherit (nixbot.lib.effects { inherit pkgs; }) mkEffect;
                     inherit primaryRepo;
+                    # Built on the Mac, signed on the nixbot host.
+                    app = self.packages.aarch64-darwin.default;
+                    tools = releaseTools pkgs;
                   };
               };
         };

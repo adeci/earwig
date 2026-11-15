@@ -26,9 +26,14 @@ fn main() {
 
 fn embed_info_plist() {
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    // CFBundleVersion is digits and periods only: 0.1.0 for 0.1.0-rc.1.
+    let bundle_version = ["MAJOR", "MINOR", "PATCH"]
+        .map(|part| env::var(format!("CARGO_PKG_VERSION_{part}")).expect("cargo sets it"))
+        .join(".");
     let plist = fs::read_to_string(PLIST)
         .expect("reading Info.plist")
-        .replace("@VERSION@", &version);
+        .replace("@VERSION@", &version)
+        .replace("@BUNDLE_VERSION@", &bundle_version);
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("Info.plist");
     fs::write(&out, plist).expect("writing Info.plist");
     println!(
