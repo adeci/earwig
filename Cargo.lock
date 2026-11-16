@@ -1705,6 +1705,7 @@ dependencies = [
  "reis",
  "rubato",
  "rustix",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.11.1",

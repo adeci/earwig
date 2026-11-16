@@ -34,3 +34,57 @@ pub(crate) fn scan_code(vk: u16) -> u16 {
     let scan = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
     u16::try_from(scan).unwrap_or(0)
 }
+
+/// The string `name` under `HKEY_CURRENT_USER\<key>`.
+pub(crate) fn user_string(key: &str, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::RRF_RT_REG_SZ;
+    let mut size = 0;
+    if user_value(
+        key,
+        name,
+        RRF_RT_REG_SZ,
+        std::ptr::null_mut(),
+        &raw mut size,
+    ) != 0
+    {
+        return None;
+    }
+    let mut text = vec![0u16; usize::try_from(size).ok()?.div_ceil(2)];
+    if user_value(
+        key,
+        name,
+        RRF_RT_REG_SZ,
+        text.as_mut_ptr().cast(),
+        &raw mut size,
+    ) != 0
+    {
+        return None;
+    }
+    let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+    Some(String::from_utf16_lossy(&text[..end]))
+}
+
+/// `RegGetValueW` under `HKEY_CURRENT_USER`: `data` (`size` bytes) or null.
+fn user_value(
+    key: &str,
+    name: &str,
+    types: u32,
+    data: *mut std::ffi::c_void,
+    size: *mut u32,
+) -> u32 {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegGetValueW};
+    let (key, name) = (wide(OsStr::new(key)), wide(OsStr::new(name)));
+    // SAFETY: NUL-terminated names; `data` holds `*size` bytes, or both are
+    // null (the size or the value's existence only).
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            types,
+            std::ptr::null_mut(),
+            data,
+            size,
+        )
+    }
+}

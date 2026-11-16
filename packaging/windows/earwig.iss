@@ -32,6 +32,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
+; The build machine's clock is UTC; without this, installed files are dated in its local time.
+TimeStampsInUTC=yes
 
 [Tasks]
 Name: autostart; Description: "Start earwig when I sign in"
@@ -49,9 +51,11 @@ Source: "..\..\README.md"; DestDir: "{app}"
 Name: "{userprograms}\earwig"; Filename: "{app}\earwigw.exe"; Parameters: "settings"
 
 [Registry]
-; The same entry the settings window's "Start at sign-in" switch writes.
+; The same entry the settings window's "Start at sign-in" switch writes. A silent upgrade (earwig's
+; own update, winget) leaves it as the user last set it there, whatever the first install chose.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; \
-  ValueName: "earwig"; ValueData: """{app}\earwigw.exe"""; Tasks: autostart; Flags: uninsdeletevalue
+  ValueName: "earwig"; ValueData: """{app}\earwigw.exe"""; Tasks: autostart; Flags: uninsdeletevalue; \
+  Check: not SilentUpgrade
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "earwig"; \
   Flags: dontcreatekey uninsdeletevalue
 
@@ -63,7 +67,9 @@ Filename: "{app}\earwigw.exe"; Flags: nowait; Check: WasRunning
 
 [Code]
 var
+  Upgrade: Boolean;
   Running: Boolean;
+  Installed: Boolean;
 
 function Earwig(const Args: String): Boolean;
 var
@@ -79,7 +85,8 @@ var
   Tries: Integer;
 begin
   Result := '';
-  if FileExists(ExpandConstant('{app}\earwig.exe')) and Earwig('quit') then
+  Upgrade := FileExists(ExpandConstant('{app}\earwig.exe'));
+  if Upgrade and Earwig('quit') then
   begin
     Running := True;
     Tries := 0;
@@ -141,4 +148,26 @@ begin
     Exec('taskkill.exe', '/f /im earwigw.exe /im earwig.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
     Sleep(1000);
   end;
+end;
+
+function SilentUpgrade: Boolean;
+begin
+  Result := Upgrade and WizardSilent;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    Installed := True;
+end;
+
+{ An upgrade that stopped earwig and then failed starts it again; files the setup had
+  already replaced stay replaced. }
+procedure DeinitializeSetup;
+var
+  Code: Integer;
+begin
+  if Running then
+    if not Installed then
+      Exec(ExpandConstant('{app}\earwigw.exe'), '', '', SW_SHOWNORMAL, ewNoWait, Code);
 end;

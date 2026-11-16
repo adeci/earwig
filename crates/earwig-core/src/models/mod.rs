@@ -239,7 +239,7 @@ pub enum ModelError {
 }
 
 pub mod benchmark;
-mod download;
+pub(crate) mod download;
 mod gguf;
 mod hub;
 mod manager;

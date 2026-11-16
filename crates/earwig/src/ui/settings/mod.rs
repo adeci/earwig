@@ -5,6 +5,7 @@ mod history;
 mod models;
 mod pill_preview;
 mod shortcut;
+mod version;
 
 use std::iter;
 use std::sync::PoisonError;
@@ -124,6 +125,16 @@ impl Render for SettingsView {
                                 models::page(&self.models, &settings, cx),
                                 history::page(&self.history, &settings, cx),
                             ]),
+                    )
+                    // The version, and a newer one, at the foot of the sidebar.
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .bottom_0()
+                            .w(SIDEBAR_WIDTH)
+                            .p_3()
+                            .child(version::footer(cx)),
                     )
                     // Cover the fixed-width sidebar's resize handle (1 px line, 4 px either side).
                     .child(

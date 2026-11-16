@@ -24,6 +24,7 @@ pub struct Config {
     pub overlay: OverlayConfig,
     pub history: HistoryConfig,
     pub hooks: HooksConfig,
+    pub updates: UpdatesConfig,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +278,21 @@ pub struct HooksConfig {
     /// argv run after each insertion with the inserted text on stdin; not
     /// awaited.
     pub on_insert: Vec<String>,
+}
+
+/// The Windows and macOS releases look for a newer release on GitHub; other
+/// builds come from Nix, cargo or a package manager and never do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdatesConfig {
+    /// Ask GitHub once a day whether a newer release is out.
+    pub check: bool,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        Self { check: true }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

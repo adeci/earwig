@@ -13,13 +13,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::audio::{AudioEvent, Capture, Source};
 use crate::config::{AudioConfig, Config, ConfigStore, InsertConfig};
 use crate::engine::{EngineFactory, EngineOptions, Model, ModelInfo, Partial};
-use crate::events::{Command, DictationState, Event, InsertMethod, ModelStatus, Status};
+use crate::events::{
+    Command, DictationState, Event, InsertMethod, ModelStatus, Status, UpdateState,
+};
 use crate::history::{History, HistoryEntry};
 use crate::hooks;
 use crate::insert::Inserter;
 use crate::models::{ModelError, ModelManager, ModelSpec};
 use crate::session::{Action, Input, Phase, Session};
 use crate::spectrum::Feed;
+use crate::update::{self, Updates};
 
 /// Builds the inserter for `[insert]`. May block on a consent dialog; never
 /// fails (where nothing works, a stand-in fails each insertion instead).
@@ -35,6 +38,9 @@ pub struct Parts {
     pub inserter: Box<InserterFactory>,
     /// Names of the hotkey sources started for this session.
     pub hotkey_sources: Vec<String>,
+    /// Where this build gets updates, if it updates itself
+    /// ([`Updates::detect`]); the daemon's.
+    pub updates: Option<Updates>,
 }
 
 /// Fan-out of [`Event`]s; subscribers that went away are dropped on the next
@@ -93,6 +99,10 @@ pub(crate) struct Shared {
     pub models: Arc<ModelManager>,
     pub history: Arc<History>,
     pub engine: Arc<dyn EngineFactory>,
+    /// The updater, in builds that update themselves.
+    pub updates: Option<flume::Sender<update::Request>>,
+    /// The app to start once the daemon quit, after an update replaced it.
+    pub relaunch: Mutex<Option<PathBuf>>,
 }
 
 impl Handle {
@@ -112,7 +122,7 @@ impl Handle {
     /// Every event from now on, starting with a [`Event::Status`] snapshot.
     pub fn subscribe(&self) -> flume::Receiver<Event> {
         self.shared.bus.subscribe(|| Event::Status {
-            status: self.status(),
+            status: Box::new(self.status()),
         })
     }
 
@@ -152,6 +162,45 @@ impl Handle {
     pub fn engine(&self) -> Arc<dyn EngineFactory> {
         self.shared.engine.clone()
     }
+
+    /// Check for a newer release now, and wait for the answer (socket
+    /// clients do).
+    pub fn check_for_updates(&self) -> Result<UpdateState, String> {
+        self.ask_updater(update::Request::Check)
+    }
+
+    /// Install the newer release the last check found; answers once it is
+    /// underway, or why it won't be.
+    pub fn install_update(&self) -> Result<UpdateState, String> {
+        self.ask_updater(update::Request::Install)
+    }
+
+    fn ask_updater(
+        &self,
+        request: fn(Option<update::Reply>) -> update::Request,
+    ) -> Result<UpdateState, String> {
+        let updates = self
+            .shared
+            .updates
+            .as_ref()
+            .ok_or_else(|| update::NOT_UPDATING.to_owned())?;
+        let (reply, answer) = flume::bounded(1);
+        updates
+            .send(request(Some(reply)))
+            .map_err(|_| "the updater stopped".to_owned())?;
+        answer
+            .recv_timeout(Duration::from_secs(120))
+            .map_err(|_| "the updater did not answer".to_owned())?
+    }
+
+    /// The app an update put in place, to start once the daemon quit.
+    pub fn take_relaunch(&self) -> Option<PathBuf> {
+        self.shared
+            .relaunch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
 }
 
 /// Start the controller with audio from `source`.
@@ -163,7 +212,9 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         engine,
         inserter: build_inserter,
         hotkey_sources,
+        updates,
     } = parts;
+    let (updates_tx, updates_rx) = flume::unbounded();
     let settings = config.config().clone();
     let inserter = build_inserter(&settings.insert);
     let (commands_tx, commands) = flume::unbounded();
@@ -180,11 +231,14 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
             hotkey_sources,
             hotkey: crate::events::HotkeyStatus::default(),
             permissions: Vec::new(),
+            update: updates.as_ref().map(|_| UpdateState::None),
         }),
         config: Arc::new(RwLock::new(config)),
         models,
         history,
         engine: engine.clone(),
+        updates: updates.as_ref().map(|_| updates_tx.clone()),
+        relaunch: Mutex::new(None),
     });
 
     let (audio_tx, audio) = flume::unbounded();
@@ -237,6 +291,9 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     thread::Builder::new()
         .name("earwig-controller".into())
         .spawn(move || controller.run(&commands, &audio, &engine_events, &output_events))?;
+    if let Some(updates) = updates {
+        update::spawn(updates, shared.clone(), updates_tx, updates_rx)?;
+    }
     Ok(Handle::new(shared))
 }
 
@@ -646,7 +703,7 @@ impl Controller {
     fn set_insert_methods(&self, methods: Vec<InsertMethod>) {
         let status = self.update_status(|s| {
             s.insert_methods = methods;
-            s.clone()
+            Box::new(s.clone())
         });
         self.publish(&Event::Status { status });
     }
@@ -674,8 +731,19 @@ impl Controller {
             Command::ShowSettings => self.publish(&Event::ShowSettings),
             Command::ReloadConfig => self.reload_config(),
             Command::UseModel { model } => self.use_model(&model),
+            Command::CheckForUpdates => self.update(update::Request::Check(None)),
+            Command::Update => self.update(update::Request::Install(None)),
             // Answered by the socket server; nothing to do here.
             Command::Status | Command::Subscribe | Command::Quit => {}
+        }
+    }
+
+    fn update(&self, request: update::Request) {
+        match &self.shared.updates {
+            Some(updates) => {
+                let _ = updates.send(request);
+            }
+            None => self.error(update::NOT_UPDATING.into()),
         }
     }
 
@@ -960,6 +1028,9 @@ impl Controller {
         if let Err(e) = self.shared.history.set_limit(config.history.limit) {
             log::warn!("history: {e}");
         }
+        if let Some(updates) = &self.shared.updates {
+            let _ = updates.send(update::Request::Reconfigured);
+        }
         self.ensure_model(true);
     }
 
@@ -1098,6 +1169,10 @@ mod tests {
 
     impl Daemon {
         fn start(fail_insert: bool) -> Self {
+            Self::start_with(fail_insert, None)
+        }
+
+        fn start_with(fail_insert: bool, updates: Option<Updates>) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let model = dir.path().join("fake.gguf");
             fs::write(&model, b"").unwrap();
@@ -1110,12 +1185,17 @@ mod tests {
                 ),
             )
             .unwrap();
-            Self::spawn(dir, vec![system], fail_insert)
+            Self::spawn(dir, vec![system], fail_insert, updates)
         }
 
         /// Start with `user.toml` in `dir` and the given system files, and
         /// wait until the model is ready.
-        fn spawn(dir: tempfile::TempDir, system: Vec<PathBuf>, fail_insert: bool) -> Self {
+        fn spawn(
+            dir: tempfile::TempDir,
+            system: Vec<PathBuf>,
+            fail_insert: bool,
+            updates: Option<Updates>,
+        ) -> Self {
             let config = ConfigStore::load_from(ConfigPaths {
                 user: dir.path().join("user.toml"),
                 system,
@@ -1144,6 +1224,7 @@ mod tests {
                     })
                 }),
                 hotkey_sources: Vec::new(),
+                updates,
             };
             let clip: Arc<[f32]> = vec![0.25; 1_600].into();
             let handle = spawn_with_source(parts, Source::Clip(clip)).unwrap();
@@ -1304,7 +1385,7 @@ mod tests {
         let user = format!("[model]\nmodel = '{}'\n", model.display());
         fs::write(dir.path().join("user.toml"), user).unwrap();
         let gone = dir.path().join("gone.gguf");
-        let d = Daemon::spawn(dir, Vec::new(), false);
+        let d = Daemon::spawn(dir, Vec::new(), false, None);
         assert_eq!(d.live_models.load(Ordering::SeqCst), 1);
         d.handle.send(Command::UseModel {
             model: ModelSpec::Path { path: gone },
@@ -1337,7 +1418,7 @@ mod tests {
         fs::write(&model, b"").unwrap();
         let user = format!("[model]\nmodel = '{}'\n", model.display());
         fs::write(dir.path().join("user.toml"), user).unwrap();
-        let d = Daemon::spawn(dir, Vec::new(), false);
+        let d = Daemon::spawn(dir, Vec::new(), false, None);
         d.handle.send(Command::UseModel {
             model: default_model(&d),
         });
@@ -1392,5 +1473,60 @@ mod tests {
             d.calls.lock().unwrap().built,
             [InsertSetting::Auto, InsertSetting::Paste]
         );
+    }
+
+    #[test]
+    fn an_update_failing_its_digest_says_why_and_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (data, _) = update::testing::data();
+        let feed = update::testing::releases(data, "ab".repeat(32), 300_000);
+        let d = Daemon::start_with(false, Some(feed.updates("0.1.0", dir.path())));
+        assert_eq!(d.handle.status().update, Some(UpdateState::None));
+        let available = UpdateState::Available {
+            version: "0.2.0".into(),
+            installable: true,
+        };
+        assert_eq!(d.handle.check_for_updates(), Ok(available.clone()));
+        d.wait_for(|e| {
+            *e == Event::Update {
+                update: available.clone(),
+            }
+        });
+
+        d.handle.send(Command::Update);
+        d.wait_for(|e| {
+            matches!(
+                e,
+                Event::Update {
+                    update: UpdateState::Downloading { .. }
+                }
+            )
+        });
+        let failed = d.wait_for(|e| {
+            matches!(
+                e,
+                Event::Update {
+                    update: UpdateState::Failed { .. }
+                }
+            )
+        });
+        let Event::Update {
+            update: UpdateState::Failed { version, reason },
+        } = &failed
+        else {
+            unreachable!()
+        };
+        assert_eq!(version, "0.2.0");
+        assert!(reason.contains("SHA-256"), "{reason}");
+        assert!(!dir.path().join("update").exists(), "the download is gone");
+        let Event::Update { update } = failed else {
+            unreachable!()
+        };
+        assert_eq!(d.handle.status().update, Some(update));
+        // It may be tried again.
+        assert!(matches!(
+            d.handle.install_update(),
+            Ok(UpdateState::Downloading { .. })
+        ));
     }
 }

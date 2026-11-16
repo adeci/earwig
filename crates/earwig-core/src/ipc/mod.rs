@@ -1,9 +1,10 @@
 //! The control socket (a 0600 Unix socket, or a named pipe only the user may
 //! open): one JSON [`Command`] per line in, [`Event`] lines out. `status` gets
-//! one [`Event::Status`], `subscribe` a snapshot and then every event (later
-//! lines are ignored), a bad line one [`Event::Error`], anything else no reply.
-//! The daemon hangs up once the client shuts its write side (on a pipe: sends
-//! an empty message).
+//! one [`Event::Status`], `check-for-updates` and `update` one
+//! [`Event::Update`] (or [`Event::Error`]), `subscribe` a snapshot and then
+//! every event (later lines are ignored), a bad line one [`Event::Error`],
+//! anything else no reply. The daemon hangs up once the client shuts its
+//! write side (on a pipe: sends an empty message).
 
 #[cfg(unix)]
 mod unix;
@@ -26,7 +27,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 use crate::controller::Handle;
-use crate::events::{Command, Event};
+use crate::events::{Command, Event, UpdateState};
 
 /// A client that stops reading for this long is dropped, so it cannot pin a
 /// thread and an ever-growing event queue.
@@ -103,7 +104,7 @@ fn serve_client(conn: &os::Conn, handle: &Handle) -> io::Result<()> {
             Ok(Command::Status) => write_line(
                 conn,
                 &Event::Status {
-                    status: handle.status(),
+                    status: Box::new(handle.status()),
                 },
             )?,
             Ok(Command::Subscribe) => {
@@ -112,6 +113,10 @@ fn serve_client(conn: &os::Conn, handle: &Handle) -> io::Result<()> {
                 }
                 return Ok(());
             }
+            Ok(Command::CheckForUpdates) => {
+                write_line(conn, &update_reply(handle.check_for_updates()))?;
+            }
+            Ok(Command::Update) => write_line(conn, &update_reply(handle.install_update()))?,
             Ok(cmd) => handle.send(cmd),
             Err(e) => write_line(
                 conn,
@@ -122,6 +127,13 @@ fn serve_client(conn: &os::Conn, handle: &Handle) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn update_reply(answer: Result<UpdateState, String>) -> Event {
+    match answer {
+        Ok(update) => Event::Update { update },
+        Err(message) => Event::Error { message },
+    }
 }
 
 fn write_line(mut out: impl io::Write, value: &impl serde::Serialize) -> io::Result<()> {
@@ -178,6 +190,7 @@ mod tests {
     use crate::history::History;
     use crate::models::{ModelManager, ModelSpec};
     use crate::spectrum::Feed;
+    use crate::update;
 
     struct NoEngine;
 
@@ -190,7 +203,10 @@ mod tests {
         }
     }
 
-    fn handle(dir: &Path) -> (Handle, Arc<Shared>, flume::Receiver<Command>) {
+    fn handle(
+        dir: &Path,
+        updates: Option<flume::Sender<update::Request>>,
+    ) -> (Handle, Arc<Shared>, flume::Receiver<Command>) {
         let (tx, rx) = flume::unbounded();
         let config = ConfigStore::load_from(ConfigPaths {
             user: dir.join("config.toml"),
@@ -206,6 +222,7 @@ mod tests {
             hotkey_sources: vec!["socket".into()],
             hotkey: crate::events::HotkeyStatus::default(),
             permissions: Vec::new(),
+            update: updates.as_ref().map(|_| UpdateState::None),
         };
         let shared = Arc::new(Shared {
             commands: tx,
@@ -216,6 +233,8 @@ mod tests {
             models: Arc::new(ModelManager::new(dir.join("models"))),
             history: Arc::new(History::open(dir.join("history.jsonl"), 5).unwrap()),
             engine: Arc::new(NoEngine),
+            updates,
+            relaunch: std::sync::Mutex::new(None),
         });
         (Handle::new(shared.clone()), shared, rx)
     }
@@ -237,7 +256,7 @@ mod tests {
     #[test]
     fn commands_status_and_subscriptions_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let (handle, shared, commands) = handle(dir.path());
+        let (handle, shared, commands) = handle(dir.path(), None);
         let path = address(dir.path());
         Server::bind(&path).unwrap().serve(handle.clone()).unwrap();
         #[cfg(unix)]
@@ -257,7 +276,7 @@ mod tests {
         assert_eq!(
             reply,
             Some(Event::Status {
-                status: handle.status()
+                status: Box::new(handle.status())
             })
         );
         let mut events = subscribe_at(&path).unwrap();
@@ -287,6 +306,59 @@ mod tests {
             os::connect(&path).is_ok(),
             "the live daemon lost its address"
         );
+    }
+
+    #[test]
+    fn update_requests_get_the_updaters_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (updater, requests) = flume::unbounded();
+        let (handle, _, _) = handle(dir.path(), Some(updater));
+        let path = address(dir.path());
+        Server::bind(&path).unwrap().serve(handle).unwrap();
+        let available = UpdateState::Available {
+            version: "0.2.0".into(),
+            installable: true,
+        };
+        let found = available.clone();
+        // Stands in for the updater: a check finds 0.2.0, an install won't start.
+        std::thread::spawn(move || {
+            for request in requests {
+                match request {
+                    update::Request::Check(Some(reply)) => {
+                        let _ = reply.send(Ok(found.clone()));
+                    }
+                    update::Request::Install(Some(reply)) => {
+                        let _ = reply.send(Err("the disk is full".into()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        assert_eq!(
+            request_at(&path, &Command::CheckForUpdates).unwrap(),
+            Some(Event::Update { update: available })
+        );
+        let refused = request_at(&path, &Command::Update).unwrap_err();
+        assert!(
+            refused.to_string().contains("the disk is full"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_build_that_does_not_update_itself_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _, _) = handle(dir.path(), None);
+        assert_eq!(handle.status().update, None);
+        let path = address(dir.path());
+        Server::bind(&path).unwrap().serve(handle).unwrap();
+        for cmd in [Command::CheckForUpdates, Command::Update] {
+            let refused = request_at(&path, &cmd).unwrap_err();
+            assert!(
+                refused.to_string().contains(update::NOT_UPDATING),
+                "{refused}"
+            );
+        }
     }
 
     #[cfg(unix)]

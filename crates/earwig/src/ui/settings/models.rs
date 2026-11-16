@@ -1462,7 +1462,7 @@ fn row_action(
 
 /// `downloaded` of `total` in percent, 0 while the total is unknown.
 #[allow(clippy::cast_precision_loss)]
-fn percent(downloaded: u64, total: u64) -> f32 {
+pub(super) fn percent(downloaded: u64, total: u64) -> f32 {
     if total == 0 {
         0.
     } else {

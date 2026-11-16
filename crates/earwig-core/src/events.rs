@@ -29,6 +29,13 @@ pub enum Command {
     UseModel {
         model: ModelSpec,
     },
+    /// Ask GitHub for a newer release now. The socket replies with one
+    /// [`Event::Update`], or an [`Event::Error`] when that fails.
+    CheckForUpdates,
+    /// Download and install the newer release the last check found. The
+    /// socket replies with one [`Event::Update`] once it is underway, or an
+    /// [`Event::Error`] when there is nothing to install.
+    Update,
     Quit,
 }
 
@@ -38,7 +45,7 @@ pub enum Event {
     /// Full snapshot; the reply to [`Command::Status`], the first event of
     /// every subscription, and sent again when the insertion methods change.
     Status {
-        status: Status,
+        status: Box<Status>,
     },
     State {
         state: DictationState,
@@ -73,6 +80,9 @@ pub enum Event {
     },
     /// The settings window was requested (tray, CLI, socket).
     ShowSettings,
+    Update {
+        update: UpdateState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +152,32 @@ pub struct Status {
     /// snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<PermissionStatus>,
+    /// Whether a newer earwig is out, in builds that update themselves (the
+    /// Windows and macOS releases); absent in the others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateState>,
+}
+
+/// A newer release of earwig and how installing it goes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum UpdateState {
+    /// Nothing newer, or not checked yet.
+    #[default]
+    None,
+    /// `version` is out. `installable` is false where earwig can't replace
+    /// itself (a portable copy, an app in a folder it can't write); its
+    /// release page has it.
+    Available { version: String, installable: bool },
+    Downloading {
+        version: String,
+        downloaded: u64,
+        total: u64,
+    },
+    /// Downloaded and checked; the new earwig is going in, then starts.
+    Installing { version: String },
+    /// Installing `version` failed; the installed earwig is as it was.
+    Failed { version: String, reason: String },
 }
 
 /// How the hotkey reaches earwig.

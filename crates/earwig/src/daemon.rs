@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::Context as _;
 use earwig_core::audio::{self, Source};
 use earwig_core::config::{ConfigStore, InsertConfig};
-use earwig_core::controller::{self, Parts};
+use earwig_core::controller::{self, Handle, Parts};
 use earwig_core::engine::{Backend, EngineFactory, EngineOptions};
 use earwig_core::events::{Command, Event, InsertMethod};
 use earwig_core::history::History;
@@ -73,6 +73,7 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
             engine,
             inserter,
             hotkey_sources,
+            updates: earwig_core::update::Updates::detect(),
         },
         source,
     )?;
@@ -96,7 +97,12 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
         log::warn!("{}", permissions::missing_message(*permission));
     }
     if !headless {
-        crate::ui::run(handle.clone(), caps, open_settings || !missing.is_empty());
+        crate::ui::run(
+            handle.clone(),
+            caps,
+            open_settings || !missing.is_empty(),
+            socket.clone(),
+        );
     }
     // Return only once the model is freed: GPU backends crash at exit with one alive.
     let events = handle.subscribe();
@@ -104,10 +110,28 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
         handle.send(Command::Quit);
     }
     while events.recv().is_ok() {}
-    // Windows pipes go away by themselves; a Unix socket file stays behind.
-    #[cfg(unix)]
-    let _ = std::fs::remove_file(&socket);
+    finish(&handle, &socket, headless);
     Ok(())
+}
+
+/// What the daemon does once the controller is gone (the model freed): the
+/// socket file goes, and an app an update put in place (macOS) starts. Also
+/// called by the UI before it quits, as on macOS quitting ends the process
+/// at once. A second call does nothing.
+pub fn finish(handle: &Handle, socket: &Path, headless: bool) {
+    // Windows pipes go away by themselves; a Unix socket file stays behind.
+    // Gone before the new app starts, which would take it for this daemon's.
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(socket);
+    #[cfg(not(unix))]
+    let _ = socket;
+    // Only an update sets it: a plain Quit starts nothing.
+    if let Some(app) = handle.take_relaunch() {
+        #[cfg(target_os = "macos")]
+        earwig_core::update::relaunch(&app, headless);
+        #[cfg(not(target_os = "macos"))]
+        let _ = (app, headless);
+    }
 }
 
 /// Stand-in when nothing can insert text here: dictations fail and land in history.

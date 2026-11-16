@@ -1,6 +1,7 @@
 //! earwig: hold or tap a hotkey, speak, and the text lands where you are typing.
 
 mod cli_models;
+mod cli_update;
 mod daemon;
 mod ui;
 
@@ -56,6 +57,13 @@ enum Cmd {
     },
     /// List audio input devices.
     Devices,
+    /// Install a newer release, where earwig updates itself (the Windows
+    /// installer's install, the Mac app).
+    Update {
+        /// Only say whether one is out.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -81,6 +89,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Models { command } => cli_models::run(command),
         Cmd::Transcribe { wav, backend } => daemon::transcribe_files(&wav, backend.as_deref()),
         Cmd::Devices => daemon::devices(),
+        Cmd::Update { check } => cli_update::run(check),
     }
 }
 

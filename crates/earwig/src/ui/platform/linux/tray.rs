@@ -1,7 +1,7 @@
 //! StatusNotifierItem tray icon (ksni, blocking API on its own thread).
 
 use earwig_core::controller::Handle;
-use earwig_core::events::{Command, DictationState};
+use earwig_core::events::{Command, DictationState, UpdateState};
 use ksni::blocking::TrayMethods as _;
 use ksni::menu::{MenuItem, StandardItem};
 
@@ -13,6 +13,10 @@ impl TrayHandle {
     pub fn set_state(&self, state: DictationState) {
         self.0.update(|tray| tray.state = state);
     }
+
+    /// Linux builds never update themselves: their tray says nothing of it.
+    #[allow(clippy::unused_self)] // the other trays' signature
+    pub fn set_update(&self, _update: Option<&UpdateState>) {}
 }
 
 /// `None` (logged) without a tray host.

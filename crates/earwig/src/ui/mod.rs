@@ -15,6 +15,7 @@ mod settings;
 mod theme;
 mod water;
 
+use std::path::PathBuf;
 use std::sync::PoisonError;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,7 +23,7 @@ use earwig_core::audio::{InputDevice, InputDevices};
 use earwig_core::config::{AppearanceConfig, Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
-use earwig_core::events::{Command, DictationState, Event, Status};
+use earwig_core::events::{Command, DictationState, Event, Status, UpdateState};
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{AnyWindowHandle, App, Context, Entity, Global, QuitMode};
 
@@ -31,6 +32,9 @@ use overlay::OverlayView;
 /// Tray clicks, which don't go through the daemon.
 enum Local {
     ShowSettings,
+    /// A release page, for a copy that can't replace itself.
+    #[cfg(not(target_os = "linux"))]
+    OpenUrl(String),
 }
 
 /// How the overlay floats above other windows without taking focus.
@@ -53,9 +57,10 @@ pub(crate) enum OverlaySurface {
         reason = "only Linux keeps the capabilities, for the settings window"
     )
 )]
-pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
+pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool, socket: PathBuf) {
     let events = handle.subscribe();
     let voice = handle.spectrum();
+    let finishing = handle.clone();
     let (local_tx, local_rx) = flume::unbounded();
     let surface = platform::overlay_surface(&caps);
 
@@ -99,6 +104,8 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
                     cx.update(|cx| apply(event, cx));
                 }
                 log::info!("daemon event feed closed; quitting the UI");
+                // On macOS quitting ends the process at once: nothing after `run` runs.
+                crate::daemon::finish(&finishing, &socket, false);
                 cx.update(|cx| cx.quit());
             })
             .detach();
@@ -119,8 +126,12 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool) {
             .detach();
 
             cx.spawn(async move |cx| {
-                while let Ok(Local::ShowSettings) = local_rx.recv_async().await {
-                    cx.update(show_settings);
+                while let Ok(local) = local_rx.recv_async().await {
+                    match local {
+                        Local::ShowSettings => cx.update(show_settings),
+                        #[cfg(not(target_os = "linux"))]
+                        Local::OpenUrl(url) => cx.update(|cx| cx.open_url(&url)),
+                    }
                 }
             })
             .detach();
@@ -234,7 +245,8 @@ fn apply(event: Event, cx: &mut App) {
             // Snapshots can repeat the state, which would restart the overlay's switch-off.
             let state = status.state;
             let changed = UiState::status(cx).state != state;
-            cx.global_mut::<UiState>().status = status;
+            set_update(status.update.as_ref(), cx);
+            cx.global_mut::<UiState>().status = *status;
             if changed {
                 set_state(state, cx);
             }
@@ -273,6 +285,17 @@ fn apply(event: Event, cx: &mut App) {
             }
         }
         Event::ShowSettings => show_settings(cx),
+        Event::Update { update } => {
+            set_update(Some(&update), cx);
+            cx.global_mut::<UiState>().status.update = Some(update);
+            cx.refresh_windows();
+        }
+    }
+}
+
+fn set_update(update: Option<&UpdateState>, cx: &App) {
+    if let Some(tray) = &cx.global::<UiState>().tray {
+        tray.set_update(update);
     }
 }
 

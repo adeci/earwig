@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use clap::Subcommand;
 use earwig_core::config::ConfigStore;
 use earwig_core::events::Command;
-use earwig_core::models::{CancelToken, DownloadProgress, ModelManager, ModelSpec};
+use earwig_core::models::{CancelToken, ModelManager, ModelSpec};
 
 use crate::{configured_model, human_size};
 
@@ -161,7 +161,11 @@ fn download(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
     .context("installing the Ctrl-C handler")?;
 
     let mut line = ProgressLine::new();
-    let path = manager.download(spec, &mut |p| line.update(&p), &CancelToken::default());
+    let path = manager.download(
+        spec,
+        &mut |p| line.update(&p.spec.to_string(), p.downloaded, p.total),
+        &CancelToken::default(),
+    );
     line.finish();
     println!("{}", path?.display());
     Ok(())
@@ -210,7 +214,7 @@ fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
 }
 
 /// Redraws one line on a terminal, else prints a line per 10% (logs, CI).
-struct ProgressLine {
+pub(crate) struct ProgressLine {
     tty: bool,
     start: Instant,
     first: Option<u64>,
@@ -219,7 +223,7 @@ struct ProgressLine {
 }
 
 impl ProgressLine {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             tty: std::io::stderr().is_terminal(),
             start: Instant::now(),
@@ -229,16 +233,16 @@ impl ProgressLine {
         }
     }
 
-    fn update(&mut self, p: &DownloadProgress) {
-        let first = *self.first.get_or_insert(p.downloaded);
+    /// `downloaded` of `total` bytes of `what`.
+    pub(crate) fn update(&mut self, what: &str, downloaded: u64, total: u64) {
+        let first = *self.first.get_or_insert(downloaded);
         let millis = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let rate = p.downloaded.saturating_sub(first) * 1000 / millis.max(1);
-        let percent = (p.downloaded * 100).checked_div(p.total).unwrap_or(0);
+        let rate = downloaded.saturating_sub(first) * 1000 / millis.max(1);
+        let percent = (downloaded * 100).checked_div(total).unwrap_or(0);
         let text = format!(
-            "{}: {} / {}  {percent}%  {}/s",
-            p.spec,
-            human_size(p.downloaded),
-            human_size(p.total),
+            "{what}: {} / {}  {percent}%  {}/s",
+            human_size(downloaded),
+            human_size(total),
             human_size(rate),
         );
         let mut err = std::io::stderr().lock();
@@ -252,7 +256,7 @@ impl ProgressLine {
         }
     }
 
-    fn finish(&mut self) {
+    pub(crate) fn finish(&mut self) {
         if self.dirty {
             eprintln!();
             self.dirty = false;

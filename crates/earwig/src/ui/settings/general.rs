@@ -1,4 +1,5 @@
-//! General settings: hotkey, microphone, appearance, then typing (Linux) or startup.
+//! General settings: hotkey, microphone, appearance, then typing (Linux) or
+//! startup, and updates where earwig updates itself.
 
 use std::iter;
 use std::sync::PoisonError;
@@ -72,6 +73,10 @@ pub fn page(
     groups.push(typing(cx));
     #[cfg(any(windows, target_os = "macos"))]
     groups.push(startup());
+    // Only builds that update themselves have it.
+    if UiState::status(cx).update.is_some() {
+        groups.push(updates(cx));
+    }
     #[cfg(target_os = "macos")]
     if !missing {
         groups.push(permissions_group(&permissions));
@@ -374,6 +379,23 @@ fn startup() -> SettingGroup {
                     }
                     cx.refresh_windows();
                 },
+            ),
+        )],
+    )
+}
+
+fn updates(cx: &App) -> SettingGroup {
+    section(
+        "Updates",
+        None,
+        [item(
+            cx,
+            "updates.check",
+            "Check for updates",
+            "Ask GitHub once a day for a newer earwig.",
+            SettingField::switch(
+                |cx: &App| config(UiState::handle(cx)).updates.check,
+                |enabled, cx: &mut App| edit_config(cx, |c| c.updates.check = enabled),
             ),
         )],
     )

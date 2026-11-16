@@ -7,15 +7,8 @@ $root = Resolve-Path "$PSScriptRoot\..\.."
 Set-Location $root
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
 
-# transcribe.cpp tunes its CPU code to the machine that builds it (GGML_NATIVE),
-# so a package built on a runner with AVX-512 crashed on every CPU without it.
-# Pin ggml's x86 tiers up to AVX2 instead (Haswell, Zen and newer): the
-# SSE2 floor decodes slower than real time.
-$env:TRANSCRIBE_CMAKE_ARGS = "$env:TRANSCRIBE_CMAKE_ARGS -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DTRANSCRIBE_X86_CONSERVATIVE=ON".Trim()
-# The C runtime linked in (transcribe.cpp's C++ too), so earwig needs no Visual
-# C++ Redistributable, which Windows doesn't come with.
-$env:RUSTFLAGS = "$env:RUSTFLAGS -C target-feature=+crt-static".Trim()
-$env:TRANSCRIBE_CMAKE_ARGS += ' -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded'
+# Pinned CPU tiers, the C runtime linked in, the update marker, no test feed.
+. "$PSScriptRoot\release-env.ps1"
 cargo build --release --locked -p earwig -p earwigw
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$root\target" }

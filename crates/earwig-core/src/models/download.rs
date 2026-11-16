@@ -261,6 +261,14 @@ impl Part<'_> {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(Failure::Retry(net(&e))),
             };
+            // Never more than the file can be, whatever the server says.
+            if let Some(size) = src.size
+                && self.len + n as u64 > size
+            {
+                return Err(Failure::Fatal(net(&format!(
+                    "the server sent more than the expected {size} bytes"
+                ))));
+            }
             self.file.write_all(&buf[..n])?;
             self.hasher.update(&buf[..n]);
             self.len += n as u64;
@@ -477,6 +485,31 @@ mod tests {
             *server.ranges.lock().unwrap(),
             [None, Some("bytes=600000-".to_owned())]
         );
+    }
+
+    #[test]
+    fn a_body_longer_than_the_known_size_is_refused() {
+        let (data, sha) = data();
+        // No length header: only the known size tells it is too long.
+        let server = serve(data.clone(), vec![Reply::Unsized { limit: data.len() }]);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.gguf");
+        let err = run(
+            &server,
+            &sha,
+            Some(1_000_000),
+            &dest,
+            &CancelToken::default(),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("more than the expected 1000000 bytes"),
+            "{err}"
+        );
+        assert!(fs::metadata(part_path(&dest)).unwrap().len() <= 1_000_000);
+        assert!(!dest.exists());
     }
 
     #[test]

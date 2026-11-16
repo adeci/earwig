@@ -63,6 +63,14 @@ pub fn state_dir() -> PathBuf {
     os::state_dir()
 }
 
+/// Downloaded updates while they are checked and installed: private to the
+/// user, and emptied once they are done. `None` without a home directory,
+/// where the state directory falls back to a temporary one others can use.
+pub fn update_dir() -> Option<PathBuf> {
+    dirs::home_dir()?;
+    Some(os::state_dir().join("update"))
+}
+
 /// Where the daemon listens for [`crate::ipc`]: a Unix socket path, e.g.
 /// `$XDG_RUNTIME_DIR/earwig.sock`, or a named pipe on Windows.
 pub fn socket() -> PathBuf {
