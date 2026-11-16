@@ -7,31 +7,6 @@ Local dictation for Linux, macOS and Windows, made with Rust and
 
 ## Install
 
-### Windows
-
-Requires Windows 10 or 11 on a 64-bit Intel or AMD processor with AVX2 (Intel
-Core 4th generation, AMD Ryzen, or newer).
-
-1. Download `earwig-<version>-windows-x64-setup.exe` from the
-   [latest release](https://github.com/adeci/earwig/releases/latest).
-2. Run it. It installs for the current user and needs no administrator rights.
-3. In the settings window that opens, download a model under **Models**.
-
-The installer is not signed yet, so Windows may warn about an unknown
-publisher: choose **More info**, then **Run anyway**. A portable `.zip` is on
-the same page.
-
-### macOS
-
-Requires an Apple silicon Mac with macOS 14 or later.
-
-1. Download `earwig-<version>-macos-arm64.dmg` from the
-   [latest release](https://github.com/adeci/earwig/releases/latest).
-2. Open it and drag earwig to Applications.
-3. Start earwig and allow Microphone and Accessibility when macOS asks.
-4. Open **Settings** from the menu bar icon and download a model under
-   **Models**.
-
 ### NixOS and nix-darwin
 
 ```nix
@@ -48,6 +23,31 @@ after each rebuild, because Nix builds are not signed with a Developer ID.
 
 [Build from source](docs/building.md). The steps are tested on Ubuntu, Debian,
 Fedora and Arch.
+
+### macOS
+
+Requires an Apple silicon Mac with macOS 14 or later.
+
+1. Download `earwig-<version>-macos-arm64.dmg` from the
+   [latest release](https://github.com/adeci/earwig/releases/latest).
+2. Open it and drag earwig to Applications.
+3. Start earwig and allow Microphone and Accessibility when macOS asks.
+4. Open **Settings** from the menu bar icon and download a model under
+   **Models**.
+
+### Windows
+
+Requires Windows 10 or 11 on a 64-bit Intel or AMD processor with AVX2 (Intel
+Core 4th generation, AMD Ryzen, or newer).
+
+1. Download `earwig-<version>-windows-x64-setup.exe` from the
+   [latest release](https://github.com/adeci/earwig/releases/latest).
+2. Run it. It installs for the current user and needs no administrator rights.
+3. In the settings window that opens, download a model under **Models**.
+
+The installer is not signed yet, so Windows may warn about an unknown
+publisher: choose **More info**, then **Run anyway**. A portable `.zip` is on
+the same page.
 
 ## Usage
 

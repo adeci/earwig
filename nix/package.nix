@@ -23,9 +23,16 @@
   libxrandr,
   apple-sdk_15,
   llvmPackages,
+  jq,
 }:
 let
   inherit (stdenv.hostPlatform) isLinux;
+  # One x86-64 package for every x86-64 CPU: transcribe.cpp as a shared library whose backends
+  # are modules beside it, one CPU module per instruction-set generation, the best picked at run
+  # time (`dynamic-backends`; inside Nix, ggml would otherwise build for the SSE2 floor).
+  # Elsewhere it stays linked in: macOS has a fixed CPU floor and Metal, and on ARM the modules
+  # would be a single build of the same portable CPU code.
+  dynamicBackends = isLinux && stdenv.hostPlatform.isx86_64;
   root = ./..;
   src = lib.fileset.toSource {
     inherit root;
@@ -107,21 +114,36 @@ craneLib.buildPackage (
   commonArgs
   // {
     inherit cargoArtifacts;
-    cargoExtraArgs = "--locked -p earwig";
+    cargoExtraArgs =
+      "--locked -p earwig" + lib.optionalString dynamicBackends " --features dynamic-backends";
     # Workspace tests run as the `tests` flake check, sharing cargoArtifacts.
     doCheck = false;
 
     nativeBuildInputs = commonArgs.nativeBuildInputs ++ lib.optionals isLinux [ addDriverRunpath ];
 
-    postInstall = lib.optionalString isLinux ''
-      install -Dm644 assets/io.github.adeci.earwig.desktop \
-        $out/share/applications/io.github.adeci.earwig.desktop
-      install -Dm644 assets/io.github.adeci.earwig.svg \
-        $out/share/icons/hicolor/scalable/apps/io.github.adeci.earwig.svg
-    '';
+    postInstall =
+      lib.optionalString isLinux ''
+        install -Dm644 assets/io.github.adeci.earwig.desktop \
+          $out/share/applications/io.github.adeci.earwig.desktop
+        install -Dm644 assets/io.github.adeci.earwig.svg \
+          $out/share/icons/hicolor/scalable/apps/io.github.adeci.earwig.svg
+      ''
+      # libtranscribe and its modules, in one directory: it loads them from beside itself. They
+      # come from the install prefix of this build's transcribe-cpp-sys, as its manifest lists it.
+      + lib.optionalString dynamicBackends ''
+        prefix=$(${lib.getExe jq} -rR 'fromjson? | select(.reason == "build-script-executed"
+          and (.package_id | contains("#transcribe-cpp-sys@"))) | .out_dir' "$cargoBuildLog")
+        manifest=$(echo "$prefix"/lib*/transcribe-link.json)
+        mkdir -p $out/lib/earwig
+        for dir in $(${lib.getExe jq} -r '.lib_dir, .module_dir' "$manifest" | sort -u); do
+          cp -P "$prefix/$dir"/lib*.so* $out/lib/earwig/
+        done
+      '';
 
     postFixup = lib.optionalString isLinux ''
-      patchelf --add-rpath ${lib.makeLibraryPath runtimeLibs} $out/bin/earwig
+      patchelf --add-rpath ${
+        lib.makeLibraryPath runtimeLibs + lib.optionalString dynamicBackends ":$out/lib/earwig"
+      } $out/bin/earwig
       addDriverRunpath $out/bin/earwig
     '';
 

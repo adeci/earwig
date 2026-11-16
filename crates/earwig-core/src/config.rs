@@ -92,7 +92,8 @@ pub struct AudioConfig {
     pub device: Option<String>,
     /// Keep the microphone open between dictations so speech that starts as
     /// the key goes down is not clipped. The desktop's mic indicator stays on,
-    /// which macOS shows in the menu bar: off there by default.
+    /// which macOS shows in the menu bar and Windows in the taskbar: off there
+    /// by default.
     pub keep_open: bool,
     /// Audio from before the press that is included in each recording.
     pub preroll_ms: u64,
@@ -102,7 +103,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             device: None,
-            keep_open: !cfg!(target_os = "macos"),
+            keep_open: cfg!(target_os = "linux"),
             preroll_ms: 300,
         }
     }

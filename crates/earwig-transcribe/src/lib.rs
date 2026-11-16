@@ -5,7 +5,7 @@
 //! allows one compute at a time and a stream borrows the session.
 
 use std::path::Path;
-use std::sync::Once;
+use std::sync::LazyLock;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -56,14 +56,21 @@ impl EngineFactory for TranscribeEngine {
     }
 
     fn load(&self, path: &Path, options: &EngineOptions) -> anyhow::Result<Box<dyn Model>> {
-        static LOGGING: Once = Once::new();
+        static ENGINE: LazyLock<Result<(), String>> = LazyLock::new(|| {
+            tc::init_logging();
+            // The backend modules beside libtranscribe (`dynamic-backends`);
+            // nothing to do where they are linked in.
+            tc::init_backends_default().map_err(|e| e.to_string())
+        });
         let missing = missing_cpu_features();
         anyhow::ensure!(
             missing.is_empty(),
             "this CPU lacks AVX2 ({} missing), which this build of earwig's speech engine needs",
             missing.join(", ")
         );
-        LOGGING.call_once(tc::init_logging);
+        if let Err(e) = &*ENGINE {
+            anyhow::bail!("starting the speech engine: {e}");
+        }
         Ok(Box::new(TranscribeModel::load(path, options)?))
     }
 }

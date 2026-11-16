@@ -49,7 +49,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 nix fmt
 nix flake check -L                                # package, clippy, tests, VM tests (KVM)
-nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome kde cosmic models
+nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome kde cosmic models cpus
 ```
 
 ## Rules

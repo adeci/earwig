@@ -125,6 +125,7 @@
           vm-cosmic = vmTest ./nix/tests/cosmic.nix;
           vm-models = vmTest ./nix/tests/models.nix;
           vm-gnome = vmTest ./nix/tests/gnome.nix;
+          vm-cpus = vmTest ./nix/tests/cpus.nix;
         }
       );
 
