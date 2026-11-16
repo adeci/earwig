@@ -143,7 +143,9 @@ function Step([string]$name, [scriptblock]$body) {
     $script:timings[$name] = [math]::Round($watch.Elapsed.TotalSeconds, 1)
 }
 
-# A console program without a window: exit code, stdout, stderr; killed after $timeout s.
+# A console program without a window: exit code, stdout, stderr; killed after $timeout s. Its
+# output ends when every process holding it exits, which a program it started may not do: what
+# came within 5 s of its own exit is what it printed.
 function Run([string]$exe, [string[]]$arguments, [int]$timeout = 60) {
     $info = [Diagnostics.ProcessStartInfo]::new($exe)
     foreach ($a in $arguments) { $info.ArgumentList.Add($a) }
@@ -154,12 +156,13 @@ function Run([string]$exe, [string[]]$arguments, [int]$timeout = 60) {
     $p = [Diagnostics.Process]::Start($info)
     $out = $p.StandardOutput.ReadToEndAsync()
     $err = $p.StandardError.ReadToEndAsync()
-    if (-not $p.WaitForExit($timeout * 1000)) {
-        $p.Kill($true)
-        return [pscustomobject]@{ Code = 'timeout'; Out = $out.Result; Err = $err.Result }
+    $code = if ($p.WaitForExit($timeout * 1000)) { $p.ExitCode } else { $p.Kill($true); 'timeout' }
+    try { $null = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($out, $err), 5000) } catch { }
+    [pscustomobject]@{
+        Code = $code
+        Out = if ($out.IsCompletedSuccessfully) { $out.Result.Trim() } else { '' }
+        Err = if ($err.IsCompletedSuccessfully) { $err.Result.Trim() } else { '' }
     }
-    $p.WaitForExit()
-    [pscustomobject]@{ Code = $p.ExitCode; Out = $out.Result.Trim(); Err = $err.Result.Trim() }
 }
 
 function WaitFor([scriptblock]$condition, [int]$timeout) {

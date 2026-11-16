@@ -6,6 +6,7 @@ use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Context as _;
 
@@ -46,8 +47,12 @@ impl Listener {
     }
 }
 
-pub(super) fn connect(path: &Path) -> io::Result<Conn> {
-    UnixStream::connect(path)
+/// A client end; reads and writes give up after `timeout`.
+pub(super) fn connect(path: &Path, timeout: Option<Duration>) -> io::Result<Conn> {
+    let conn = UnixStream::connect(path)?;
+    conn.set_read_timeout(timeout)?;
+    conn.set_write_timeout(timeout)?;
+    Ok(conn)
 }
 
 pub(super) fn shutdown_write(conn: &Conn) -> io::Result<()> {

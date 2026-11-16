@@ -31,7 +31,9 @@ LicenseFile=..\..\LICENSE
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-CloseApplications=yes
+; No Restart Manager: it closes whatever has one of the files open, a console program by sending
+; Ctrl+C to its whole console. PrepareToInstall stops earwig's own programs instead.
+CloseApplications=no
 ; The build machine's clock is UTC; without this, installed files are dated in its local time.
 TimeStampsInUTC=yes
 
@@ -66,10 +68,26 @@ Filename: "{app}\earwigw.exe"; Parameters: "settings"; Description: "Start earwi
 Filename: "{app}\earwigw.exe"; Flags: nowait; Check: WasRunning
 
 [Code]
+const
+  PROCESS_TERMINATE = $0001;
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
+  SYNCHRONIZE = $00100000;
+
 var
   Upgrade: Boolean;
   Running: Boolean;
   Installed: Boolean;
+
+function OpenProcess(Access: DWORD; Inherit: Boolean; ProcessId: DWORD): UINT_PTR;
+  external 'OpenProcess@kernel32.dll stdcall';
+function QueryFullProcessImageName(Process: UINT_PTR; Flags: DWORD; Name: String; var Size: DWORD): Boolean;
+  external 'QueryFullProcessImageNameW@kernel32.dll stdcall';
+function TerminateProcess(Process: UINT_PTR; Code: UINT): Boolean;
+  external 'TerminateProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: UINT_PTR; Milliseconds: DWORD): DWORD;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseHandle(Handle: UINT_PTR): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
 
 function Earwig(const Args: String): Boolean;
 var
@@ -79,24 +97,87 @@ begin
     ewWaitUntilTerminated, Code) and (Code = 0);
 end;
 
+{ Whether Path is in this install's folder, not a copy elsewhere (the portable zip). }
+function InApp(const Path: String): Boolean;
+begin
+  Result := CompareText(ExtractFilePath(Path), AddBackslash(ExpandConstant('{app}'))) = 0;
+end;
+
+{ The processes running this install's earwig.exe or earwigw.exe: the daemon, its launcher and
+  any command, `earwig events` in a terminal, say. }
+function AppProcesses: TArrayOfInteger;
+var
+  Wmi, Service, Found, Process: Variant;
+  I, Count, N: Integer;
+begin
+  SetArrayLength(Result, 0);
+  try
+    Wmi := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Wmi.ConnectServer('.', 'root\CIMV2');
+    Found := Service.ExecQuery('SELECT ProcessId, ExecutablePath FROM Win32_Process ' +
+      'WHERE Name = ''earwig.exe'' OR Name = ''earwigw.exe''');
+    Count := Found.Count;
+    for I := 0 to Count - 1 do
+    begin
+      Process := Found.ItemIndex(I);
+      if not VarIsNull(Process.ExecutablePath) then
+        if InApp(Process.ExecutablePath) then
+        begin
+          N := GetArrayLength(Result);
+          SetArrayLength(Result, N + 1);
+          Result[N] := Process.ProcessId;
+        end;
+    end;
+  except
+    Log('Listing earwig''s processes failed: ' + GetExceptionMessage);
+  end;
+end;
+
+{ Stops this install's earwig so its files can be replaced or deleted: asks the daemon to quit,
+  gives its programs Seconds to end (a terminal's `earwig events` ends with the daemon) and ends
+  the rest, nothing else. Whether the daemon was running. }
+function StopEarwig(Seconds: Integer): Boolean;
+var
+  Ids: TArrayOfInteger;
+  Tries, I: Integer;
+  Process: UINT_PTR;
+  Path: String;
+  Size: DWORD;
+begin
+  Result := Earwig('quit');
+  Ids := AppProcesses;
+  Tries := 0;
+  while (GetArrayLength(Ids) > 0) and (Tries < Seconds * 4) do
+  begin
+    Sleep(250);
+    Tries := Tries + 1;
+    Ids := AppProcesses;
+  end;
+  for I := 0 to GetArrayLength(Ids) - 1 do
+  begin
+    Process := OpenProcess(PROCESS_TERMINATE or PROCESS_QUERY_LIMITED_INFORMATION or SYNCHRONIZE, False, Ids[I]);
+    if Process = 0 then
+      Continue;
+    { Still that program: an id is reused once its process is gone. }
+    Path := StringOfChar(#0, 1024);
+    Size := 1024;
+    if QueryFullProcessImageName(Process, 0, Path, Size) and InApp(Copy(Path, 1, Size)) then
+    begin
+      Log(Format('Ending %s (process %d).', [Copy(Path, 1, Size), Ids[I]]));
+      TerminateProcess(Process, 1);
+      WaitForSingleObject(Process, 5000);
+    end;
+    CloseHandle(Process);
+  end;
+end;
+
 { An upgrade stops the running earwig first, so its files can be replaced. }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  Tries: Integer;
 begin
   Result := '';
   Upgrade := FileExists(ExpandConstant('{app}\earwig.exe'));
-  if Upgrade and Earwig('quit') then
-  begin
-    Running := True;
-    Tries := 0;
-    while Earwig('status') and (Tries < 50) do
-    begin
-      Sleep(100);
-      Tries := Tries + 1;
-    end;
-    Sleep(500);
-  end;
+  if Upgrade then
+    Running := StopEarwig(10);
 end;
 
 function WasRunning: Boolean;
@@ -104,50 +185,10 @@ begin
   Result := Running;
 end;
 
-{ Whether the installed Name can be opened exclusively: no running earwig holds it. }
-function Unlocked(const Name: String): Boolean;
-var
-  Stream: TFileStream;
-begin
-  Result := True;
-  if not FileExists(ExpandConstant('{app}\' + Name)) then
-    Exit;
-  try
-    Stream := TFileStream.Create(ExpandConstant('{app}\' + Name), fmOpenReadWrite or fmShareExclusive);
-    Stream.Free;
-  except
-    Result := False;
-  end;
-end;
-
-{ Uninstalling stops earwig and waits until its processes are gone, so its files
-  can be deleted: `earwig quit` returns before the daemon has exited. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  Tries, Code: Integer;
 begin
-  if CurUninstallStep <> usUninstall then
-    Exit;
-  if not Earwig('quit') then
-    Exit;
-  Tries := 0;
-  while Earwig('status') and (Tries < 50) do
-  begin
-    Sleep(100);
-    Tries := Tries + 1;
-  end;
-  Tries := 0;
-  while not (Unlocked('earwig.exe') and Unlocked('earwigw.exe')) and (Tries < 100) do
-  begin
-    Sleep(100);
-    Tries := Tries + 1;
-  end;
-  { Still there after 10 s: end it, rather than leave the files behind. }
-  if Tries = 100 then
-  begin
-    Exec('taskkill.exe', '/f /im earwigw.exe /im earwig.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-    Sleep(1000);
-  end;
+  if CurUninstallStep = usUninstall then
+    StopEarwig(10);
 end;
 
 function SilentUpgrade: Boolean;

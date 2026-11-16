@@ -142,19 +142,39 @@ fn write_line(mut out: impl io::Write, value: &impl serde::Serialize) -> io::Res
     out.write_all(line.as_bytes())
 }
 
-fn connect(path: &Path) -> anyhow::Result<os::Conn> {
-    os::connect(path)
+/// How long a client waits for the daemon to answer a command: one that took
+/// the connection and never answers must not hang `earwig quit` or `status`,
+/// which the installer runs and waits for. A check for updates asks GitHub.
+fn reply_timeout(cmd: &Command) -> Duration {
+    if matches!(cmd, Command::CheckForUpdates) {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
+fn connect(path: &Path, timeout: Option<Duration>) -> anyhow::Result<os::Conn> {
+    os::connect(path, timeout)
         .with_context(|| format!("earwig is not running (no daemon at {})", path.display()))
 }
 
 /// [`request`] against an explicit socket path.
 pub fn request_at(path: &Path, cmd: &Command) -> anyhow::Result<Option<Event>> {
-    let conn = connect(path)?;
+    request_within(path, cmd, reply_timeout(cmd))
+}
+
+fn request_within(path: &Path, cmd: &Command, timeout: Duration) -> anyhow::Result<Option<Event>> {
+    let conn = connect(path, Some(timeout))?;
     write_line(&conn, cmd)?;
     os::shutdown_write(&conn)?;
     let mut reply = None;
     for line in BufReader::new(&conn).lines() {
-        let line = line?;
+        let line = line.map_err(|e| match e.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
+                anyhow::anyhow!("earwig did not answer within {timeout:?}")
+            }
+            _ => e.into(),
+        })?;
         if !line.trim().is_empty() {
             reply = Some(serde_json::from_str(&line)?);
             break;
@@ -170,7 +190,7 @@ pub fn request_at(path: &Path, cmd: &Command) -> anyhow::Result<Option<Event>> {
 pub fn subscribe_at(
     path: &Path,
 ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Event>> + use<>> {
-    let conn = connect(path)?;
+    let conn = connect(path, None)?;
     write_line(&conn, &Command::Subscribe)?;
     Ok(BufReader::new(conn)
         .lines()
@@ -286,7 +306,7 @@ mod tests {
         shared.bus.publish(&Event::Level { level: 0.5 });
         assert_eq!(events.next().unwrap().unwrap(), Event::Level { level: 0.5 });
 
-        let raw = os::connect(&path).unwrap();
+        let raw = os::connect(&path, None).unwrap();
         write_line(&raw, &serde_json::json!({"cmd": "dance"})).unwrap();
         os::shutdown_write(&raw).unwrap();
         let line = BufReader::new(&raw).lines().next().unwrap().unwrap();
@@ -303,9 +323,25 @@ mod tests {
         let _server = Server::bind(&path).unwrap();
         assert!(Server::bind(&path).is_err());
         assert!(
-            os::connect(&path).is_ok(),
+            os::connect(&path, None).is_ok(),
             "the live daemon lost its address"
         );
+    }
+
+    #[test]
+    fn a_daemon_that_never_answers_fails_the_request_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = address(dir.path());
+        let mut listener = os::Listener::bind(&path).unwrap();
+        // Takes the connection and keeps it, answering nothing.
+        thread::spawn(move || {
+            let _conn = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(30));
+        });
+        let started = std::time::Instant::now();
+        let err = request_within(&path, &Command::Status, Duration::from_millis(300)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{err:#}");
+        assert!(err.to_string().contains("did not answer"), "{err:#}");
     }
 
     #[test]
@@ -372,6 +408,6 @@ mod tests {
         let stale = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
         bind(&stale, &SocketAddrUnix::new(&path).unwrap()).unwrap();
         let _server = Server::bind(&path).unwrap();
-        assert!(os::connect(&path).is_ok());
+        assert!(os::connect(&path, None).is_ok());
     }
 }

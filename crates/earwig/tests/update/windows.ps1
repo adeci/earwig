@@ -3,7 +3,10 @@
 # stand-in for GitHub (fake_github.py) offers. First with a SHA-256 that doesn't match, which it
 # refuses, then as released. CI runs it after package.ps1, with Inno Setup's iscc at hand.
 #   pwsh crates/earwig/tests/update/windows.ps1
+# Every wait has a deadline: what outlives it is killed, and the failure says what was running.
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$started = Get-Date
 $root = Resolve-Path "$PSScriptRoot\..\..\..\.."
 Set-Location $root
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
@@ -23,15 +26,99 @@ Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$work\stage" | Out-Null
 
 $transcript = [System.Collections.Generic.List[string]]::new()
+# What ran when a wait ran out, taken before the kill.
+$stuck = $null
 
-function Run([string]$exe, [string[]]$arguments) {
-    $ErrorActionPreference = 'Continue'
-    $output = (& $exe @arguments 2>&1 | ForEach-Object { "$_" }) -join "`n"
-    $code = $LASTEXITCODE
-    $said = "> $(Split-Path -Leaf $exe) $arguments (exit $code)`n$output"
+Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Text;
+using System.Threading;
+
+/// A console program, its output and errors collected as they come.
+public sealed class Bounded
+{
+    readonly Process process = new Process();
+    readonly StringBuilder output = new StringBuilder();
+    readonly CountdownEvent ends = new CountdownEvent(2);
+
+    public Bounded(string exe, string[] arguments)
+    {
+        var info = process.StartInfo;
+        info.FileName = exe;
+        foreach (var argument in arguments) info.ArgumentList.Add(argument);
+        info.UseShellExecute = false;
+        info.CreateNoWindow = true;
+        info.RedirectStandardInput = true;
+        info.RedirectStandardOutput = true;
+        info.RedirectStandardError = true;
+        DataReceivedEventHandler take = (_, e) =>
+        {
+            if (e.Data == null) ends.Signal();
+            else lock (output) output.AppendLine(e.Data);
+        };
+        process.OutputDataReceived += take;
+        process.ErrorDataReceived += take;
+        process.Start();
+        process.StandardInput.Close();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+    }
+
+    public bool Exited(int seconds) { return process.WaitForExit(seconds * 1000); }
+
+    public int Code { get { return process.ExitCode; } }
+
+    /// It, and every program it started.
+    public void Kill() { try { process.Kill(true); } catch (InvalidOperationException) { } }
+
+    /// A program it started kept its output open (it inherited it).
+    public bool Held { get; private set; }
+
+    /// What it printed. Its output ends when every process holding it exits, which a program it
+    /// started may not do for a while: this takes what came within 5 s of its own exit.
+    public string Output()
+    {
+        Held = !ends.Wait(5000);
+        lock (output) return output.ToString().TrimEnd();
+    }
+}
+'@
+
+# The processes this test has to do with: those started since it began, and earwig's and its
+# installers' whenever they started; with their parents, start times and command lines.
+function Processes {
+    (Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -ge $started -or $_.Name -like 'earwig*' } |
+        Sort-Object CreationDate | ForEach-Object {
+            '{0} {1} (parent {2}, started {3:HH:mm:ss.fff}) {4}' -f $_.ProcessId, $_.Name, $_.ParentProcessId, $_.CreationDate, $_.CommandLine
+        }) -join "`n"
+}
+
+# A wait ran out: note what runs, kill what $kill kills, fail.
+function Stuck([string]$what, [scriptblock]$kill) {
+    $script:stuck = Processes
+    & $kill
+    throw "FAILED: $what"
+}
+
+# A program to its end within $seconds, its output and errors together; killed with everything
+# it started if it takes longer. Never earwig.exe while an installer runs: it would hold the
+# files the installer replaces.
+function Run([string]$exe, [string[]]$arguments, [int]$seconds = 60) {
+    $command = "$(Split-Path -Leaf $exe) $arguments"
+    if ($exe -eq $earwig -and (Get-Process 'earwig-*-setup*' -ErrorAction SilentlyContinue)) {
+        Stuck "$command while an installer runs" { }
+    }
+    $run = [Bounded]::new($exe, $arguments)
+    if (-not $run.Exited($seconds)) {
+        Stuck "$command did not finish within $seconds s" { $run.Kill() }
+    }
+    $output = $run.Output()
+    $said = "> $command (exit $($run.Code))`n$output"
+    if ($run.Held) { $said += "`n(a program it started still holds its output)" }
     Write-Host $said
     $transcript.Add($said)
-    @{ Code = $code; Output = $output }
+    @{ Code = $run.Code; Output = $output }
 }
 
 function Check([bool]$ok, [string]$what) {
@@ -47,13 +134,15 @@ function Annotate([string]$level, [string]$title, [string]$text) {
     Write-Host "::${level} title=${title}::$($text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A'))"
 }
 
-# Run an installer silently to its end and return its exit code. Not `Start-Process -Wait`,
-# which also waits for the earwig an upgrade starts again.
-function Install([string]$setup, [string]$log) {
+# Run an installer silently to its end, within $seconds, and return its exit code. Waits on the
+# installer alone: `Start-Process -Wait` also waits for the earwig an upgrade starts again.
+function Install([string]$setup, [string]$log, [int]$seconds = 180) {
     $installer = Start-Process $setup -PassThru `
         -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`""
     $null = $installer.Handle
-    $installer.WaitForExit()
+    if (-not $installer.WaitForExit($seconds * 1000)) {
+        Stuck "$(Split-Path -Leaf $setup) did not finish within $seconds s" { $installer.Kill($true) }
+    }
     $installer.ExitCode
 }
 
@@ -68,22 +157,32 @@ function WaitFor([scriptblock]$done, [int]$seconds, [string]$what) {
 
 function Sign-In { $null -ne (Get-ItemProperty -Path $runKey -Name earwig -ErrorAction SilentlyContinue) }
 
+# The stand-in for GitHub, once it answers. Its output goes to files, not to this step's.
 function Serve([switch]$WrongDigest) {
     $arguments = @("`"$PSScriptRoot\fake_github.py`"", '--port', $port, '--version', $version, '--file', "`"$newSetup`"")
     if ($WrongDigest) { $arguments += '--wrong-digest' }
     $log = "$work\feed-$(Get-Random).log"
-    $feed = Start-Process python -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardError $log
-    WaitFor {
-        try { Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$port/repos/adeci/earwig/releases/latest" | Out-Null; $true }
-        catch { $false }
-    } 30 'the stand-in for GitHub answers'
+    $feed = Start-Process python -ArgumentList $arguments -PassThru -NoNewWindow `
+        -RedirectStandardOutput "$log.out" -RedirectStandardError $log
+    try {
+        WaitFor {
+            if ($feed.HasExited) { throw "FAILED: the stand-in for GitHub exited: $(Get-Content -Raw $log)" }
+            try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "http://127.0.0.1:$port/repos/adeci/earwig/releases/latest" | Out-Null; $true }
+            catch { $false }
+        } 30 'the stand-in for GitHub answers'
+    } catch {
+        Stop-Process -Id $feed.Id -ErrorAction SilentlyContinue
+        throw
+    }
     $feed
 }
 
 $feed = $null
+$passed = $false
 try {
     # The older build: the same code built as the release package is (not for this runner's
-    # CPU), an older version, the stand-in compiled in.
+    # CPU), an older version, the stand-in compiled in. The lock file gets the same versions, so
+    # cargo asks crates.io nothing (--frozen): package.ps1 fetched every crate already.
     $manifests = 'crates\earwig\Cargo.toml', 'crates\earwig-core\Cargo.toml', 'Cargo.lock'
     $saved = @{}
     foreach ($file in $manifests) { $saved[$file] = Get-Content -Raw $file }
@@ -91,9 +190,11 @@ try {
         foreach ($file in $manifests[0..1]) {
             $saved[$file] -replace '(?m)^version\.workspace = true', "version = `"$old`"" | Set-Content -NoNewline $file
         }
+        $saved['Cargo.lock'] -replace '(?m)^(name = "earwig(-core)?"\r?\n)version = ".+"', "`${1}version = `"$old`"" |
+            Set-Content -NoNewline 'Cargo.lock'
         . "$root\packaging\windows\release-env.ps1"
         $env:EARWIG_UPDATE_TEST_FEED = "http://127.0.0.1:$port"
-        $build = Run cargo 'build', '--release', '-p', 'earwig', '-p', 'earwigw'
+        $build = Run cargo 'build', '--release', '--frozen', '-p', 'earwig', '-p', 'earwigw' 600
         if ($build.Code) {
             $errors = $build.Output -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|Downloaded|Downloading)' }
             throw "building the older test build failed:`n$(($errors | Select-Object -Last 40) -join "`n")"
@@ -102,12 +203,13 @@ try {
         Remove-Item Env:EARWIG_UPDATE_TEST_FEED -ErrorAction SilentlyContinue
         foreach ($file in $manifests) { $saved[$file] | Set-Content -NoNewline $file }
     }
-    Copy-Item "$target\release\earwig.exe", "$target\release\earwigw.exe",
-        "$target\package\earwig-$version-windows-x64\vulkan-1.dll" "$work\stage"
-    $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+    # The package's files, its two programs the older build's.
+    Copy-Item "$target\package\earwig-$version-windows-x64\*" "$work\stage"
+    Copy-Item -Force "$target\release\earwig.exe", "$target\release\earwigw.exe" "$work\stage"
+    $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
     if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-    & $iscc /Q "/DVersion=$old" "/DStage=$work\stage" "/O$work" packaging\windows\earwig.iss
-    if ($LASTEXITCODE) { throw 'packaging the older test build failed' }
+    $packaged = Run $iscc '/Q', "/DVersion=$old", "/DStage=$work\stage", "/O$work", 'packaging\windows\earwig.iss' 600
+    if ($packaged.Code) { throw 'packaging the older test build failed' }
 
     # Whatever an earlier step (the installer's smoke test) left: no earwig running, none
     # installed. The uninstaller hands over to a copy of itself, so its own end says nothing.
@@ -126,7 +228,7 @@ try {
     # No microphone on the runner: dictations would hear a clip.
     $env:EARWIG_AUDIO_FILE = "$root\tests\fixtures\quick-brown-fox.wav"
     Start-Process "$app\earwigw.exe"
-    WaitFor { (Run $earwig 'status').Code -eq 0 } 60 "earwig $old runs"
+    WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $old runs"
 
     $feed = Serve -WrongDigest
     $check = Run $earwig 'update', '--check'
@@ -134,7 +236,7 @@ try {
     $refused = Run $earwig 'update'
     Check ($refused.Code -ne 0 -and $refused.Output.Contains('SHA-256')) 'a download that does not match its digest is refused'
     Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is still installed"
-    $status = (Run $earwig 'status').Output | ConvertFrom-Json
+    $status = (Run $earwig 'status' 20).Output | ConvertFrom-Json
     Check ($status.update.state -eq 'failed') 'earwig still runs and says the update failed'
     Check (-not (Test-Path "$env:LOCALAPPDATA\earwig\state\update")) 'nothing of the download is left'
 
@@ -154,12 +256,12 @@ try {
         $held.Close()
     }
     Check ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq $old) "earwig $old is still registered"
-    WaitFor { (Run $earwig 'status').Code -eq 0 } 60 'earwig runs again after the failed setup'
+    WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 'earwig runs again after the failed setup'
 
     # Back to the older build, by its installer, for an update that goes through.
     Check ((Install "$work\earwig-$old-windows-x64-setup.exe" "$work\install-again.log") -eq 0) "earwig $old installs again"
     Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is installed again"
-    WaitFor { (Run $earwig 'status').Code -eq 0 } 60 "earwig $old runs again"
+    WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $old runs again"
     Check (-not (Sign-In)) 'a silent reinstall leaves Start at sign-in off'
 
     $updated = Run $earwig 'update'
@@ -171,26 +273,41 @@ try {
         -not (Get-Process | Where-Object { $_.Name -like 'earwig-*-setup*' })
     } 180 "the installer put $version in place"
     Check ((Run $earwig '--version').Output -eq "earwig $version") "earwig $version is installed"
-    WaitFor { (Run $earwig 'status').Code -eq 0 } 60 "earwig $version runs"
+    WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $version runs"
     $running = Get-Process earwig | ForEach-Object { $_.Path }
     Check (@($running | Where-Object { $_ -ne $earwig }).Count -eq 0) "only the installed earwig runs: $running"
     Check (-not (Sign-In)) 'Start at sign-in is still off'
+    $passed = $true
 } catch {
     Write-Host $_
     Annotate error 'update end to end' "$_`n$(($transcript | Select-Object -Last 12) -join "`n")"
-    foreach ($log in "$env:LOCALAPPDATA\earwig\earwig.log", "$env:LOCALAPPDATA\earwig\state\install.log",
-        "$work\install-again.log", "$work\install-old.log") {
+    $processes = if ($stuck) { $stuck } else { Processes }
+    Write-Host "--- processes`n$processes"
+    Annotate warning 'processes' $processes
+    foreach ($log in @("$env:LOCALAPPDATA\earwig\earwig.log", "$env:LOCALAPPDATA\earwig\state\install.log",
+            "$work\install-again.log", "$work\install-old.log") + @(Get-ChildItem "$work\feed-*.log" -ErrorAction SilentlyContinue)) {
         if (Test-Path $log) {
             Write-Host "--- $log"
             Get-Content $log -Tail 80 | Write-Host
             Annotate warning (Split-Path -Leaf $log) ((Get-Content $log -Tail 60) -join "`n")
         }
     }
-    Get-ChildItem "$work\feed-*.log" -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host "--- $_"; Get-Content $_ -Tail 40 | Write-Host
-    }
     throw
 } finally {
     if ($feed) { Stop-Process -Id $feed.Id -ErrorAction SilentlyContinue }
-    if (Test-Path $earwig) { Run $earwig 'quit' | Out-Null }
+    if (Test-Path $earwig) {
+        try { Run $earwig 'quit' 20 | Out-Null } catch { Write-Host $_ }
+    }
+    # Nothing this test started outlives it.
+    $left = { Get-Process earwig, earwigw, 'earwig-*-setup*' -ErrorAction SilentlyContinue }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((& $left) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    if (& $left) {
+        $processes = Processes
+        & $left | Stop-Process -Force
+        if ($passed) {
+            Annotate error 'update end to end' "still running 30 s after ``earwig quit``:`n$processes"
+            throw "FAILED: earwig quits:`n$processes"
+        }
+    }
 }

@@ -51,15 +51,21 @@ pub(super) struct Conn {
     read_done: OwnedHandle,
     write_done: OwnedHandle,
     write_timeout: Option<Duration>,
+    read_timeout: Option<Duration>,
 }
 
 impl Conn {
-    fn new(pipe: OwnedHandle, write_timeout: Option<Duration>) -> io::Result<Self> {
+    fn new(
+        pipe: OwnedHandle,
+        write_timeout: Option<Duration>,
+        read_timeout: Option<Duration>,
+    ) -> io::Result<Self> {
         Ok(Self {
             pipe,
             read_done: event()?,
             write_done: event()?,
             write_timeout,
+            read_timeout,
         })
     }
 
@@ -136,7 +142,7 @@ impl Conn {
 impl Read for &Conn {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
-        let read = self.overlapped(&self.read_done, None, |overlapped| {
+        let read = self.overlapped(&self.read_done, self.read_timeout, |overlapped| {
             // SAFETY: `buf` outlives the operation (see `overlapped`).
             unsafe {
                 ReadFile(
@@ -253,10 +259,11 @@ fn instance(name: &[u16], security: &SecurityDescriptor, first: bool) -> io::Res
             &raw const attributes,
         )
     };
-    Conn::new(owned(pipe)?, Some(WRITE_TIMEOUT))
+    Conn::new(owned(pipe)?, Some(WRITE_TIMEOUT), None)
 }
 
-pub(super) fn connect(path: &Path) -> io::Result<Conn> {
+/// A client end; reads and writes give up after `timeout`.
+pub(super) fn connect(path: &Path, timeout: Option<Duration>) -> io::Result<Conn> {
     let name = wide(path.as_os_str());
     let deadline = Instant::now() + BUSY_WAIT;
     loop {
@@ -274,7 +281,7 @@ pub(super) fn connect(path: &Path) -> io::Result<Conn> {
             )
         };
         match owned(pipe) {
-            Ok(pipe) => return Conn::new(pipe, None),
+            Ok(pipe) => return Conn::new(pipe, timeout, timeout),
             Err(e) if is(&e, ERROR_PIPE_BUSY) && Instant::now() < deadline => {
                 // Every instance is taken until the daemon creates the next.
                 // SAFETY: `name` is NUL-terminated.
