@@ -57,8 +57,37 @@ impl EngineFactory for TranscribeEngine {
 
     fn load(&self, path: &Path, options: &EngineOptions) -> anyhow::Result<Box<dyn Model>> {
         static LOGGING: Once = Once::new();
+        let missing = missing_cpu_features();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "this CPU lacks AVX2 ({} missing), which this build of earwig's speech engine needs",
+            missing.join(", ")
+        );
         LOGGING.call_once(tc::init_logging);
         Ok(Box::new(TranscribeModel::load(path, options)?))
+    }
+}
+
+/// The x86 features the build pinned transcribe.cpp to (`pinned_avx2`, see
+/// build.rs) that this CPU lacks; a native build tunes to its own CPU.
+fn missing_cpu_features() -> Vec<&'static str> {
+    #[cfg(all(pinned_avx2, target_arch = "x86_64"))]
+    {
+        [
+            ("SSE4.2", is_x86_feature_detected!("sse4.2")),
+            ("AVX", is_x86_feature_detected!("avx")),
+            ("AVX2", is_x86_feature_detected!("avx2")),
+            ("BMI2", is_x86_feature_detected!("bmi2")),
+            ("FMA", is_x86_feature_detected!("fma")),
+            ("F16C", is_x86_feature_detected!("f16c")),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| (!present).then_some(name))
+        .collect()
+    }
+    #[cfg(not(all(pinned_avx2, target_arch = "x86_64")))]
+    {
+        Vec::new()
     }
 }
 

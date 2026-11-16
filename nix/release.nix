@@ -1,4 +1,4 @@
-# A pushed v* tag's GitHub release, made with nixbot's token for this repository, and the Mac
+# A pushed v* tag's GitHub release, made with the release token nixbot holds, and the Mac
 # download on it: earwig.app, built on the Mac, signed with the Developer ID in a DMG that Apple
 # notarizes (packaging/macos/dmg.sh). The Windows CI job runs the same release script before it
 # attaches its packages; whichever is first creates the release.
@@ -16,9 +16,8 @@ mkEffect {
   name = "release";
   inputs = tools;
   secretsMap = {
-    # nixbot's token for this repository; a secret of our own with a `token` would be
-    # `github = "<its name>";`.
-    github.type = "GitToken";
+    # `token`: a GitHub token that may publish this repository's releases.
+    github = "github_release";
     # `key` and `certificate`: the Developer ID Application identity (PEM); `notary_key`: an
     # App Store Connect API key (rcodesign encode-app-store-connect-api-key).
     apple = "apple_developer_id";

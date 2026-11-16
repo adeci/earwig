@@ -1,7 +1,7 @@
 ; Per-user installer for earwig: no administrator rights, installs to
 ; %LOCALAPPDATA%\Programs\earwig, a Start menu entry, optional start at
 ; sign-in. Build with `iscc /DVersion=<x.y.z> /DStage=<dir> earwig.iss`
-; (package.ps1 does), where <dir> holds earwig.exe and earwigw.exe.
+; (package.ps1 does), where <dir> holds earwig.exe, earwigw.exe and vulkan-1.dll.
 
 #ifndef Version
   #error Pass /DVersion=x.y.z
@@ -39,8 +39,10 @@ Name: autostart; Description: "Start earwig when I sign in"
 [Files]
 Source: "{#Stage}\earwig.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\earwigw.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Stage}\vulkan-1.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"
 Source: "..\..\assets\fonts\LICENSE-IBM-Plex-Sans.txt"; DestDir: "{app}"
+Source: "LICENSE-Vulkan-Loader.txt"; DestDir: "{app}"
 Source: "..\..\README.md"; DestDir: "{app}"
 
 [Icons]
@@ -58,9 +60,6 @@ Filename: "{app}\earwigw.exe"; Parameters: "settings"; Description: "Start earwi
   Flags: nowait postinstall skipifsilent; Check: not WasRunning
 ; An upgrade brings back the earwig it stopped, silent ones (winget) too.
 Filename: "{app}\earwigw.exe"; Flags: nowait; Check: WasRunning
-
-[UninstallRun]
-Filename: "{app}\earwig.exe"; Parameters: "quit"; Flags: runhidden; RunOnceId: "QuitEarwig"
 
 [Code]
 var
@@ -96,4 +95,50 @@ end;
 function WasRunning: Boolean;
 begin
   Result := Running;
+end;
+
+{ Whether the installed Name can be opened exclusively: no running earwig holds it. }
+function Unlocked(const Name: String): Boolean;
+var
+  Stream: TFileStream;
+begin
+  Result := True;
+  if not FileExists(ExpandConstant('{app}\' + Name)) then
+    Exit;
+  try
+    Stream := TFileStream.Create(ExpandConstant('{app}\' + Name), fmOpenReadWrite or fmShareExclusive);
+    Stream.Free;
+  except
+    Result := False;
+  end;
+end;
+
+{ Uninstalling stops earwig and waits until its processes are gone, so its files
+  can be deleted: `earwig quit` returns before the daemon has exited. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Tries, Code: Integer;
+begin
+  if CurUninstallStep <> usUninstall then
+    Exit;
+  if not Earwig('quit') then
+    Exit;
+  Tries := 0;
+  while Earwig('status') and (Tries < 50) do
+  begin
+    Sleep(100);
+    Tries := Tries + 1;
+  end;
+  Tries := 0;
+  while not (Unlocked('earwig.exe') and Unlocked('earwigw.exe')) and (Tries < 100) do
+  begin
+    Sleep(100);
+    Tries := Tries + 1;
+  end;
+  { Still there after 10 s: end it, rather than leave the files behind. }
+  if Tries = 100 then
+  begin
+    Exec('taskkill.exe', '/f /im earwigw.exe /im earwig.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Sleep(1000);
+  end;
 end;
