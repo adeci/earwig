@@ -61,4 +61,8 @@ nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd 
   `[hooks]`, and the event socket, not special cases.
 - VM tests assert observable behavior (`earwig status`/`events`, files,
   windows, OCR), not log wording.
+- earwig.app from Nix is signed ad hoc under the designated requirement
+  `identifier "io.github.adeci.earwig"`, which every build meets, so macOS
+  keeps its Microphone and Accessibility grants across rebuilds; the release
+  re-signs it under the Developer ID's requirement, which `dmg.sh` checks.
 - Clippy pedantic is on; fix warnings at the cause.

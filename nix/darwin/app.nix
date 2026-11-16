@@ -1,6 +1,8 @@
 # earwig.app around the cargo build: Info.plist, the icon, an ad-hoc signature over the whole
-# bundle, and `bin/earwig` for the command line. The app stands alone, so the release signs this
-# very bundle for Macs without Nix (packaging/macos/dmg.sh).
+# bundle, and `bin/earwig` for the command line. The signature designates the bundle identifier
+# alone, which every build meets, so macOS keeps the Microphone and Accessibility access it
+# granted across rebuilds. The app stands alone, so the release signs this very bundle for Macs
+# without Nix, under the Developer ID's requirement instead (packaging/macos/dmg.sh).
 {
   lib,
   stdenvNoCC,
@@ -12,12 +14,14 @@
 }:
 let
   plist = ../../assets/macos/Info.plist;
+  plistString =
+    key:
+    lib.head (
+      builtins.match ".*<key>${key}</key>[[:space:]]*<string>([^<]*)</string>.*" (builtins.readFile plist)
+    );
   # The oldest macOS Info.plist promises, checked against the executable's below.
-  minimumSystemVersion = lib.head (
-    builtins.match ".*<key>LSMinimumSystemVersion</key>[[:space:]]*<string>([^<]*)</string>.*" (
-      builtins.readFile plist
-    )
-  );
+  minimumSystemVersion = plistString "LSMinimumSystemVersion";
+  identifier = plistString "CFBundleIdentifier";
   inherit (lib.versions) major minor patch;
   inherit (earwig) version;
 in
@@ -62,9 +66,35 @@ stdenvNoCC.mkDerivation {
       rsvg-convert -w $size -h $size ${../../assets/io.github.adeci.earwig.svg} -o icon_$size.png
     done
     png2icns $app/Contents/Resources/earwig.icns icon_*.png
-    # No certificate: an ad-hoc signature, sealing Info.plist and resources.
+
+    # No certificate: an ad-hoc signature, sealing Info.plist and resources, that designates
+    # `identifier "${identifier}"` instead of this build's hash. The requirement compiled as
+    # `csreq -b` would: magic, length, one expression, opIdent (2), the identifier zero-padded,
+    # each number in four bytes, big-endian.
+    be32() {
+      for s in 24 16 8 0; do printf "\\x$(printf %02x $(($1 >> s & 255)))"; done
+    }
+    id=${identifier}
+    pad=$(((4 - ''${#id} % 4) % 4))
+    {
+      be32 0xfade0c00
+      be32 $((20 + ''${#id} + pad))
+      be32 1
+      be32 2
+      be32 ''${#id}
+      printf %s "$id"
+      head -c $pad /dev/zero
+    } >requirement.bin
     chmod -R u+w $app
-    rcodesign sign $app
+    # The identifier and the requirement for the bundle and, by its path, for its executable.
+    rcodesign sign --binary-identifier $id --code-requirements-file requirement.bin \
+      --binary-identifier Contents/MacOS/earwig:$id \
+      --code-requirements-file Contents/MacOS/earwig:$PWD/requirement.bin $app
+    designated=$(rcodesign extract requirements $exe)
+    if [[ $designated != "designated(3) => identifier \"$id\"" ]]; then
+      echo "earwig.app should designate identifier \"$id\" alone, not: ''${designated:-nothing}" >&2
+      exit 1
+    fi
     ln -s ../Applications/earwig.app/Contents/MacOS/earwig $out/bin/earwig
     runHook postInstall
   '';

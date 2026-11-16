@@ -1,7 +1,9 @@
 //! Privacy permissions the user grants by hand: on macOS, Microphone and
 //! Accessibility (which also covers the hotkey's event tap). macOS ties an
-//! ad-hoc signed app's grants to that exact build, so each build asks once for
-//! what it lacks, clearing earwig's stale entry first.
+//! ad-hoc signed app's grants to that exact build, unless its signature
+//! designates a requirement of its own: earwig.app from Nix designates its
+//! bundle identifier, which every rebuild meets. Each build asks once for what
+//! it lacks, clearing earwig's stale entry first.
 
 use std::fs;
 use std::path::Path;

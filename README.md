@@ -16,8 +16,8 @@ services.earwig.enable = true;
 ```
 
 The module installs earwig with its default speech model and starts it with
-your session. On nix-darwin, macOS asks for Microphone and Accessibility again
-after each rebuild, because Nix builds are not signed with a Developer ID.
+your session. On nix-darwin, macOS asks for Microphone and Accessibility on the
+first start.
 
 ### Other Linux distributions
 

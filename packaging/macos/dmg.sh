@@ -56,6 +56,29 @@ cp -R "$app" "$stage/earwig.app"
 chmod -R u+w "$stage/earwig.app"
 rcodesign sign "${identity[@]}" --code-signature-flags runtime \
   --entitlements-xml-file "$entitlements" "$stage/earwig.app"
+
+# Signed here, the app must designate its signer, never the bare identifier that earwig.app from
+# Nix designates (nix/darwin/app.nix) and any program can claim: for a Developer ID, Apple's anchor
+# and the certificate's team, which the updater requires of the app it replaces.
+designated=$(rcodesign extract requirements "$stage/earwig.app/Contents/MacOS/earwig")
+# rcodesign signs with the first certificate it is given.
+signer=$(rcodesign analyze-certificate --pem-file "$certificate" | sed '/^# Certificate 1$/,$d')
+team=$(sed -n 's/^Team ID: *//p' <<<"$signer")
+if grep -qx 'Signed by Apple?: *true' <<<"$signer" &&
+  grep -qx 'Guessed Certificate Profile: DeveloperIdApplication' <<<"$signer"; then
+  if [[ $designated != *'anchor apple generic'* ||
+    $designated != *"certificate leaf[subject.OU] = \"$team\""* ]]; then
+    echo "earwig.app does not designate Apple's anchor and team $team: $designated" >&2
+    exit 1
+  fi
+elif [[ -n $notary_key ]]; then
+  echo "$certificate is not the Developer ID Application certificate notarization needs" >&2
+  exit 1
+elif [[ $designated =~ ^'designated(3) => identifier "'[^\"]*'"'$ ]]; then
+  echo "earwig.app designates nothing but its identifier: $designated" >&2
+  exit 1
+fi
+echo "earwig.app designates ${designated#designated(3) => }"
 ln -s /Applications "$stage/Applications"
 
 # An HFS+ volume with room to spare (the empty space compresses away), in a zlib DMG.
