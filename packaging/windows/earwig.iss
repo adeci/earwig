@@ -1,7 +1,8 @@
 ; Per-user installer for earwig: no administrator rights, installs to
 ; %LOCALAPPDATA%\Programs\earwig, a Start menu entry, optional start at
 ; sign-in. Build with `iscc /DVersion=<x.y.z> /DStage=<dir> earwig.iss`
-; (package.ps1 does), where <dir> holds earwig.exe, earwigw.exe and vulkan-1.dll.
+; (package.ps1 does), where <dir> holds earwig.exe, earwigw.exe and vulkan-1.dll;
+; with sign.ps1's `-Iscc` arguments, Setup and Uninstall are signed too.
 
 #ifndef Version
   #error Pass /DVersion=x.y.z
@@ -36,6 +37,9 @@ WizardStyle=modern
 CloseApplications=no
 ; The build machine's clock is UTC; without this, installed files are dated in its local time.
 TimeStampsInUTC=yes
+#ifdef SignTool
+SignTool={#SignTool}
+#endif
 
 [Tasks]
 Name: autostart; Description: "Start earwig when I sign in"

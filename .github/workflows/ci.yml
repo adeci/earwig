@@ -1,6 +1,9 @@
 # Linux and macOS are the flake's checks, built by nixbot, whose release effect also makes a pushed
 # v* tag's release. Nix can't build earwig for Windows (GPUI's shaders need the Windows SDK's
 # fxc.exe, transcribe.cpp MSVC and the Vulkan SDK), so Windows and its release packages stay here.
+# packaging/windows/sign.ps1 decides how they are signed: with Artifact Signing on a v* tag once
+# the release environment has its variables (none of them secret), else unsigned on a tag; with
+# a throwaway test publisher on every other run, so the signed path is always tested.
 name: CI
 
 on:
@@ -19,21 +22,32 @@ jobs:
     runs-on: windows-latest
     # About 15 minutes with a warm cache, 30 from a cold one; steps that can hang give up sooner.
     timeout-minutes: 45
-    # Tags attach the packages to their release.
+    # Tags attach the packages to their release, signed in the release environment, whose
+    # federated credential lets this job's OIDC token sign with Artifact Signing.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     permissions:
       contents: write
+      id-token: write
+    env:
+      ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+      ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+      ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Actions pinned to commits: on a tag this job can sign as the publisher.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           components: clippy
       # transcribe.cpp's Vulkan backend builds with the SDK's glslc and headers and links
       # vulkan-1.lib; the runtime lets the tests start without a GPU driver, on the CPU.
-      - uses: jakoch/install-vulkan-sdk-action@v1
+      - uses: jakoch/install-vulkan-sdk-action@7fe84289ddbf750f7eff9f8e4588e600e1dd06c8 # v1
         with:
           install_runtime: true
           cache: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         timeout-minutes: 20
       - run: cargo test --workspace --locked
@@ -44,7 +58,7 @@ jobs:
       - run: packaging/windows/package.ps1
         shell: pwsh
         timeout-minutes: 30
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: earwig-windows-x64
           path: |
@@ -53,11 +67,11 @@ jobs:
             target/package/winget
       # The installer end to end on this runner's desktop: install, the hotkey and dictation into
       # Notepad, the engine on emulated CPUs (Intel SDE), uninstall while running.
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/AppData/Local/earwig/models
           key: earwig-model-parakeet-unified-en-0.6b-4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795
-      - uses: petarpetrovt/setup-sde@v6.0
+      - uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
       - name: Smoke test the installer
         run: packaging/windows/smoke.ps1
         shell: pwsh
@@ -69,6 +83,14 @@ jobs:
         run: crates/earwig/tests/update/windows.ps1
         shell: pwsh
         timeout-minutes: 15
+      # Once Artifact Signing is set up, nothing unsigned or signed by anyone else goes out.
+      - name: Check the release's signatures
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Expand-Archive (Get-Item target/package/*.zip).FullName "$env:RUNNER_TEMP/release"
+          packaging/windows/sign.ps1 -Check (Get-Item target/package/*-setup.exe).FullName `
+            "$env:RUNNER_TEMP/release/earwig.exe" "$env:RUNNER_TEMP/release/earwigw.exe"
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         env:

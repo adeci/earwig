@@ -22,7 +22,8 @@ overlay and settings window, transcribe.cpp for speech. NixOS first.
 - `packaging/`: `github-release.sh` makes a tag's GitHub release (a pre-release
   for a tag like `v0.1.0-rc.1`); `macos/` signs earwig.app with the Developer ID
   into a notarized DMG, on Linux (`nix develop .#release` has the tools);
-  `windows/` the portable zip, the installer and winget manifests.
+  `windows/` the portable zip, the installer and winget manifests, signed by
+  `sign.ps1` (Artifact Signing on a tag, a throwaway test publisher in CI).
 - CI is the flake's `checks` (package, clippy, tests, treefmt; VM tests on
   x86_64-linux), built by nixbot on Linux and a Mac. A pushed `v*` tag gets its
   GitHub release and the Mac DMG from the `release` effect (`herculesCI` in

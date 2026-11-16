@@ -1,7 +1,8 @@
 # The packaged earwig end to end on a desktop session (CI's windows runner):
-# silent install; start as sign-in does with EARWIG_AUDIO_FILE; a held and a
-# tapped Ctrl+Space into Notepad through the keyboard hook; the engine on other
-# CPUs under Intel SDE ($env:SDE_PATH); uninstall while running.
+# silent install; the installer and what it installed signed as sign.ps1
+# signs; start as sign-in does with EARWIG_AUDIO_FILE; a held and a tapped
+# Ctrl+Space into Notepad through the keyboard hook; the engine on other CPUs
+# under Intel SDE ($env:SDE_PATH); uninstall while running.
 #   pwsh packaging/windows/smoke.ps1   (after package.ps1)
 # Fails with ::error:: annotations; every wait is bounded.
 $ErrorActionPreference = 'Stop'
@@ -215,6 +216,11 @@ Step 'install' {
     if ($p.ExitCode -ne 0) { Fail "the installer exited with $($p.ExitCode)" }
     $script:signIn = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').earwig
     if ($script:signIn -ne "`"$app\earwigw.exe`"") { Fail "start at sign-in is '$script:signIn'" }
+}
+
+Step 'signatures' {
+    try { & "$root\packaging\windows\sign.ps1" -Check $setup.FullName "$app\earwig.exe" "$app\earwigw.exe" "$app\unins000.exe" }
+    catch { Fail "signatures: $_" }
 }
 
 Step 'model' {

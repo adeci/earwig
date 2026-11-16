@@ -1,5 +1,6 @@
 # Build earwig for Windows and package it: a portable zip and, when Inno
-# Setup's iscc is on PATH (or in its default folder), a per-user installer.
+# Setup's iscc is on PATH (or in its default folder), a per-user installer;
+# signed as sign.ps1 decides (Artifact Signing, CI's test publisher, or not).
 #   pwsh packaging/windows/package.ps1
 # Output: target/package/earwig-<version>-windows-x64.zip and -setup.exe.
 $ErrorActionPreference = 'Stop'
@@ -12,6 +13,7 @@ $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select
 cargo build --release --locked -p earwig -p earwigw
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$root\target" }
+& "$PSScriptRoot\sign.ps1" "$target\release\earwig.exe" "$target\release\earwigw.exe"
 $out = "$target\package"
 $name = "earwig-$version-windows-x64"
 $stage = "$out\$name"
@@ -71,8 +73,10 @@ if (-not $iscc) {
     Write-Warning 'Inno Setup (iscc) not found: no installer'
     exit 0
 }
-& $iscc /Q "/DVersion=$version" "/DStage=$stage" "/O$out" packaging\windows\earwig.iss
+# Inno Setup signs Setup and its uninstaller with sign.ps1 too.
+& $iscc /Q "/DVersion=$version" "/DStage=$stage" "/O$out" @(& "$PSScriptRoot\sign.ps1" -Iscc) packaging\windows\earwig.iss
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+& "$PSScriptRoot\sign.ps1" -Check "$out\$name-setup.exe"
 Write-Output "$out\$name-setup.exe"
 
 # winget manifests for the installer as a GitHub release asset of v<version>,

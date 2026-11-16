@@ -1,7 +1,10 @@
 # earwig updating itself on Windows, end to end: an older test build, installed with the real
 # installer and running, updates to the installer packaging/windows/package.ps1 made, which a
 # stand-in for GitHub (fake_github.py) offers. First with a SHA-256 that doesn't match, which it
-# refuses, then as released. CI runs it after package.ps1, with Inno Setup's iscc at hand.
+# refuses, then as released. When packaging/windows/sign.ps1 signs, the older build is signed
+# too: it refuses the installer unsigned, signed by another publisher or by a look-alike of its
+# own, or changed after signing; and an unsigned older build, as the last release before signing
+# was, takes the signed installer. CI runs it after package.ps1, with Inno Setup's iscc at hand.
 #   pwsh crates/earwig/tests/update/windows.ps1
 # Every wait has a deadline: what outlives it is killed, and the failure says what was running.
 $ErrorActionPreference = 'Stop'
@@ -24,6 +27,11 @@ $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{6A3C4F2E-8F1B-4C57-9E0D-2B7E5A1D9C41}_is1'
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$work\stage" | Out-Null
+$sign = "$root\packaging\windows\sign.ps1"
+$signed = (& $sign -Mode) -ne 'none'
+$state = "$env:LOCALAPPDATA\earwig\state"
+$timings = [ordered]@{}
+$lap = Get-Date
 
 $transcript = [System.Collections.Generic.List[string]]::new()
 # What ran when a wait ran out, taken before the kill.
@@ -127,6 +135,11 @@ function Check([bool]$ok, [string]$what) {
     $transcript.Add("ok: $what")
 }
 
+function Lap([string]$name) {
+    $script:timings[$name] = [math]::Round(((Get-Date) - $script:lap).TotalSeconds)
+    $script:lap = Get-Date
+}
+
 # A failure's details as annotations of the run, which GitHub shows without access to its logs.
 function Annotate([string]$level, [string]$title, [string]$text) {
     if (-not $env:GITHUB_ACTIONS) { return }
@@ -157,9 +170,11 @@ function WaitFor([scriptblock]$done, [int]$seconds, [string]$what) {
 
 function Sign-In { $null -ne (Get-ItemProperty -Path $runKey -Name earwig -ErrorAction SilentlyContinue) }
 
-# The stand-in for GitHub, once it answers. Its output goes to files, not to this step's.
-function Serve([switch]$WrongDigest) {
-    $arguments = @("`"$PSScriptRoot\fake_github.py`"", '--port', $port, '--version', $version, '--file', "`"$newSetup`"")
+# The stand-in for GitHub, once it answers, offering $File as the new installer. Its output goes
+# to files, not to this step's.
+function Serve([switch]$WrongDigest, [string]$File = $newSetup) {
+    $arguments = @("`"$PSScriptRoot\fake_github.py`"", '--port', $port, '--version', $version, '--file', "`"$File`"",
+        '--name', (Split-Path -Leaf $newSetup))
     if ($WrongDigest) { $arguments += '--wrong-digest' }
     $log = "$work\feed-$(Get-Random).log"
     $feed = Start-Process python -ArgumentList $arguments -PassThru -NoNewWindow `
@@ -208,8 +223,31 @@ try {
     Copy-Item -Force "$target\release\earwig.exe", "$target\release\earwigw.exe" "$work\stage"
     $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
     if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-    $packaged = Run $iscc '/Q', "/DVersion=$old", "/DStage=$work\stage", "/O$work", 'packaging\windows\earwig.iss' 600
+    if ($signed) {
+        # Unsigned too, as the last release before signing was.
+        $packaged = Run $iscc '/Q', "/DVersion=$old", "/DStage=$work\stage", "/O$work\unsigned", 'packaging\windows\earwig.iss' 600
+        if ($packaged.Code) { throw 'packaging the unsigned older test build failed' }
+        & $sign "$work\stage\earwig.exe" "$work\stage\earwigw.exe"
+    }
+    $packaged = Run $iscc (@('/Q', "/DVersion=$old", "/DStage=$work\stage", "/O$work") + @(& $sign -Iscc) + 'packaging\windows\earwig.iss') 600
     if ($packaged.Code) { throw 'packaging the older test build failed' }
+    if ($signed) {
+        # The new installer as earwig must not take it: unsigned, signed by another publisher or by
+        # a look-alike of its own (the same name and profile EKU, self-signed), changed after signing.
+        $bad = "$work\refused"
+        New-Item -ItemType Directory $bad | Out-Null
+        foreach ($case in 'unsigned', 'other', 'look-alike', 'changed') { Copy-Item $newSetup "$bad\$case.exe" }
+        $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+        if ((Run $signtool.FullName 'remove', '/s', "$bad\unsigned.exe").Code) { throw 'removing the signature failed' }
+        & $sign -Publisher other "$bad\other.exe"
+        & $sign -Publisher look-alike "$bad\look-alike.exe"
+        $bytes = [IO.File]::ReadAllBytes("$bad\changed.exe")
+        $middle = $bytes.Length -shr 1
+        $bytes[$middle] = $bytes[$middle] -bxor 1
+        [IO.File]::WriteAllBytes("$bad\changed.exe", $bytes)
+    }
+    Lap 'older builds'
 
     # Whatever an earlier step (the installer's smoke test) left: no earwig running, none
     # installed. The uninstaller hands over to a copy of itself, so its own end says nothing.
@@ -221,6 +259,7 @@ try {
     }
     Check ((Install "$work\earwig-$old-windows-x64-setup.exe" "$work\install-old.log") -eq 0) "earwig $old installs"
     Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is installed"
+    if ($signed) { Check ((Get-AuthenticodeSignature $earwig).Status -eq 'Valid') "earwig $old is signed" }
     Check (Sign-In) 'the installer set earwig to start at sign-in'
     # The user then switches Start at sign-in off, which an update must keep.
     Remove-ItemProperty -Path $runKey -Name earwig
@@ -239,6 +278,25 @@ try {
     $status = (Run $earwig 'status' 20).Output | ConvertFrom-Json
     Check ($status.update.state -eq 'failed') 'earwig still runs and says the update failed'
     Check (-not (Test-Path "$env:LOCALAPPDATA\earwig\state\update")) 'nothing of the download is left'
+    if ($signed) {
+        Remove-Item "$state\install.log" -ErrorAction SilentlyContinue
+        foreach ($case in @(
+                @{ File = 'unsigned'; Why = 'the installer is not signed'; What = 'an unsigned installer' }
+                @{ File = 'other'; Why = 'another certificate profile'; What = 'an installer signed by another publisher' }
+                @{ File = 'look-alike'; Why = 'another root certificate'; What = "an installer signed by a look-alike of earwig's publisher" }
+                @{ File = 'changed'; Why = "the installer's signature is not valid"; What = 'an installer changed after signing' })) {
+            Stop-Process -Id $feed.Id
+            $feed = Serve -File "$bad\$($case.File).exe"
+            $refused = Run $earwig 'update'
+            Check ($refused.Code -ne 0 -and $refused.Output.Contains($case.Why)) "$($case.What) is refused"
+            Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is still installed"
+            $status = (Run $earwig 'status' 20).Output | ConvertFrom-Json
+            Check ($status.update.state -eq 'failed') 'earwig still runs and says the update failed'
+            Check (-not (Test-Path "$state\install.log")) 'no installer ran'
+            Check (-not (Test-Path "$state\update")) 'nothing of the download is left'
+        }
+    }
+    Lap 'refusals'
 
     Stop-Process -Id $feed.Id
     $feed = Serve
@@ -257,6 +315,7 @@ try {
     }
     Check ((Get-ItemProperty -LiteralPath $uninstallKey).DisplayVersion -eq $old) "earwig $old is still registered"
     WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 'earwig runs again after the failed setup'
+    Lap 'a failing installer'
 
     # Back to the older build, by its installer, for an update that goes through.
     Check ((Install "$work\earwig-$old-windows-x64-setup.exe" "$work\install-again.log") -eq 0) "earwig $old installs again"
@@ -277,6 +336,27 @@ try {
     $running = Get-Process earwig | ForEach-Object { $_.Path }
     Check (@($running | Where-Object { $_ -ne $earwig }).Count -eq 0) "only the installed earwig runs: $running"
     Check (-not (Sign-In)) 'Start at sign-in is still off'
+    Lap 'update'
+
+    if ($signed) {
+        # The last release before signing, unsigned, takes the signed installer.
+        Check ((Install "$work\unsigned\earwig-$old-windows-x64-setup.exe" "$work\install-unsigned.log") -eq 0) "unsigned earwig $old installs"
+        Check ((Run $earwig '--version').Output -eq "earwig $old") "unsigned earwig $old is installed"
+        Check ((Get-AuthenticodeSignature $earwig).Status -eq 'NotSigned') "earwig $old is not signed"
+        WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "unsigned earwig $old runs"
+        $updated = Run $earwig 'update'
+        Check ($updated.Code -eq 0 -and $updated.Output.Contains("installing earwig $version")) "unsigned earwig $old installs signed $version"
+        WaitFor {
+            (Get-ItemProperty -LiteralPath $uninstallKey -ErrorAction SilentlyContinue).DisplayVersion -eq $version -and
+            -not (Get-Process | Where-Object { $_.Name -like 'earwig-*-setup*' })
+        } 180 "the installer put $version in place"
+        Check ((Run $earwig '--version').Output -eq "earwig $version") "earwig $version is installed"
+        Check ((Get-AuthenticodeSignature $earwig).Status -eq 'Valid') "earwig $version is signed"
+        WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $version runs"
+        Lap 'unsigned to signed'
+    }
+    Annotate notice 'update end to end' (($transcript | Where-Object { $_ -like 'ok:*' }) -join "`n")
+    Annotate notice 'update timings' (($timings.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value) s" }) -join ', ')
     $passed = $true
 } catch {
     Write-Host $_
@@ -284,7 +364,7 @@ try {
     $processes = if ($stuck) { $stuck } else { Processes }
     Write-Host "--- processes`n$processes"
     Annotate warning 'processes' $processes
-    foreach ($log in @("$env:LOCALAPPDATA\earwig\earwig.log", "$env:LOCALAPPDATA\earwig\state\install.log",
+    foreach ($log in @("$env:LOCALAPPDATA\earwig\earwig.log", "$state\install.log", "$work\install-unsigned.log",
             "$work\install-again.log", "$work\install-old.log") + @(Get-ChildItem "$work\feed-*.log" -ErrorAction SilentlyContinue)) {
         if (Test-Path $log) {
             Write-Host "--- $log"

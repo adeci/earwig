@@ -1,17 +1,32 @@
 //! Windows: the installer's own install of earwig updates by running the new
 //! installer silently, which stops earwig, replaces it and starts it again;
 //! a copy anywhere else (the portable zip, a build) only says a release is
-//! out.
+//! out. A signed earwig runs only an installer its own publisher signed.
 
-use std::ffi::OsString;
+use std::ffi::{CStr, OsString};
 use std::io;
 use std::os::windows::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::ptr;
 
+use sha2::{Digest as _, Sha256};
+use windows_sys::Win32::Foundation::{
+    HANDLE, INVALID_HANDLE_VALUE, TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN,
+    TRUST_E_SUBJECT_FORM_UNKNOWN,
+};
+use windows_sys::Win32::Security::Cryptography::{
+    CERT_CONTEXT, CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG, CERT_NAME_SIMPLE_DISPLAY_TYPE, CTL_USAGE,
+    CertGetEnhancedKeyUsage, CertGetNameStringW,
+};
+use windows_sys::Win32::Security::WinTrust::{
+    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
+    WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+    WTD_UI_NONE, WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
+};
 use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 
-use super::Mode;
+use super::{Mode, Publisher, UpdateError};
 use crate::win32;
 
 /// Where the installer (`AppId` in packaging/windows/earwig.iss) records the
@@ -39,6 +54,217 @@ pub(super) fn detect() -> Option<Mode> {
     } else {
         Mode::Notify
     })
+}
+
+/// Refuses `installer` unless it is signed by this earwig's publisher
+/// ([`super::same_publisher`]), when this earwig is signed: an unsigned one, a
+/// release from before they were signed or a build, takes it on its SHA-256
+/// alone.
+pub(super) fn check_publisher(installer: &Path) -> Result<(), UpdateError> {
+    let refuse = |why: String| Err(UpdateError::Install(why));
+    let running = match signature(&std::env::current_exe()?) {
+        Signature::Unsigned => {
+            log::info!("this earwig is not signed, so the installer needn't be");
+            return Ok(());
+        }
+        Signature::Invalid(why) => {
+            return refuse(format!(
+                "this earwig's own signature is not valid ({why}), so it can't tell its \
+                 publisher's installers from others"
+            ));
+        }
+        Signature::Valid(publisher) => publisher,
+    };
+    let new = match signature(installer) {
+        Signature::Unsigned => {
+            return refuse(format!(
+                "the installer is not signed, unlike this earwig ({})",
+                running.name
+            ));
+        }
+        Signature::Invalid(why) => {
+            return refuse(format!("the installer's signature is not valid: {why}"));
+        }
+        Signature::Valid(publisher) => publisher,
+    };
+    super::same_publisher(&running, &new).map_err(UpdateError::Install)?;
+    log::info!(
+        "the installer is signed by {} under {}, as this earwig is",
+        new.name,
+        new.root()
+    );
+    Ok(())
+}
+
+/// What Windows makes of a file's Authenticode signature.
+enum Signature {
+    Unsigned,
+    /// One Windows rejects, and why.
+    Invalid(String),
+    Valid(Publisher),
+}
+
+/// What WinVerifyTrust makes of the signature of `path`, under Authenticode's
+/// policy with revocation checked along the chain, as Windows checks a program
+/// it downloaded.
+fn signature(path: &Path) -> Signature {
+    let path = win32::wide(path.as_os_str());
+    let mut info = WINTRUST_FILE_INFO {
+        cbStruct: u32::try_from(size_of::<WINTRUST_FILE_INFO>()).expect("small struct"),
+        pcwszFilePath: path.as_ptr(),
+        hFile: ptr::null_mut(),
+        pgKnownSubject: ptr::null_mut(),
+    };
+    let mut data = WINTRUST_DATA {
+        cbStruct: u32::try_from(size_of::<WINTRUST_DATA>()).expect("small struct"),
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_WHOLECHAIN,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        Anonymous: WINTRUST_DATA_0 {
+            pFile: &raw mut info,
+        },
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        ..Default::default()
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    // SAFETY: `data` and what it points to outlive the call; with no window
+    // there is no UI.
+    let status = unsafe {
+        WinVerifyTrust(
+            INVALID_HANDLE_VALUE,
+            &raw mut action,
+            (&raw mut data).cast(),
+        )
+    };
+    let error = io::Error::last_os_error().raw_os_error();
+    let signature = match status {
+        0 => signer(data.hWVTStateData).map_or_else(
+            || Signature::Invalid("Windows found no signer in it".into()),
+            Signature::Valid,
+        ),
+        // What Microsoft's example takes for no signature at all.
+        TRUST_E_NOSIGNATURE
+            if matches!(
+                error,
+                Some(TRUST_E_NOSIGNATURE | TRUST_E_SUBJECT_FORM_UNKNOWN | TRUST_E_PROVIDER_UNKNOWN)
+            ) =>
+        {
+            Signature::Unsigned
+        }
+        status => Signature::Invalid(describe(status)),
+    };
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    // SAFETY: frees what the verification kept in `data`.
+    unsafe {
+        WinVerifyTrust(
+            INVALID_HANDLE_VALUE,
+            &raw mut action,
+            (&raw mut data).cast(),
+        )
+    };
+    signature
+}
+
+/// Who signed the file whose verification left `state`, by the chain
+/// WinVerifyTrust built from the signer's certificate to a trusted root.
+fn signer(state: HANDLE) -> Option<Publisher> {
+    // SAFETY: the state of a verification, alive until it is closed, as are
+    // the provider data, signer, chain and certificates it leads to.
+    unsafe {
+        let provider = WTHelperProvDataFromStateData(state);
+        if provider.is_null() {
+            return None;
+        }
+        let chain = WTHelperGetProvSignerFromChain(provider, 0, 0, 0)
+            .as_ref()?
+            .pChainContext
+            .as_ref()?;
+        if chain.cChain == 0 || chain.rgpChain.is_null() {
+            return None;
+        }
+        let simple = (*chain.rgpChain).as_ref()?;
+        let count = usize::try_from(simple.cElement).ok()?;
+        if count == 0 || simple.rgpElement.is_null() {
+            return None;
+        }
+        let elements = std::slice::from_raw_parts(simple.rgpElement, count);
+        let leaf = elements[0].as_ref()?.pCertContext.as_ref()?;
+        let root = elements[count - 1].as_ref()?.pCertContext.as_ref()?;
+        let encoded = std::slice::from_raw_parts(
+            root.pbCertEncoded,
+            usize::try_from(root.cbCertEncoded).ok()?,
+        );
+        Some(Publisher {
+            name: name(leaf),
+            ekus: ekus(leaf),
+            root: Sha256::digest(encoded).into(),
+            root_name: name(root),
+        })
+    }
+}
+
+/// The name Windows shows for `cert`: its subject's common name.
+fn name(cert: &CERT_CONTEXT) -> String {
+    let get = |text: *mut u16, len: u32| {
+        // SAFETY: a valid certificate; `text` holds `len` characters, or is
+        // null to ask for the length.
+        unsafe {
+            CertGetNameStringW(
+                cert,
+                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                0,
+                ptr::null(),
+                text,
+                len,
+            )
+        }
+    };
+    let len = get(ptr::null_mut(), 0);
+    let mut text = vec![0u16; usize::try_from(len).unwrap_or(0)];
+    let written = get(text.as_mut_ptr(), len);
+    let end = usize::try_from(written.saturating_sub(1)).unwrap_or(0);
+    String::from_utf16_lossy(&text[..end.min(text.len())])
+}
+
+/// The extended key usages `cert` names, none when it has no such extension.
+fn ekus(cert: &CERT_CONTEXT) -> Vec<String> {
+    let flags = CERT_FIND_EXT_ONLY_ENHKEY_USAGE_FLAG;
+    let mut size = 0;
+    // SAFETY: a valid certificate; asks for the size first, then fills a
+    // buffer that large, aligned for the pointers in it, whose strings it
+    // points into.
+    unsafe {
+        if CertGetEnhancedKeyUsage(cert, flags, ptr::null_mut(), &raw mut size) == 0 {
+            return Vec::new();
+        }
+        let words = usize::try_from(size)
+            .unwrap_or(0)
+            .div_ceil(size_of::<usize>());
+        let mut buffer = vec![0usize; words];
+        if CertGetEnhancedKeyUsage(cert, flags, buffer.as_mut_ptr().cast(), &raw mut size) == 0 {
+            return Vec::new();
+        }
+        let usage = &*buffer.as_ptr().cast::<CTL_USAGE>();
+        let count = usize::try_from(usage.cUsageIdentifier).unwrap_or(0);
+        if count == 0 || usage.rgpszUsageIdentifier.is_null() {
+            return Vec::new();
+        }
+        std::slice::from_raw_parts(usage.rgpszUsageIdentifier, count)
+            .iter()
+            .map(|&oid| CStr::from_ptr(oid.cast()).to_string_lossy().into_owned())
+            .collect()
+    }
+}
+
+/// Windows' words for `status`, an HRESULT, with its number.
+fn describe(status: i32) -> String {
+    let text = io::Error::from_raw_os_error(status).to_string();
+    let text = text.split(" (os error").next().unwrap_or_default();
+    format!(
+        "{} (0x{:08X})",
+        text.trim_end_matches(['.', ' ']),
+        status.cast_unsigned()
+    )
 }
 
 /// Start `setup` silently in its own folder (the private download folder),

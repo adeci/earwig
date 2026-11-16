@@ -1,8 +1,9 @@
 //! Updates for the Windows and macOS releases. The daemon asks GitHub once a
 //! day for earwig's newest release; on request it downloads this platform's
-//! file of it, checks it against the SHA-256 GitHub lists, and installs it:
-//! the installer on Windows, on macOS the app once it is signed like the
-//! running one. Builds from Nix, cargo or a package manager never check.
+//! file of it, checks it against the SHA-256 GitHub lists, and installs it
+//! once it is signed like the running earwig: the installer on Windows (any
+//! installer, when this earwig isn't signed), the app on macOS. Builds from
+//! Nix, cargo or a package manager never check.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -288,8 +289,9 @@ impl Updates {
     }
 
     /// Download `offer` into the private folder, no more bytes than GitHub
-    /// lists, within [`DOWNLOAD_LIMIT`], and checked against its SHA-256;
-    /// nothing is left of a download that fails. `progress(downloaded, total)`.
+    /// lists, within [`DOWNLOAD_LIMIT`], and checked against its SHA-256 and,
+    /// on Windows, for this earwig's publisher's signature; nothing is left of
+    /// a download that fails. `progress(downloaded, total)`.
     pub fn download(
         &self,
         lock: &UpdateLock,
@@ -332,6 +334,11 @@ impl Updates {
                 other => UpdateError::Download(other.to_string()),
             }
         })?;
+        #[cfg(windows)]
+        if let Err(e) = windows::check_publisher(&file) {
+            self.clear(lock);
+            return Err(e);
+        }
         Ok(file)
     }
 
@@ -552,6 +559,74 @@ fn developer_id_requirement(requirement: &str, team: &str) -> bool {
         })
 }
 
+/// Who signed a file, by an Authenticode signature Windows accepts.
+#[cfg(any(windows, test))]
+struct Publisher {
+    /// The signing certificate's name.
+    name: String,
+    /// The signing certificate's extended key usages.
+    ekus: Vec<String>,
+    /// The SHA-256 of the root certificate its chain ends at, and its name.
+    root: [u8; 32],
+    root_name: String,
+}
+
+#[cfg(any(windows, test))]
+impl Publisher {
+    /// Its Artifact Signing Public Trust certificate profiles: the certificates
+    /// of a profile, a new one every day, carry its own EKU right under
+    /// 1.3.6.1.4.1.311.97, whose .1 holds the kinds of profile (.1.0 is Public
+    /// Trust) and the other kinds' EKUs.
+    fn profiles(&self) -> impl Iterator<Item = &str> {
+        self.ekus.iter().map(String::as_str).filter(|eku| {
+            eku.strip_prefix("1.3.6.1.4.1.311.97.")
+                .is_some_and(|rest| !rest.is_empty() && rest.split('.').next() != Some("1"))
+        })
+    }
+
+    fn root(&self) -> String {
+        format!("{} ({})", self.root_name, hex::encode(&self.root[..8]))
+    }
+}
+
+/// Why `new` isn't signed by the publisher of `running`, if it isn't: it must
+/// chain to the same root and carry each of `running`'s certificate profiles,
+/// which only the profile's own certificates from that root's authority do.
+/// A subject is just a name that anyone can give their own certificate.
+#[cfg(any(windows, test))]
+fn same_publisher(running: &Publisher, new: &Publisher) -> Result<(), String> {
+    let ours: Vec<&str> = running.profiles().collect();
+    if ours.is_empty() {
+        return Err(format!(
+            "this earwig's signing certificate ({}) names no Artifact Signing certificate \
+             profile, so it can't tell its publisher's installers from others",
+            running.name
+        ));
+    }
+    if new.root != running.root {
+        return Err(format!(
+            "the installer's signature ({}) chains to another root certificate, {}, not {}",
+            new.name,
+            new.root(),
+            running.root()
+        ));
+    }
+    let theirs: Vec<&str> = new.profiles().collect();
+    match ours.iter().find(|profile| !theirs.contains(profile)) {
+        Some(profile) => Err(format!(
+            "the installer is signed by {} under another certificate profile ({}), \
+             not this earwig's {profile}",
+            new.name,
+            if theirs.is_empty() {
+                "none".to_owned()
+            } else {
+                theirs.join(", ")
+            }
+        )),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::testing::{Feed, data, releases};
@@ -692,6 +767,76 @@ mod tests {
             r#"identifier "io.github.adeci.earwig" and certificate leaf[subject.OU] = "ABCDE12345""#,
         ] {
             assert!(!developer_id_requirement(odd, "ABCDE12345"), "{odd}");
+        }
+    }
+
+    // The EKUs of a real Artifact Signing certificate (python.org's installer,
+    // October 2026), and of one with Microsoft's example of another profile.
+    const CODE_SIGNING: &str = "1.3.6.1.5.5.7.3.3";
+    const PUBLIC_TRUST: &str = "1.3.6.1.4.1.311.97.1.0";
+    const PROFILE: &str = "1.3.6.1.4.1.311.97.608394634.79987812.305991749.578777327";
+    const OURS: &[&str] = &[PUBLIC_TRUST, CODE_SIGNING, PROFILE];
+    const THEIRS: &[&str] = &[
+        PUBLIC_TRUST,
+        CODE_SIGNING,
+        "1.3.6.1.4.1.311.97.990309390.766961637.194916062.941502583",
+    ];
+
+    fn publisher(name: &str, ekus: &[&str], root: u8) -> Publisher {
+        Publisher {
+            name: name.to_owned(),
+            ekus: ekus.iter().map(|&eku| eku.to_owned()).collect(),
+            root: [root; 32],
+            root_name: format!("root {root}"),
+        }
+    }
+
+    #[test]
+    fn an_installer_from_the_same_certificate_profile_and_root_is_the_publishers() {
+        let running = publisher("Alexander Decious", OURS, 1);
+        // Another day's certificate: a new key and thumbprint, the profile's EKU.
+        let next = publisher("Alexander Decious", &[CODE_SIGNING, PROFILE], 1);
+        assert_eq!(same_publisher(&running, &next), Ok(()));
+        // A name changed with a renewed identity validation, a marker added.
+        let marked = [OURS, &["1.3.6.1.4.1.311.97.1.9"]].concat();
+        let later = publisher("Alexander J. Decious", &marked, 1);
+        assert_eq!(same_publisher(&running, &later), Ok(()));
+    }
+
+    #[test]
+    fn an_installer_from_anyone_else_is_refused() {
+        let running = publisher("Alexander Decious", OURS, 1);
+        // Another certificate profile from the same authority: another
+        // subscriber, or this one's profile deleted and made anew.
+        let other = publisher("Someone Else", THEIRS, 1);
+        let err = same_publisher(&running, &other).unwrap_err();
+        assert!(err.contains("another certificate profile"), "{err}");
+        // The same name and EKUs under another root: a look-alike, self-signed
+        // or from another authority.
+        let look_alike = publisher("Alexander Decious", OURS, 2);
+        let err = same_publisher(&running, &look_alike).unwrap_err();
+        assert!(err.contains("another root certificate"), "{err}");
+        let plain = publisher("Alexander Decious", &[CODE_SIGNING], 1);
+        let err = same_publisher(&running, &plain).unwrap_err();
+        assert!(err.contains("another certificate profile (none)"), "{err}");
+    }
+
+    #[test]
+    fn only_a_public_trust_profile_eku_names_a_publisher() {
+        let installer = publisher("Alexander Decious", OURS, 1);
+        for ekus in [
+            &[CODE_SIGNING][..],
+            &[CODE_SIGNING, PUBLIC_TRUST],
+            &[CODE_SIGNING, "1.3.6.1.4.1.311.97.1.3.1.29433.35007"],
+            &[CODE_SIGNING, "1.3.6.1.4.1.311.970.608394634"],
+            &[CODE_SIGNING, "1.3.6.1.4.1.311.97."],
+        ] {
+            let running = publisher("Alexander Decious", ekus, 1);
+            let err = same_publisher(&running, &installer).unwrap_err();
+            assert!(
+                err.contains("names no Artifact Signing certificate profile"),
+                "{ekus:?}: {err}"
+            );
         }
     }
 

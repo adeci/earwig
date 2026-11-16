@@ -51,11 +51,16 @@ HTTPS from where GitHub lists it, no more bytes than GitHub lists and within
 30 minutes, and keeps it only if its SHA-256 matches the digest GitHub took
 when it was uploaded. An older release is never installed. Then:
 
-- **Windows**: the installer runs without a window. It stops earwig,
-  replaces it and starts it again; **Start at sign-in** stays as it was. If
-  the installer fails it starts earwig again, but files it had already
-  replaced stay replaced. The installer isn't code-signed yet, so the update
-  is as trustworthy as the GitHub release itself.
+- **Windows**: a signed earwig runs the installer only if Windows finds its
+  Authenticode signature valid and it comes from earwig's own publisher: a
+  certificate of the same Artifact Signing certificate profile (the EKU
+  under 1.3.6.1.4.1.311.97 that every day's new certificate carries),
+  chaining to the same root certificate as earwig's own signature. An
+  unsigned earwig, from before the releases were signed or built from
+  source, takes the installer on its SHA-256 alone. The installer runs
+  without a window. It stops earwig, replaces it and starts it again;
+  **Start at sign-in** stays as it was. If the installer fails it starts
+  earwig again, but files it had already replaced stay replaced.
 - **macOS**: the earwig.app in the disk image must be validly signed, all of
   it and strictly, so that it meets the running app's own designated
   requirement (the same app and Developer ID team), and be the newer version.
