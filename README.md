@@ -37,17 +37,17 @@ Requires an Apple silicon Mac with macOS 14 or later.
 
 ### Windows
 
-Requires Windows 10 or 11 on a 64-bit Intel or AMD processor with AVX2 (Intel
-Core 4th generation, AMD Ryzen, or newer).
+Requires Windows 10 (version 1809 or later) or Windows 11 on a 64-bit Intel or
+AMD processor with AVX2 (Intel Core 4th generation, AMD Ryzen, or newer).
 
 1. Download `earwig-<version>-windows-x64-setup.exe` from the
    [latest release](https://github.com/adeci/earwig/releases/latest).
 2. Run it. It installs for the current user and needs no administrator rights.
 3. In the settings window that opens, download a model under **Models**.
 
-The installer is not signed yet, so Windows may warn about an unknown
-publisher: choose **More info**, then **Run anyway**. A portable `.zip` is on
-the same page.
+The installer and the programs it installs are signed. Windows may still warn
+about a new release until enough people have downloaded it: choose
+**More info**, then **Run anyway**. A portable `.zip` is on the same page.
 
 ## Usage
 
@@ -71,7 +71,5 @@ event stream.
 ## Updates
 
 On Windows and macOS, earwig checks GitHub for a new release once a day and
-offers **Update to …** in the tray menu and the settings window; one click
-installs it and restarts earwig. **Check for updates** in the settings turns
-the check off. Installations from Nix or from source never check; update them
-with those tools.
+offers **Update to …** in the tray menu and the settings window. Installations
+from Nix or from source don't check so just update them with those tools.
