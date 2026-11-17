@@ -1,14 +1,16 @@
 # The packaged earwig end to end on a desktop session (CI's windows runner):
-# silent install; the installer and what it installed signed as sign.ps1
-# signs; start as sign-in does with EARWIG_AUDIO_FILE; a held and a tapped
-# Ctrl+Space into Notepad through the keyboard hook; the engine on other CPUs
-# under Intel SDE ($env:SDE_PATH); uninstall while running.
+# the installer's version info; silent install; the installer and what it
+# installed signed as sign.ps1 signs; start as sign-in does with
+# EARWIG_AUDIO_FILE; a held and a tapped Ctrl+Space into Notepad through the
+# keyboard hook; the engine on other CPUs under Intel SDE ($env:SDE_PATH);
+# uninstall while running.
 #   pwsh packaging/windows/smoke.ps1   (after package.ps1)
 # Fails with ::error:: annotations; every wait is bounded.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = Resolve-Path "$PSScriptRoot\..\.."
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$root\target" }
+$version = (Select-String -Path "$root\Cargo.toml" -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
 $setup = Get-ChildItem "$target\package\*-setup.exe" | Select-Object -First 1
 $app = "$env:LOCALAPPDATA\Programs\earwig"
 $earwig = "$app\earwig.exe"
@@ -210,6 +212,19 @@ function States([string]$file, [int]$from) {
         ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 4 }) -join ' '
 }
 
+# Windows shows the file version, digits only: the version without its pre-release suffix. Inno
+# Setup pads the version strings with spaces.
+Step 'installer version' {
+    $info = $setup.VersionInfo
+    $file = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+    $text = $info.FileVersion.Trim()
+    $product = $info.ProductVersion.Trim()
+    Write-Host "::notice title=installer version::$($setup.Name): file version $file ($text), product version $product"
+    if ($file -ne "$(($version -split '-')[0]).0" -or $text -ne $version -or $product -ne $version) {
+        Fail "$($setup.Name) has file version $file ($text) and product version $product, not those of $version"
+    }
+}
+
 $signIn = $null
 Step 'install' {
     $p = Start-Process $setup.FullName -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
@@ -224,6 +239,14 @@ Step 'signatures' {
 }
 
 Step 'model' {
+    # A model CI restored from its cache must have the catalog's SHA-256, as a download must.
+    $entry = [regex]::Match((Get-Content -Raw "$root\crates\earwig-core\models.toml"), '(?s)id = "parakeet-unified-en-0\.6b".*?(?=\[\[|\z)').Value
+    $field = { param($name) [regex]::Match($entry, "(?m)^$name = `"([^`"]+)`"").Groups[1].Value }
+    $cached = "$env:LOCALAPPDATA\earwig\models\$(& $field repo)\$(& $field revision)\$(& $field file)"
+    if ((Test-Path $cached) -and (Get-FileHash -Algorithm SHA256 $cached).Hash -ne (& $field sha256)) {
+        Write-Host "::warning title=model::$cached is not the catalog's: downloading it again"
+        Remove-Item $cached
+    }
     $list = Run $earwig @('models', 'list')
     if ($list.Out -notmatch '\*\s+parakeet-unified-en-0\.6b\s+.*installed') {
         $download = Run $earwig @('models', 'download', 'parakeet-unified-en-0.6b') 900

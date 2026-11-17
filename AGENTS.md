@@ -23,14 +23,18 @@ overlay and settings window, transcribe.cpp for speech. NixOS first.
   for a tag like `v0.1.0-rc.1`); `macos/` signs earwig.app with the Developer ID
   into a notarized DMG, on Linux (`nix develop .#release` has the tools);
   `windows/` the portable zip, the installer and winget manifests, signed by
-  `sign.ps1` (Artifact Signing on a tag, a throwaway test publisher in CI).
+  `sign.ps1` (Artifact Signing on a tag, a throwaway test publisher in CI);
+  `tools.psd1` pins every tool Windows CI downloads (version, URL, SHA-256).
 - CI is the flake's `checks` (package, clippy, tests, treefmt; VM tests on
   x86_64-linux), built by nixbot on Linux and a Mac. A pushed `v*` tag gets its
   GitHub release and the Mac DMG from the `release` effect (`herculesCI` in
   `flake.nix`) once its commit built green. `.github/workflows/ci.yml` builds,
   tests and packages Windows, which Nix can't, and attaches the packages to the
-  release (making it first if nixbot hasn't yet). Release assets carry the
-  workspace version, so a release's tag is `v` and that version.
+  release (making it first if nixbot hasn't yet), in separate jobs: `build`
+  runs cargo but can't sign, `package` signs but runs no cargo, `test` and
+  `release` (the only one that may write to the repository) come after. Of
+  actions it uses only GitHub's own, pinned to commits. Release assets carry
+  the workspace version, so a release's tag is `v` and that version.
 
 Per-OS code lives in `linux`, `macos` and `windows` modules behind one
 signature each: `audio/`, `desktop/`, `insert/` and `paths/` in earwig-core,

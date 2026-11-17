@@ -11,10 +11,20 @@
   #error Pass /DStage=<folder with the binaries>
 #endif
 
+; Windows' file version is digits and periods only: 0.1.0 for 0.1.0-rc.1.
+#if Pos("-", Version) > 0
+  #define NumericVersion Copy(Version, 1, Pos("-", Version) - 1)
+#else
+  #define NumericVersion Version
+#endif
+
 [Setup]
 AppId={{6A3C4F2E-8F1B-4C57-9E0D-2B7E5A1D9C41}
 AppName=earwig
 AppVersion={#Version}
+VersionInfoVersion={#NumericVersion}
+VersionInfoTextVersion={#Version}
+VersionInfoProductTextVersion={#Version}
 AppPublisher=adeci
 AppPublisherURL=https://github.com/adeci/earwig
 DefaultDirName={localappdata}\Programs\earwig

@@ -10,18 +10,24 @@ using namespace System.Security.Cryptography.X509Certificates
 #                     trusted there only, with a new certificate for every signing and the same
 #                     certificate profile EKU, as Artifact Signing's certificates are.
 #   none              anywhere else, and on a tag before Artifact Signing is set up: nothing.
-# EARWIG_SIGN overrides the choice. Signatures are SHA-256, timestamped by Artifact Signing's TSA.
+# EARWIG_SIGN overrides the choice: CI's package job decides, the jobs after it check as it signed.
+# Signatures are SHA-256, timestamped by Artifact Signing's TSA.
 #   pwsh packaging/windows/sign.ps1 <file>...          sign them, then check them
 #   pwsh packaging/windows/sign.ps1 -Check <file>...   fail unless signed as this mode signs
 #   pwsh packaging/windows/sign.ps1 -Mode              print the mode
 #   pwsh packaging/windows/sign.ps1 -Iscc              iscc's arguments to sign Setup and Uninstall
+#   pwsh packaging/windows/sign.ps1 -Trust <file>      trust the test publisher another runner made
 # For the update test, test mode also signs as -Publisher other (another publisher under the test
-# root) or look-alike (the test publisher's name and profile EKU, self-signed).
+# root) or look-alike (the test publisher's name and profile EKU, self-signed). The test publisher's
+# key stays on the runner that made it; what anyone may know of it (its root's certificate, its
+# profile EKUs, the certificates a runner checking its signatures must trust) is in
+# $RUNNER_TEMP/earwig-test-publisher.json, which -Trust takes on another runner.
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$Check,
     [switch]$Mode,
     [switch]$Iscc,
+    [string]$Trust,
     [ValidateSet('earwig', 'other', 'look-alike')]
     [string]$Publisher = 'earwig',
     [Parameter(Position = 0, ValueFromRemainingArguments)]
@@ -51,8 +57,11 @@ $timestamps = 'http://timestamp.acs.microsoft.com'
 # Microsoft Identity Verification Root Certificate Authority 2020 (its SHA-256), where every
 # Artifact Signing Public Trust chain ends.
 $microsoftRoot = '5367F20C7ADE0E2BCA790915056D086B720C33C1FA2A2661ACF787E3292E1270'
+# earwig's certificate profile in Artifact Signing: the EKU each of its certificates carries.
+$earwigProfile = '1.3.6.1.4.1.311.97.320264061.530968931.474248062.405732374'
 $publicTrust = '1.3.6.1.4.1.311.97.1.0'
 $codeSigning = '1.3.6.1.5.5.7.3.3'
+$public = "$env:RUNNER_TEMP\earwig-test-publisher.json"
 
 function SignTool {
     $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
@@ -93,28 +102,46 @@ function TrustMachineWide($certificate) {
 }
 
 # The test publisher's root, with its key, and the profile EKUs of 'earwig' and 'other', made on
-# this runner's first signing.
+# this runner's first signing; its public part in $public.
 function TestRoot {
     if ($env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
         throw 'test signing trusts a throwaway root on the whole machine: GitHub Actions runners only'
     }
     $saved = Join-Path $env:RUNNER_TEMP 'earwig-test-signing.json'
     if (-not (Test-Path $saved)) {
+        if (Test-Path $public) { throw 'this runner took the test publisher from another (-Trust): it checks signatures, it does not sign' }
         $now = [DateTimeOffset]::UtcNow
         $root = NewCertificate 'CN=earwig test root' $null @() $true $now.AddMinutes(-10) $now.AddDays(2)
         TrustMachineWide $root
         $arcs = { (1..4 | ForEach-Object { Get-Random -Minimum 2 -Maximum 1073741824 }) -join '.' }
-        @{
+        $state = @{
             pfx = [Convert]::ToBase64String($root.Export([X509ContentType]::Pkcs12))
             earwig = "1.3.6.1.4.1.311.97.$(& $arcs)"
             other = "1.3.6.1.4.1.311.97.$(& $arcs)"
-        } | ConvertTo-Json | Set-Content $saved
+        }
+        $state | ConvertTo-Json | Set-Content $saved
+        @{
+            root = [Convert]::ToBase64String($root.RawData)
+            earwig = $state.earwig
+            other = $state.other
+            trusted = @([Convert]::ToBase64String($root.RawData))
+        } | ConvertTo-Json | Set-Content $public
     }
     $state = Get-Content -Raw $saved | ConvertFrom-Json
     [pscustomobject]@{
         Certificate = [X509Certificate2]::new([Convert]::FromBase64String($state.pfx), [string]$null, 'Exportable')
         Earwig = $state.earwig
         Other = $state.other
+    }
+}
+
+# The test publisher as signatures are checked against it: its root's certificate and profile EKU.
+function TestPublisher {
+    if (-not (Test-Path $public)) { throw 'no test publisher on this runner: test signing makes one, -Trust takes one made on another runner' }
+    $state = Get-Content -Raw $public | ConvertFrom-Json
+    [pscustomobject]@{
+        Root = [X509Certificate2]::new([Convert]::FromBase64String($state.root))
+        Earwig = $state.earwig
     }
 }
 
@@ -130,6 +157,10 @@ function TestCertificate([string]$as) {
         'look-alike' {
             $self = NewCertificate $subject $null @($publicTrust, $codeSigning, $root.Earwig) $false $now.AddMinutes(-5) $now.AddMinutes(10)
             TrustMachineWide $self
+            # Trusted where its signatures are checked, too.
+            $state = Get-Content -Raw $public | ConvertFrom-Json
+            $state.trusted = @($state.trusted) + [Convert]::ToBase64String($self.RawData)
+            $state | ConvertTo-Json | Set-Content $public
             $self
         }
     }
@@ -192,7 +223,7 @@ function Sign([string[]]$files) {
         try { $output = & $tool.FullName @common /v /dlib $dlib /dmdf $metadata @files 2>&1 }
         finally { Remove-Item $env:AZURE_FEDERATED_TOKEN_FILE; Remove-Item Env:AZURE_FEDERATED_TOKEN_FILE }
     }
-    Write-Host "signed as $as`: $(($output | Select-Object -Last 3) -join ' ')"
+    Write-Host "::notice title=signed as::$signing as $as`: $(($output | Select-Object -Last 3) -join ' ')"
     if ($LASTEXITCODE) {
         $why = @($output | Where-Object { "$_" -match 'error|AADSTS|Forbidden|denied|status' } | Select-Object -First 12) -join "`n"
         throw "signing $($files -join ', ') as $as failed (signtool exit $LASTEXITCODE):`n$why"
@@ -218,17 +249,28 @@ function Problem([string]$file) {
     $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
     $rootHash = $root.GetCertHashString([HashAlgorithmName]::SHA256)
     if ($signing -eq 'test') {
-        $test = TestRoot
-        if ($rootHash -ne $test.Certificate.GetCertHashString([HashAlgorithmName]::SHA256)) { return "chains to $($root.Subject), not the test root" }
+        $test = TestPublisher
+        if ($rootHash -ne $test.Root.GetCertHashString([HashAlgorithmName]::SHA256)) { return "chains to $($root.Subject), not the test root" }
         if ($profiles -notcontains $test.Earwig) { return "certificate profile $profiles, not the test publisher's $($test.Earwig)" }
     } else {
         if ($rootHash -ne $microsoftRoot) { return "chains to $($root.Subject) ($rootHash), not Microsoft's Artifact Signing root" }
-        if (-not $profiles) { return "$($leaf.Subject) names no Artifact Signing certificate profile" }
+        if ($profiles -notcontains $earwigProfile) { return "$($leaf.Subject) has certificate profile $(if ($profiles) { $profiles } else { 'none' }), not earwig's $earwigProfile" }
     }
-    Write-Host ("::notice title=signed::{0}: {1}, certificate profile {2}, root {3}, timestamp by {4}" -f (Split-Path -Leaf $file),
-        $leaf.Subject, ($profiles -join ' '), $root.GetNameInfo('SimpleName', $false), $signature.TimeStamperCertificate.GetNameInfo('SimpleName', $false))
+    Write-Host ("::notice title=signed::{0}: {1}, certificate profile {2}, root {3} {4}, timestamp by {5}" -f (Split-Path -Leaf $file),
+        $leaf.Subject, ($profiles -join ' '), $root.GetNameInfo('SimpleName', $false), $root.Thumbprint,
+        $signature.TimeStamperCertificate.GetNameInfo('SimpleName', $false))
 }
 
+if ($Trust) {
+    if ($signing -ne 'test' -or $env:GITHUB_ACTIONS -ne 'true' -or -not $env:RUNNER_TEMP) {
+        throw "-Trust trusts a throwaway root on the whole machine: test signing on GitHub Actions runners only, not $signing"
+    }
+    foreach ($certificate in (Get-Content -Raw $Trust | ConvertFrom-Json).trusted) {
+        TrustMachineWide ([X509Certificate2]::new([Convert]::FromBase64String($certificate)))
+    }
+    Copy-Item $Trust $public
+    return
+}
 if (-not $Files) { throw 'no files' }
 if (-not $Check) {
     Sign $Files

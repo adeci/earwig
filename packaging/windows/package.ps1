@@ -1,33 +1,46 @@
 # Build earwig for Windows and package it: a portable zip and, when Inno
 # Setup's iscc is on PATH (or in its default folder), a per-user installer;
 # signed as sign.ps1 decides (Artifact Signing, CI's test publisher, or not).
-#   pwsh packaging/windows/package.ps1
+#   pwsh packaging/windows/package.ps1            both
+#   pwsh packaging/windows/package.ps1 -Build     the release binaries, unsigned, and the Vulkan
+#                                                 loader into target/dist (CI's build job)
+#   pwsh packaging/windows/package.ps1 -Package   target/dist signed and packaged, no cargo
+#                                                 (CI's package job)
 # Output: target/package/earwig-<version>-windows-x64.zip and -setup.exe.
+param([switch]$Build, [switch]$Package)
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path "$PSScriptRoot\..\.."
 Set-Location $root
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
-
-# Pinned CPU tiers, the C runtime linked in, the update marker, no test feed.
-. "$PSScriptRoot\release-env.ps1"
-cargo build --release --locked -p earwig -p earwigw
-if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$root\target" }
-& "$PSScriptRoot\sign.ps1" "$target\release\earwig.exe" "$target\release\earwigw.exe"
+$dist = "$target\dist"
+$both = -not ($Build -or $Package)
+
+if ($Build -or $both) {
+    # Pinned CPU tiers, the C runtime linked in, the update marker, no test feed.
+    . "$PSScriptRoot\release-env.ps1"
+    cargo build --release --locked -p earwig -p earwigw
+    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    # The Vulkan loader, which GPU drivers install: without it Windows won't start
+    # earwig.exe at all. With no driver behind it, earwig runs on the CPU. The
+    # SDK's copy (CI installs the runtime into it), else the system's.
+    $loader = @("$env:VULKAN_SDK\runtime\x64\vulkan-1.dll", "$env:windir\System32\vulkan-1.dll") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $loader) { throw 'vulkan-1.dll not found: install the Vulkan SDK with its runtime' }
+    Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory $dist | Out-Null
+    Copy-Item "$target\release\earwig.exe", "$target\release\earwigw.exe", $loader $dist
+    if (-not ($Package -or $both)) { exit 0 }
+}
+
+& "$PSScriptRoot\sign.ps1" "$dist\earwig.exe" "$dist\earwigw.exe"
 $out = "$target\package"
 $name = "earwig-$version-windows-x64"
 $stage = "$out\$name"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item "$target\release\earwig.exe", "$target\release\earwigw.exe", LICENSE, README.md,
+Copy-Item "$dist\earwig.exe", "$dist\earwigw.exe", "$dist\vulkan-1.dll", LICENSE, README.md,
     assets\fonts\LICENSE-IBM-Plex-Sans.txt, packaging\windows\LICENSE-Vulkan-Loader.txt $stage
-# The Vulkan loader, which GPU drivers install: without it Windows won't start
-# earwig.exe at all. With no driver behind it, earwig runs on the CPU. The
-# SDK's copy (CI installs the runtime into it), else the system's.
-$loader = @("$env:VULKAN_SDK\runtime\x64\vulkan-1.dll", "$env:windir\System32\vulkan-1.dll") |
-    Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $loader) { throw 'vulkan-1.dll not found: install the Vulkan SDK with its runtime' }
-Copy-Item $loader $stage
 
 # The DLLs a PE image imports (its import directory).
 function Imports([string]$path) {

@@ -1,9 +1,20 @@
 # Linux and macOS are the flake's checks, built by nixbot, whose release effect also makes a pushed
 # v* tag's release. Nix can't build earwig for Windows (GPUI's shaders need the Windows SDK's
-# fxc.exe, transcribe.cpp MSVC and the Vulkan SDK), so Windows and its release packages stay here.
+# fxc.exe, transcribe.cpp MSVC and the Vulkan SDK), so Windows and its release packages stay here,
+# in jobs that keep the code which builds earwig away from what signs as its publisher:
+#   build    rustup, the crates and their build scripts, the Vulkan SDK: clippy, the tests and the
+#            release binaries, unsigned. Reads the repository, nothing else.
+#   package  no cargo: signs the binaries, packages them and signs the installer. The only job
+#            that may ask for an OIDC token and, on a v* tag, the only one in the release
+#            environment, whose federated credential lets that token sign with Artifact Signing.
+#   test     the installer end to end on this runner's desktop, from the packages. Reads only.
+#   release  v* tags: checks the signatures and attaches the packages to the release, the only
+#            job that may write to the repository.
 # packaging/windows/sign.ps1 decides how they are signed: with Artifact Signing on a v* tag once
 # the release environment has its variables (none of them secret), else unsigned on a tag; with
 # a throwaway test publisher on every other run, so the signed path is always tested.
+# Each tool comes from its vendor as packaging/windows/tools.psd1 pins it; of actions, only
+# GitHub's own, pinned to commits.
 name: CI
 
 on:
@@ -14,20 +25,95 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions: {}
+
+defaults:
+  run:
+    shell: pwsh
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  windows:
+  build:
     runs-on: windows-latest
-    # About 15 minutes with a warm cache, 30 from a cold one; steps that can hang give up sooner.
+    # About 30 minutes from a cold cache; steps that can hang give up sooner.
     timeout-minutes: 45
-    # Tags attach the packages to their release, signed in the release environment, whose
-    # federated credential lets this job's OIDC token sign with Artifact Signing.
+    permissions:
+      contents: read
+    env:
+      # The cargo cache's paths, restored and saved alike.
+      CACHED: |
+        ~/.cargo/registry/index
+        ~/.cargo/registry/cache
+        ~/.cargo/registry/src
+        ~/.cargo/git/db
+        target
+    steps:
+      # The commit under test from the public repository, as every job gets it: no token, no tags.
+      - name: Check out
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git init -q
+          git fetch -q --no-tags --depth=1 "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" $env:GITHUB_SHA
+          git -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+      # transcribe.cpp's Vulkan backend builds with the SDK's glslc and headers and links
+      # vulkan-1.lib; its runtime lets the tests start without a GPU driver, on the CPU.
+      - name: Rust, the Vulkan SDK and CMake
+        id: tools
+        run: packaging/windows/tools.ps1 Rust VulkanSdk CMake
+        timeout-minutes: 10
+      # Only an exact match: one cache per toolchain, SDK, CMake, release build environment and
+      # Cargo.lock, made from scratch, so it never grows. Any of them changing builds cold once.
+      - name: Restore the cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.CACHED }}
+          key: cargo-windows-rust${{ steps.tools.outputs.rust }}-vulkan${{ steps.tools.outputs.vulkan }}-cmake${{ steps.tools.outputs.cmake }}-env${{ hashFiles('packaging/windows/release-env.ps1') }}-lock${{ hashFiles('Cargo.lock') }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        timeout-minutes: 20
+      - run: cargo test --workspace --locked
+        timeout-minutes: 20
+      - name: The release binaries, unsigned
+        run: packaging/windows/package.ps1 -Build
+        timeout-minutes: 30
+      # Its version and test feed are compiled in: it is built on branches only, and kept apart.
+      - name: The update test's older build, unsigned
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: crates/earwig/tests/update/windows.ps1 -Build
+        timeout-minutes: 15
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: binaries
+          path: target/dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: update-test-build
+          path: target/update-test/build/
+          if-no-files-found: error
+      - name: Save the cargo cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true' && !startsWith(github.ref, 'refs/tags/')
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.CACHED }}
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  package:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # On a tag, the release environment: Artifact Signing trusts this job's OIDC token there only.
+    # Elsewhere the token names the branch, which it doesn't trust.
     environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     permissions:
-      contents: write
+      contents: read
       id-token: write
+    outputs:
+      signing: ${{ steps.signing.outputs.mode }}
     env:
       ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
       ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
@@ -35,29 +121,39 @@ jobs:
       AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
     steps:
-      # Actions pinned to commits: on a tag this job can sign as the publisher.
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: stable
-          components: clippy
-      # transcribe.cpp's Vulkan backend builds with the SDK's glslc and headers and links
-      # vulkan-1.lib; the runtime lets the tests start without a GPU driver, on the CPU.
-      - uses: jakoch/install-vulkan-sdk-action@7fe84289ddbf750f7eff9f8e4588e600e1dd06c8 # v1
-        with:
-          install_runtime: true
-          cache: true
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-        timeout-minutes: 20
-      - run: cargo test --workspace --locked
-        timeout-minutes: 20
-      # The portable zip, the per-user installer and its winget manifests.
-      - run: choco install innosetup --no-progress -y
+      - name: Check out
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git init -q
+          git fetch -q --no-tags --depth=1 "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" $env:GITHUB_SHA
+          git -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+      - name: Inno Setup
+        run: packaging/windows/tools.ps1 InnoSetup
         timeout-minutes: 5
-      - run: packaging/windows/package.ps1
-        shell: pwsh
-        timeout-minutes: 30
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: binaries
+          path: target/dist
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: update-test-build
+          path: target/update-test/build
+      # Decided here once; the jobs after this one check the packages as it signed them.
+      - name: How to sign
+        id: signing
+        run: |
+          $mode = packaging/windows/sign.ps1 -Mode
+          "mode=$mode" | Add-Content $env:GITHUB_OUTPUT
+          Write-Host "::notice title=signing::$mode, in the package job for $env:GITHUB_REF"
+      # The portable zip, the per-user installer and its winget manifests.
+      - name: Sign and package
+        run: packaging/windows/package.ps1 -Package
+        timeout-minutes: 20
+      - name: The update test's installers
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: crates/earwig/tests/update/windows.ps1 -Package
+        timeout-minutes: 15
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: earwig-windows-x64
@@ -65,34 +161,100 @@ jobs:
             target/package/*.zip
             target/package/*-setup.exe
             target/package/winget
+          if-no-files-found: error
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: update-test-packages
+          path: target/update-test/packages/
+          if-no-files-found: error
+      # The test publisher's root certificate and profile EKUs; its key stays on this runner.
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: steps.signing.outputs.mode == 'test'
+        with:
+          name: test-publisher
+          path: ${{ runner.temp }}/earwig-test-publisher.json
+          if-no-files-found: error
+
+  test:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      EARWIG_SIGN: ${{ needs.package.outputs.signing }}
+    steps:
+      - name: Check out
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git init -q
+          git fetch -q --no-tags --depth=1 "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" $env:GITHUB_SHA
+          git -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: earwig-windows-x64
+          path: target/package
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: update-test-packages
+          path: target/update-test/packages
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        if: needs.package.outputs.signing == 'test'
+        with:
+          name: test-publisher
+          path: ${{ runner.temp }}/test-publisher
+      - name: Trust the test publisher
+        if: needs.package.outputs.signing == 'test'
+        run: packaging/windows/sign.ps1 -Trust "$env:RUNNER_TEMP/test-publisher/earwig-test-publisher.json"
       # The installer end to end on this runner's desktop: install, the hotkey and dictation into
       # Notepad, the engine on emulated CPUs (Intel SDE), uninstall while running.
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/AppData/Local/earwig/models
           key: earwig-model-parakeet-unified-en-0.6b-4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795
-      - uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
+      - name: Intel SDE
+        run: packaging/windows/tools.ps1 Sde
+        timeout-minutes: 5
       - name: Smoke test the installer
         run: packaging/windows/smoke.ps1
-        shell: pwsh
         timeout-minutes: 10
       # An older test build, installed and running, updates itself to the installer just made.
       # A tag's commit was tested when it was pushed to its branch.
       - name: Update end to end
         if: "!startsWith(github.ref, 'refs/tags/')"
-        run: crates/earwig/tests/update/windows.ps1
-        shell: pwsh
+        run: crates/earwig/tests/update/windows.ps1 -Test
         timeout-minutes: 15
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [package, test]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      EARWIG_SIGN: ${{ needs.package.outputs.signing }}
+    steps:
+      - name: Check out
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          git init -q
+          git fetch -q --no-tags --depth=1 "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" $env:GITHUB_SHA
+          git -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: earwig-windows-x64
+          path: target/package
       # Once Artifact Signing is set up, nothing unsigned or signed by anyone else goes out.
       - name: Check the release's signatures
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
         run: |
+          if ($env:EARWIG_SIGN -notin 'artifact-signing', 'none') { throw "the package job signed as '$env:EARWIG_SIGN'" }
           Expand-Archive (Get-Item target/package/*.zip).FullName "$env:RUNNER_TEMP/release"
           packaging/windows/sign.ps1 -Check (Get-Item target/package/*-setup.exe).FullName `
             "$env:RUNNER_TEMP/release/earwig.exe" "$env:RUNNER_TEMP/release/earwigw.exe"
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -101,3 +263,6 @@ jobs:
           bash packaging/github-release.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
           gh release upload "$GITHUB_REF_NAME" target/package/*.zip target/package/*-setup.exe \
             --repo "$GITHUB_REPOSITORY" --clobber
+          for file in target/package/*.zip target/package/*-setup.exe; do
+            echo "::notice title=attached::the release job attached $(basename "$file") (SHA-256 $(sha256sum "$file" | cut -d' ' -f1)) to $GITHUB_REF_NAME"
+          done

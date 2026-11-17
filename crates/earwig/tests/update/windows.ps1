@@ -4,9 +4,13 @@
 # refuses, then as released. When packaging/windows/sign.ps1 signs, the older build is signed
 # too: it refuses the installer unsigned, signed by another publisher or by a look-alike of its
 # own, or changed after signing; and an unsigned older build, as the last release before signing
-# was, takes the signed installer. CI runs it after package.ps1, with Inno Setup's iscc at hand.
-#   pwsh crates/earwig/tests/update/windows.ps1
+# was, takes the signed installer. In three parts, as CI's jobs run them: -Build the older build,
+# unsigned (cargo; the build job), -Package its installers and those it must refuse (Inno Setup's
+# iscc and the signing key; the package job), -Test the update from them (neither; the test job).
+#   pwsh crates/earwig/tests/update/windows.ps1             all three, after package.ps1
+#   pwsh crates/earwig/tests/update/windows.ps1 -Build      or -Package, or -Test: one
 # Every wait has a deadline: what outlives it is killed, and the failure says what was running.
+param([switch]$Build, [switch]$Package, [switch]$Test)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
@@ -15,18 +19,21 @@ Set-Location $root
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$root\target" }
 $newSetup = "$target\package\earwig-$version-windows-x64-setup.exe"
-if (-not (Test-Path $newSetup)) { throw "no ${newSetup}: run packaging/windows/package.ps1 first" }
 # Older than the release; a pre-release itself when the release is one, which a stable build
 # would not take.
 $old = if ($version.Contains('-')) { '0.0.1-test' } else { '0.0.1' }
 $port = 8749
 $work = "$target\update-test"
+# The older build's programs; its installers and those it must refuse; the test's own files.
+$built = "$work\build"
+$packages = "$work\packages"
+$bad = "$packages\refused"
+$logs = "$work\test"
+$all = -not ($Build -or $Package -or $Test)
 $app = "$env:LOCALAPPDATA\Programs\earwig"
 $earwig = "$app\earwig.exe"
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{6A3C4F2E-8F1B-4C57-9E0D-2B7E5A1D9C41}_is1'
-Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$work\stage" | Out-Null
 $sign = "$root\packaging\windows\sign.ps1"
 $signed = (& $sign -Mode) -ne 'none'
 $state = "$env:LOCALAPPDATA\earwig\state"
@@ -176,7 +183,7 @@ function Serve([switch]$WrongDigest, [string]$File = $newSetup) {
     $arguments = @("`"$PSScriptRoot\fake_github.py`"", '--port', $port, '--version', $version, '--file', "`"$File`"",
         '--name', (Split-Path -Leaf $newSetup))
     if ($WrongDigest) { $arguments += '--wrong-digest' }
-    $log = "$work\feed-$(Get-Random).log"
+    $log = "$logs\feed-$(Get-Random).log"
     $feed = Start-Process python -ArgumentList $arguments -PassThru -NoNewWindow `
         -RedirectStandardOutput "$log.out" -RedirectStandardError $log
     try {
@@ -195,59 +202,79 @@ function Serve([switch]$WrongDigest, [string]$File = $newSetup) {
 $feed = $null
 $passed = $false
 try {
-    # The older build: the same code built as the release package is (not for this runner's
-    # CPU), an older version, the stand-in compiled in. The lock file gets the same versions, so
-    # cargo asks crates.io nothing (--frozen): package.ps1 fetched every crate already.
-    $manifests = 'crates\earwig\Cargo.toml', 'crates\earwig-core\Cargo.toml', 'Cargo.lock'
-    $saved = @{}
-    foreach ($file in $manifests) { $saved[$file] = Get-Content -Raw $file }
-    try {
-        foreach ($file in $manifests[0..1]) {
-            $saved[$file] -replace '(?m)^version\.workspace = true', "version = `"$old`"" | Set-Content -NoNewline $file
+    if ($Build -or $all) {
+        # The same code built as the release package is (not for this runner's CPU), an older
+        # version, the stand-in compiled in. The lock file gets the same versions, so cargo asks
+        # crates.io nothing (--frozen): package.ps1 fetched every crate already.
+        $manifests = 'crates\earwig\Cargo.toml', 'crates\earwig-core\Cargo.toml', 'Cargo.lock'
+        $saved = @{}
+        foreach ($file in $manifests) { $saved[$file] = Get-Content -Raw $file }
+        try {
+            foreach ($file in $manifests[0..1]) {
+                $saved[$file] -replace '(?m)^version\.workspace = true', "version = `"$old`"" | Set-Content -NoNewline $file
+            }
+            $saved['Cargo.lock'] -replace '(?m)^(name = "earwig(-core)?"\r?\n)version = ".+"', "`${1}version = `"$old`"" |
+                Set-Content -NoNewline 'Cargo.lock'
+            . "$root\packaging\windows\release-env.ps1"
+            $env:EARWIG_UPDATE_TEST_FEED = "http://127.0.0.1:$port"
+            $compiled = Run cargo 'build', '--release', '--frozen', '-p', 'earwig', '-p', 'earwigw' 600
+            if ($compiled.Code) {
+                $errors = $compiled.Output -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|Downloaded|Downloading)' }
+                throw "building the older test build failed:`n$(($errors | Select-Object -Last 40) -join "`n")"
+            }
+        } finally {
+            Remove-Item Env:EARWIG_UPDATE_TEST_FEED -ErrorAction SilentlyContinue
+            foreach ($file in $manifests) { $saved[$file] | Set-Content -NoNewline $file }
         }
-        $saved['Cargo.lock'] -replace '(?m)^(name = "earwig(-core)?"\r?\n)version = ".+"', "`${1}version = `"$old`"" |
-            Set-Content -NoNewline 'Cargo.lock'
-        . "$root\packaging\windows\release-env.ps1"
-        $env:EARWIG_UPDATE_TEST_FEED = "http://127.0.0.1:$port"
-        $build = Run cargo 'build', '--release', '--frozen', '-p', 'earwig', '-p', 'earwigw' 600
-        if ($build.Code) {
-            $errors = $build.Output -split "`n" | Where-Object { $_ -notmatch '^\s*(Compiling|Downloaded|Downloading)' }
-            throw "building the older test build failed:`n$(($errors | Select-Object -Last 40) -join "`n")"
+        Remove-Item -Recurse -Force $built -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory $built | Out-Null
+        Copy-Item "$target\release\earwig.exe", "$target\release\earwigw.exe" $built
+        Lap 'older build'
+    }
+
+    if ($Package -or $all) {
+        if (-not (Test-Path $newSetup)) { throw "no ${newSetup}: run packaging/windows/package.ps1 first" }
+        # The package's files, its two programs the older build's.
+        $stage = "$work\stage"
+        Remove-Item -Recurse -Force $stage, $packages -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory $stage, $packages | Out-Null
+        Copy-Item "$target\package\earwig-$version-windows-x64\*" $stage
+        Copy-Item -Force "$built\earwig.exe", "$built\earwigw.exe" $stage
+        $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+        if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+        if ($signed) {
+            # Unsigned too, as the last release before signing was.
+            $packaged = Run $iscc '/Q', "/DVersion=$old", "/DStage=$stage", "/O$packages\unsigned", 'packaging\windows\earwig.iss' 600
+            if ($packaged.Code) { throw 'packaging the unsigned older test build failed' }
+            & $sign "$stage\earwig.exe" "$stage\earwigw.exe"
         }
-    } finally {
-        Remove-Item Env:EARWIG_UPDATE_TEST_FEED -ErrorAction SilentlyContinue
-        foreach ($file in $manifests) { $saved[$file] | Set-Content -NoNewline $file }
+        $packaged = Run $iscc (@('/Q', "/DVersion=$old", "/DStage=$stage", "/O$packages") + @(& $sign -Iscc) + 'packaging\windows\earwig.iss') 600
+        if ($packaged.Code) { throw 'packaging the older test build failed' }
+        if ($signed) {
+            # The new installer as earwig must not take it: unsigned, signed by another publisher or by
+            # a look-alike of its own (the same name and profile EKU, self-signed), changed after signing.
+            New-Item -ItemType Directory $bad | Out-Null
+            foreach ($case in 'unsigned', 'other', 'look-alike', 'changed') { Copy-Item $newSetup "$bad\$case.exe" }
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+            if ((Run $signtool.FullName 'remove', '/s', "$bad\unsigned.exe").Code) { throw 'removing the signature failed' }
+            & $sign -Publisher other "$bad\other.exe"
+            & $sign -Publisher look-alike "$bad\look-alike.exe"
+            $bytes = [IO.File]::ReadAllBytes("$bad\changed.exe")
+            $middle = $bytes.Length -shr 1
+            $bytes[$middle] = $bytes[$middle] -bxor 1
+            [IO.File]::WriteAllBytes("$bad\changed.exe", $bytes)
+        }
+        Lap 'older installers'
     }
-    # The package's files, its two programs the older build's.
-    Copy-Item "$target\package\earwig-$version-windows-x64\*" "$work\stage"
-    Copy-Item -Force "$target\release\earwig.exe", "$target\release\earwigw.exe" "$work\stage"
-    $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-    if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-    if ($signed) {
-        # Unsigned too, as the last release before signing was.
-        $packaged = Run $iscc '/Q', "/DVersion=$old", "/DStage=$work\stage", "/O$work\unsigned", 'packaging\windows\earwig.iss' 600
-        if ($packaged.Code) { throw 'packaging the unsigned older test build failed' }
-        & $sign "$work\stage\earwig.exe" "$work\stage\earwigw.exe"
+
+    if (-not ($Test -or $all)) {
+        $passed = $true
+        return
     }
-    $packaged = Run $iscc (@('/Q', "/DVersion=$old", "/DStage=$work\stage", "/O$work") + @(& $sign -Iscc) + 'packaging\windows\earwig.iss') 600
-    if ($packaged.Code) { throw 'packaging the older test build failed' }
-    if ($signed) {
-        # The new installer as earwig must not take it: unsigned, signed by another publisher or by
-        # a look-alike of its own (the same name and profile EKU, self-signed), changed after signing.
-        $bad = "$work\refused"
-        New-Item -ItemType Directory $bad | Out-Null
-        foreach ($case in 'unsigned', 'other', 'look-alike', 'changed') { Copy-Item $newSetup "$bad\$case.exe" }
-        $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
-        if ((Run $signtool.FullName 'remove', '/s', "$bad\unsigned.exe").Code) { throw 'removing the signature failed' }
-        & $sign -Publisher other "$bad\other.exe"
-        & $sign -Publisher look-alike "$bad\look-alike.exe"
-        $bytes = [IO.File]::ReadAllBytes("$bad\changed.exe")
-        $middle = $bytes.Length -shr 1
-        $bytes[$middle] = $bytes[$middle] -bxor 1
-        [IO.File]::WriteAllBytes("$bad\changed.exe", $bytes)
-    }
-    Lap 'older builds'
+    if (-not (Test-Path $newSetup)) { throw "no ${newSetup}: run packaging/windows/package.ps1 first" }
+    Remove-Item -Recurse -Force $logs -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory $logs | Out-Null
 
     # Whatever an earlier step (the installer's smoke test) left: no earwig running, none
     # installed. The uninstaller hands over to a copy of itself, so its own end says nothing.
@@ -257,7 +284,7 @@ try {
         Start-Process $previous.UninstallString.Trim('"') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
         WaitFor { -not (Test-Path -LiteralPath $uninstallKey) } 120 'the earlier install is gone'
     }
-    Check ((Install "$work\earwig-$old-windows-x64-setup.exe" "$work\install-old.log") -eq 0) "earwig $old installs"
+    Check ((Install "$packages\earwig-$old-windows-x64-setup.exe" "$logs\install-old.log") -eq 0) "earwig $old installs"
     Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is installed"
     if ($signed) { Check ((Get-AuthenticodeSignature $earwig).Status -eq 'Valid') "earwig $old is signed" }
     Check (Sign-In) 'the installer set earwig to start at sign-in'
@@ -318,7 +345,7 @@ try {
     Lap 'a failing installer'
 
     # Back to the older build, by its installer, for an update that goes through.
-    Check ((Install "$work\earwig-$old-windows-x64-setup.exe" "$work\install-again.log") -eq 0) "earwig $old installs again"
+    Check ((Install "$packages\earwig-$old-windows-x64-setup.exe" "$logs\install-again.log") -eq 0) "earwig $old installs again"
     Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is installed again"
     WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $old runs again"
     Check (-not (Sign-In)) 'a silent reinstall leaves Start at sign-in off'
@@ -340,7 +367,7 @@ try {
 
     if ($signed) {
         # The last release before signing, unsigned, takes the signed installer.
-        Check ((Install "$work\unsigned\earwig-$old-windows-x64-setup.exe" "$work\install-unsigned.log") -eq 0) "unsigned earwig $old installs"
+        Check ((Install "$packages\unsigned\earwig-$old-windows-x64-setup.exe" "$logs\install-unsigned.log") -eq 0) "unsigned earwig $old installs"
         Check ((Run $earwig '--version').Output -eq "earwig $old") "unsigned earwig $old is installed"
         Check ((Get-AuthenticodeSignature $earwig).Status -eq 'NotSigned') "earwig $old is not signed"
         WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "unsigned earwig $old runs"
@@ -364,8 +391,8 @@ try {
     $processes = if ($stuck) { $stuck } else { Processes }
     Write-Host "--- processes`n$processes"
     Annotate warning 'processes' $processes
-    foreach ($log in @("$env:LOCALAPPDATA\earwig\earwig.log", "$state\install.log", "$work\install-unsigned.log",
-            "$work\install-again.log", "$work\install-old.log") + @(Get-ChildItem "$work\feed-*.log" -ErrorAction SilentlyContinue)) {
+    foreach ($log in @("$env:LOCALAPPDATA\earwig\earwig.log", "$state\install.log", "$logs\install-unsigned.log",
+            "$logs\install-again.log", "$logs\install-old.log") + @(Get-ChildItem "$logs\feed-*.log" -ErrorAction SilentlyContinue)) {
         if (Test-Path $log) {
             Write-Host "--- $log"
             Get-Content $log -Tail 80 | Write-Host
