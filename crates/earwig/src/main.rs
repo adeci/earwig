@@ -5,6 +5,9 @@ mod cli_update;
 mod daemon;
 mod ui;
 
+use std::io::{IsTerminal as _, Write as _};
+use std::time::Instant;
+
 use clap::{Parser, Subcommand};
 use earwig_core::config::ModelConfig;
 use earwig_core::events::Command;
@@ -150,6 +153,57 @@ fn magnitude(n: u64) -> Option<(f64, usize, usize)> {
     }
     let places = usize::from(n / divisor < 99.95);
     Some((divisor, unit, places))
+}
+
+/// Redraws one line on a terminal, else prints a line per 10% (logs, CI).
+struct ProgressLine {
+    tty: bool,
+    start: Instant,
+    first: Option<u64>,
+    printed_tenth: Option<u64>,
+    dirty: bool,
+}
+
+impl ProgressLine {
+    fn new() -> Self {
+        Self {
+            tty: std::io::stderr().is_terminal(),
+            start: Instant::now(),
+            first: None,
+            printed_tenth: None,
+            dirty: false,
+        }
+    }
+
+    /// `downloaded` of `total` bytes of `what`.
+    fn update(&mut self, what: &str, downloaded: u64, total: u64) {
+        let first = *self.first.get_or_insert(downloaded);
+        let millis = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let rate = downloaded.saturating_sub(first) * 1000 / millis.max(1);
+        let percent = (downloaded * 100).checked_div(total).unwrap_or(0);
+        let text = format!(
+            "{what}: {} / {}  {percent}%  {}/s",
+            human_size(downloaded),
+            human_size(total),
+            human_size(rate),
+        );
+        let mut err = std::io::stderr().lock();
+        if self.tty {
+            let _ = write!(err, "\r\x1b[2K{text}");
+            let _ = err.flush();
+            self.dirty = true;
+        } else if self.printed_tenth != Some(percent / 10) {
+            self.printed_tenth = Some(percent / 10);
+            let _ = writeln!(err, "{text}");
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.dirty {
+            eprintln!();
+            self.dirty = false;
+        }
+    }
 }
 
 #[cfg(test)]

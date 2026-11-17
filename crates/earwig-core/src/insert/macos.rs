@@ -17,7 +17,7 @@ pub(super) fn backends(
 ) -> anyhow::Result<Vec<Box<dyn Inserter>>> {
     match config.method {
         InsertSetting::Auto | InsertSetting::Paste => Ok(vec![Box::new(Paste)]),
-        other => bail!("insertion method {other:?} does not exist on macOS; use paste"),
+        other => bail!(super::linux_only(other)),
     }
 }
 
@@ -29,9 +29,9 @@ impl Inserter for Paste {
     }
 
     fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError> {
-        // Without Accessibility the key press is dropped without a word.
+        // Without Accessibility the key press is dropped without a word; the
+        // text reaches the clipboard as after every insertion that fails.
         if !macos::accessibility_allowed() {
-            macos::set_clipboard(text)?;
             return Err(InsertError::Failed(anyhow::anyhow!(
                 permissions::missing_message(Permission::Accessibility)
             )));

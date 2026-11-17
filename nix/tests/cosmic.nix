@@ -1,6 +1,7 @@
 # Dictation end to end on COSMIC without keyboard access: insertion through input-method-v2,
 # the hotkey a COSMIC custom shortcut running `earwig toggle` (no GlobalShortcuts portal, and
-# cosmic-comp binds fire on press only). Setup as in nixpkgs' cosmic test.
+# cosmic-comp binds fire on press only), and a streaming recording cancelled mid-clip before the
+# next dictation. Setup as in nixpkgs' cosmic test.
 { self }:
 let
   common = import ./common.nix { inherit self; };

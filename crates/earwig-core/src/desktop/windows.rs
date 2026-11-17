@@ -1,4 +1,4 @@
-//! Windows: nothing is probed yet.
+//! Windows: nothing to probe.
 
 use super::DesktopCaps;
 

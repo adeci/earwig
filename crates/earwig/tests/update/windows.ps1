@@ -3,8 +3,8 @@
 # stand-in for GitHub (fake_github.py) offers. First with a SHA-256 that doesn't match, which it
 # refuses, then as released. When packaging/windows/sign.ps1 signs, the older build is signed
 # too: it refuses the installer unsigned, signed by another publisher or by a look-alike of its
-# own, or changed after signing; and an unsigned older build, as the last release before signing
-# was, takes the signed installer. In three parts, as CI's jobs run them: -Build the older build,
+# own, or changed after signing; and an unsigned older build, as a release from before signing
+# is, takes the signed installer. In three parts, as CI's jobs run them: -Build the older build,
 # unsigned (cargo; the build job), -Package its installers and those it must refuse (Inno Setup's
 # iscc and the signing key; the package job), -Test the update from them (neither; the test job).
 #   pwsh crates/earwig/tests/update/windows.ps1             all three, after package.ps1
@@ -16,6 +16,7 @@ $ProgressPreference = 'SilentlyContinue'
 $started = Get-Date
 $root = Resolve-Path "$PSScriptRoot\..\..\..\.."
 Set-Location $root
+. "$root\packaging\windows\find.ps1"
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "$root\target" }
 $newSetup = "$target\package\earwig-$version-windows-x64-setup.exe"
@@ -240,10 +241,10 @@ try {
         New-Item -ItemType Directory $stage, $packages | Out-Null
         Copy-Item "$target\package\earwig-$version-windows-x64\*" $stage
         Copy-Item -Force "$built\earwig.exe", "$built\earwigw.exe" $stage
-        $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-        if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+        $iscc = Iscc
+        if (-not $iscc) { throw 'Inno Setup (iscc) not found' }
         if ($signed) {
-            # Unsigned too, as the last release before signing was.
+            # Unsigned too, as a release from before signing is.
             $packaged = Run $iscc '/Q', "/DVersion=$old", "/DStage=$stage", "/O$packages\unsigned", 'packaging\windows\earwig.iss' 600
             if ($packaged.Code) { throw 'packaging the unsigned older test build failed' }
             & $sign "$stage\earwig.exe" "$stage\earwigw.exe"
@@ -255,9 +256,7 @@ try {
             # a look-alike of its own (the same name and profile EKU, self-signed), changed after signing.
             New-Item -ItemType Directory $bad | Out-Null
             foreach ($case in 'unsigned', 'other', 'look-alike', 'changed') { Copy-Item $newSetup "$bad\$case.exe" }
-            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-                Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
-            if ((Run $signtool.FullName 'remove', '/s', "$bad\unsigned.exe").Code) { throw 'removing the signature failed' }
+            if ((Run (SignTool).FullName 'remove', '/s', "$bad\unsigned.exe").Code) { throw 'removing the signature failed' }
             & $sign -Publisher other "$bad\other.exe"
             & $sign -Publisher look-alike "$bad\look-alike.exe"
             $bytes = [IO.File]::ReadAllBytes("$bad\changed.exe")
@@ -276,8 +275,9 @@ try {
     Remove-Item -Recurse -Force $logs -ErrorAction SilentlyContinue
     New-Item -ItemType Directory $logs | Out-Null
 
-    # Whatever an earlier step (the installer's smoke test) left: no earwig running, none
-    # installed. The uninstaller hands over to a copy of itself, so its own end says nothing.
+    # The earwig an earlier run on this machine left, running or installed (CI's smoke test leaves
+    # none): it would answer this test's commands, and a silent install over it keeps its Start at
+    # sign-in. The uninstaller hands over to a copy of itself, so its own end says nothing.
     Get-Process earwig, earwigw -ErrorAction SilentlyContinue | Stop-Process -Force
     $previous = Get-ItemProperty -LiteralPath $uninstallKey -ErrorAction SilentlyContinue
     if ($previous) {
@@ -291,8 +291,6 @@ try {
     # The user then switches Start at sign-in off, which an update must keep.
     Remove-ItemProperty -Path $runKey -Name earwig
 
-    # No microphone on the runner: dictations would hear a clip.
-    $env:EARWIG_AUDIO_FILE = "$root\tests\fixtures\quick-brown-fox.wav"
     Start-Process "$app\earwigw.exe"
     WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $old runs"
 
@@ -304,7 +302,7 @@ try {
     Check ((Run $earwig '--version').Output -eq "earwig $old") "earwig $old is still installed"
     $status = (Run $earwig 'status' 20).Output | ConvertFrom-Json
     Check ($status.update.state -eq 'failed') 'earwig still runs and says the update failed'
-    Check (-not (Test-Path "$env:LOCALAPPDATA\earwig\state\update")) 'nothing of the download is left'
+    Check (-not (Test-Path "$state\update")) 'nothing of the download is left'
     if ($signed) {
         Remove-Item "$state\install.log" -ErrorAction SilentlyContinue
         foreach ($case in @(
@@ -366,7 +364,7 @@ try {
     Lap 'update'
 
     if ($signed) {
-        # The last release before signing, unsigned, takes the signed installer.
+        # A release from before signing, unsigned, takes the signed installer.
         Check ((Install "$packages\unsigned\earwig-$old-windows-x64-setup.exe" "$logs\install-unsigned.log") -eq 0) "unsigned earwig $old installs"
         Check ((Run $earwig '--version').Output -eq "earwig $old") "unsigned earwig $old is installed"
         Check ((Get-AuthenticodeSignature $earwig).Status -eq 'NotSigned') "earwig $old is not signed"
@@ -382,8 +380,14 @@ try {
         WaitFor { (Run $earwig 'status' 20).Code -eq 0 } 60 "earwig $version runs"
         Lap 'unsigned to signed'
     }
-    Annotate notice 'update end to end' (($transcript | Where-Object { $_ -like 'ok:*' }) -join "`n")
-    Annotate notice 'update timings' (($timings.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value) s" }) -join ', ')
+    $checks = @($transcript | Where-Object { $_ -like 'ok: *' } | ForEach-Object { $_.Substring(4) })
+    $laps = ($timings.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value) s" }) -join ', '
+    Write-Host "timings: $laps"
+    if ($env:GITHUB_STEP_SUMMARY) {
+        @('### Update end to end', '', "earwig $old to ${version}: $($checks.Count) checks passed. Timings: $laps.", '',
+            '<details><summary>What it checked</summary>', '') + @($checks | ForEach-Object { "- $_" }) + @('</details>', '') |
+            Add-Content $env:GITHUB_STEP_SUMMARY
+    }
     $passed = $true
 } catch {
     Write-Host $_

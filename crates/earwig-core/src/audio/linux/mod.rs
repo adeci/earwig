@@ -1,7 +1,7 @@
 //! Linux: the microphones are the sound server's sources (PipeWire or
 //! PulseAudio, both over [`pulse`]); the system default goes through ALSA's
 //! `default`. Without a server each sound card that records is one, opened
-//! through ALSA, and so is an ALSA PCM name from older settings.
+//! through ALSA, and so is an ALSA PCM name in the settings.
 
 mod pulse;
 
@@ -43,8 +43,7 @@ pub(super) fn open(device: Option<&str>, tx: flume::Sender<Raw>) -> anyhow::Resu
             name: name.to_owned(),
         });
     }
-    // The system default, a sound card without a server, or an ALSA PCM
-    // name from older settings.
+    // The system default, a sound card without a server, or an ALSA PCM name.
     let (device, name) = super::cpal_input(device, super::cpal_id)?;
     let (stream, rate) = super::open_cpal(&device, &name, tx)?;
     Ok(Opened {
@@ -55,7 +54,7 @@ pub(super) fn open(device: Option<&str>, tx: flume::Sender<Raw>) -> anyhow::Resu
 }
 
 /// Lists `configured` under its own name when it is not listed but `opens`:
-/// an ALSA PCM name from settings made before earwig listed microphones.
+/// an ALSA PCM name such as `pipewire` or `hw:CARD=1,DEV=0`.
 fn keep_configured(
     found: &mut InputDevices,
     configured: Option<&str>,
@@ -237,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn an_older_alsa_name_that_still_opens_is_listed_as_itself() {
+    fn an_alsa_name_that_opens_is_listed_as_itself() {
         let listed = InputDevices {
             devices: vec![device(
                 "alsa_input.usb-Shure_Inc_Shure_MV7-00.mono-fallback",
@@ -245,12 +244,12 @@ mod tests {
             )],
             default: None,
         };
-        for legacy in ["pipewire", "sysdefault:CARD=MV7", "hw:CARD=1,DEV=0"] {
+        for pcm in ["pipewire", "sysdefault:CARD=MV7", "hw:CARD=1,DEV=0"] {
             let mut found = listed.clone();
-            keep_configured(&mut found, Some(legacy), |name| name == legacy);
-            assert_eq!(found.devices[1..], [device(legacy, legacy)], "{legacy}");
+            keep_configured(&mut found, Some(pcm), |name| name == pcm);
+            assert_eq!(found.devices[1..], [device(pcm, pcm)], "{pcm}");
         }
-        // One that no longer opens stays out, for settings to call missing.
+        // One that does not open stays out, for settings to call missing.
         let mut found = listed.clone();
         keep_configured(&mut found, Some("front:CARD=Gone,DEV=0"), |_| false);
         assert_eq!(found, listed);

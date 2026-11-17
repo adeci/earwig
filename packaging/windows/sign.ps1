@@ -1,19 +1,23 @@
 using namespace System.Security.Cryptography
 using namespace System.Security.Cryptography.X509Certificates
-# Signs earwig's Windows programs and installers, or checks how they are signed. This decides how,
-# for package.ps1, the sign tool Inno Setup runs, the smoke and update tests and the release:
-#   artifact-signing  Azure Artifact Signing, on a v* tag in GitHub Actions once the variables
-#                     ARTIFACT_SIGNING_ENDPOINT, _ACCOUNT and _PROFILE, AZURE_TENANT_ID and
-#                     AZURE_CLIENT_ID are set: SignTool with Microsoft's dlib, signed in as that app
-#                     registration with the job's OIDC token (permissions: id-token: write).
-#   test              elsewhere in GitHub Actions: a throwaway publisher made on the runner, its root
-#                     trusted there only, with a new certificate for every signing and the same
-#                     certificate profile EKU, as Artifact Signing's certificates are.
-#   none              anywhere else, and on a tag before Artifact Signing is set up: nothing.
-# EARWIG_SIGN overrides the choice: CI's package job decides, the jobs after it check as it signed.
+# Signs earwig's Windows programs and installers, or checks how they are signed, as every job of a
+# run decides alike from its ref:
+#   artifact-signing  Azure Artifact Signing, on a v* tag in GitHub Actions: SignTool with Microsoft's
+#                     dlib (tools.ps1 ArtifactSigning puts it in ARTIFACT_SIGNING_DLIB), signed in
+#                     with the job's OIDC token (permissions: id-token: write) as the app registration
+#                     AZURE_TENANT_ID and AZURE_CLIENT_ID name, to the profile
+#                     ARTIFACT_SIGNING_ENDPOINT, _ACCOUNT and _PROFILE name. Anything but -Check
+#                     fails unless all five are set: a tag is never signed otherwise, nor released
+#                     unsigned.
+#   test              elsewhere in GitHub Actions, so the signed path is always tested: a throwaway
+#                     publisher made on the runner, its root trusted there only, with a new
+#                     certificate for every signing and the same certificate profile EKU, as
+#                     Artifact Signing's certificates are.
+#   none              outside GitHub Actions: nothing.
 # Signatures are SHA-256, timestamped by Artifact Signing's TSA.
 #   pwsh packaging/windows/sign.ps1 <file>...          sign them, then check them
-#   pwsh packaging/windows/sign.ps1 -Check <file>...   fail unless signed as this mode signs
+#   pwsh packaging/windows/sign.ps1 -Check <file>...   fail unless signed as this mode signs; who
+#                                                      signed them on the output and the job summary
 #   pwsh packaging/windows/sign.ps1 -Mode              print the mode
 #   pwsh packaging/windows/sign.ps1 -Iscc              iscc's arguments to sign Setup and Uninstall
 #   pwsh packaging/windows/sign.ps1 -Trust <file>      trust the test publisher another runner made
@@ -35,23 +39,29 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. "$PSScriptRoot\find.ps1"
 
 $variables = 'ARTIFACT_SIGNING_ENDPOINT', 'ARTIFACT_SIGNING_ACCOUNT', 'ARTIFACT_SIGNING_PROFILE', 'AZURE_TENANT_ID', 'AZURE_CLIENT_ID'
-$signing = if ($env:EARWIG_SIGN) { $env:EARWIG_SIGN }
-elseif ($env:GITHUB_ACTIONS -ne 'true') { 'none' }
-elseif ($env:GITHUB_REF -notlike 'refs/tags/v*') { 'test' }
-elseif ($variables | Where-Object { [Environment]::GetEnvironmentVariable($_) }) { 'artifact-signing' }
-else { 'none' }
-if ($signing -notin 'artifact-signing', 'test', 'none') { throw "EARWIG_SIGN is '$signing', not artifact-signing, test or none" }
+$signing = if ($env:GITHUB_ACTIONS -ne 'true') { 'none' }
+elseif ($env:GITHUB_REF -like 'refs/tags/v*') { 'artifact-signing' }
+else { 'test' }
+
+# A failure GitHub shows on the run, without its log.
+function Fail([string]$why) {
+    if ($env:GITHUB_ACTIONS -eq 'true') { Write-Host "::error title=signing::$($why -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A')" }
+    throw $why
+}
+
+$missing = @($variables | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
+if ($signing -eq 'artifact-signing' -and $missing -and -not $Check) {
+    Fail "a v* tag is signed with Artifact Signing, which needs $($missing -join ', ') set: the release environment's variables"
+}
 if ($Mode) { return $signing }
 if ($Iscc) {
     if ($signing -ne 'none') { "/Searwig=pwsh -NoProfile -File `$q$PSCommandPath`$q `$f", '/DSignTool=earwig' }
     return
 }
-if ($signing -eq 'none') {
-    if ($Check -and $env:GITHUB_REF -like 'refs/tags/v*') { Write-Host '::notice title=unsigned::Artifact Signing is not set up: the packages go out unsigned' }
-    return
-}
+if ($signing -eq 'none') { return }
 
 $timestamps = 'http://timestamp.acs.microsoft.com'
 # Microsoft Identity Verification Root Certificate Authority 2020 (its SHA-256), where every
@@ -62,13 +72,6 @@ $earwigProfile = '1.3.6.1.4.1.311.97.320264061.530968931.474248062.405732374'
 $publicTrust = '1.3.6.1.4.1.311.97.1.0'
 $codeSigning = '1.3.6.1.5.5.7.3.3'
 $public = "$env:RUNNER_TEMP\earwig-test-publisher.json"
-
-function SignTool {
-    $found = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
-        Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
-    if (-not $found) { throw 'signtool.exe not found: install the Windows SDK' }
-    $found
-}
 
 # The certificate profile EKUs among $ekus: right under 1.3.6.1.4.1.311.97, not its .1 (kinds of
 # profile), as the updater takes them (crates/earwig-core/src/update/mod.rs).
@@ -166,23 +169,6 @@ function TestCertificate([string]$as) {
     }
 }
 
-# Microsoft's dlib for SignTool, a pinned release of the Microsoft.ArtifactSigning.Client package.
-function Dlib {
-    $version = '1.0.151'
-    $sha256 = '35375A4BC4E1102DA729FC3D8D9925F774C3BAAE6B8B7FF6398D948CA9AB0D8A'
-    $dir = Join-Path $env:RUNNER_TEMP "artifact-signing-client-$version"
-    $dlib = "$dir\bin\x64\Azure.CodeSigning.Dlib.dll"
-    if (-not (Test-Path $dlib)) {
-        $package = "$dir.nupkg"
-        Invoke-WebRequest -UseBasicParsing -OutFile $package `
-            "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$version/microsoft.artifactsigning.client.$version.nupkg"
-        if ((Get-FileHash -Algorithm SHA256 $package).Hash -ne $sha256) { throw "Microsoft.ArtifactSigning.Client $version is not the package sign.ps1 knows" }
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [IO.Compression.ZipFile]::ExtractToDirectory($package, $dir)
-    }
-    $dlib
-}
-
 function Sign([string[]]$files) {
     $tool = SignTool
     $common = @('sign', '/fd', 'SHA256', '/tr', $timestamps, '/td', 'SHA256')
@@ -195,11 +181,10 @@ function Sign([string[]]$files) {
         finally { Remove-Item $pfx }
         $as = $certificate.Subject
     } else {
-        $missing = @($variables | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
-        if ($missing) { throw "Artifact Signing needs $($missing -join ', ') set as well" }
         if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL) { throw 'Artifact Signing signs in with the OIDC token of a job with permissions: id-token: write' }
         if ([version]$tool.Directory.Parent.Name -lt [version]'10.0.22621.0') { throw "the Artifact Signing dlib needs SignTool 10.0.22621 or later, not $($tool.FullName)" }
-        $dlib = Dlib
+        $dlib = $env:ARTIFACT_SIGNING_DLIB
+        if (-not $dlib) { throw "no Artifact Signing client: packaging/windows/tools.ps1 ArtifactSigning installs Microsoft's dlib" }
         $metadata = Join-Path $env:RUNNER_TEMP 'artifact-signing-metadata.json'
         @{
             Endpoint = $env:ARTIFACT_SIGNING_ENDPOINT
@@ -223,14 +208,15 @@ function Sign([string[]]$files) {
         try { $output = & $tool.FullName @common /v /dlib $dlib /dmdf $metadata @files 2>&1 }
         finally { Remove-Item $env:AZURE_FEDERATED_TOKEN_FILE; Remove-Item Env:AZURE_FEDERATED_TOKEN_FILE }
     }
-    Write-Host "::notice title=signed as::$signing as $as`: $(($output | Select-Object -Last 3) -join ' ')"
+    Write-Host "$signing as $as`: $(($output | Select-Object -Last 3) -join ' ')"
     if ($LASTEXITCODE) {
         $why = @($output | Where-Object { "$_" -match 'error|AADSTS|Forbidden|denied|status' } | Select-Object -First 12) -join "`n"
         throw "signing $($files -join ', ') as $as failed (signtool exit $LASTEXITCODE):`n$why"
     }
 }
 
-# Why $file isn't signed as this mode signs, or nothing; its signature on a notice when it is.
+# Why $file isn't signed as this mode signs, or nothing; how it is signed in the log and $signed
+# when it is.
 function Problem([string]$file) {
     $signature = Get-AuthenticodeSignature -LiteralPath $file
     if ($signature.Status -ne 'Valid') { return "$($signature.Status): $($signature.StatusMessage)" }
@@ -256,9 +242,10 @@ function Problem([string]$file) {
         if ($rootHash -ne $microsoftRoot) { return "chains to $($root.Subject) ($rootHash), not Microsoft's Artifact Signing root" }
         if ($profiles -notcontains $earwigProfile) { return "$($leaf.Subject) has certificate profile $(if ($profiles) { $profiles } else { 'none' }), not earwig's $earwigProfile" }
     }
-    Write-Host ("::notice title=signed::{0}: {1}, certificate profile {2}, root {3} {4}, timestamp by {5}" -f (Split-Path -Leaf $file),
-        $leaf.Subject, ($profiles -join ' '), $root.GetNameInfo('SimpleName', $false), $root.Thumbprint,
-        $signature.TimeStamperCertificate.GetNameInfo('SimpleName', $false))
+    $signer = "$($leaf.Subject), certificate profile $($profiles -join ' ')"
+    $by = "root $($root.GetNameInfo('SimpleName', $false)) $($root.Thumbprint), timestamp by $($signature.TimeStamperCertificate.GetNameInfo('SimpleName', $false))"
+    Write-Host "$(Split-Path -Leaf $file): $signer, $by"
+    $signed.Add([pscustomobject]@{ File = (Split-Path -Leaf $file); Signer = $signer; By = $by })
 }
 
 if ($Trust) {
@@ -273,12 +260,22 @@ if ($Trust) {
 }
 if (-not $Files) { throw 'no files' }
 if (-not $Check) {
-    Sign $Files
+    try { Sign $Files } catch { Fail "$_" }
     # Another publisher's signatures are for the update test to refuse.
     if ($Publisher -ne 'earwig') { return }
 }
+$signed = [Collections.Generic.List[object]]::new()
 $problems = foreach ($file in $Files) {
     $problem = Problem $file
     if ($problem) { "$(Split-Path -Leaf $file): $problem" }
 }
 if ($problems) { throw "not signed as $signing signs:`n$($problems -join "`n")" }
+if ($Check) {
+    if ($env:GITHUB_STEP_SUMMARY) {
+        foreach ($group in $signed | Group-Object Signer, By) {
+            $names = ($group.Group.File | ForEach-Object { '`' + $_ + '`' }) -join ', '
+            "${names}: signed by $($group.Group[0].Signer), $($group.Group[0].By)`n" | Add-Content $env:GITHUB_STEP_SUMMARY
+        }
+    }
+    $signed.Signer | Select-Object -Unique
+}

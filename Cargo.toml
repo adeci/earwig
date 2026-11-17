@@ -76,7 +76,6 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
-  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Authorization",
@@ -119,8 +118,8 @@ tray-icon = { version = "0.26", default-features = false }
 # Reads the bundled font in tests; the version GPUI parses fonts with.
 ttf-parser = "0.25"
 
-# Vendored C++ build, linked in statically; packages for x86-64 load its
-# backends as modules beside it instead (earwig-transcribe's
+# Vendored C++ build, linked in statically; the Nix package for x86-64 Linux
+# loads its backends as modules beside it instead (earwig-transcribe's
 # `dynamic-backends`). Each target picks its backend in earwig-transcribe:
 # Metal on macOS, Vulkan elsewhere.
 transcribe-cpp = { version = "0.4.1", default-features = false }
@@ -128,8 +127,8 @@ transcribe-cpp = { version = "0.4.1", default-features = false }
 # GPUI's Linux platform with one addition: moving a layer surface while it
 # is mapped, which the overlay's drag needs (`move_layer_surface`; see
 # vendor/gpui-pre-linux/PATCH.md). Its macOS platform with one fix: a live
-# resize no longer shows display-link frames stretched to the window's next
-# size (vendor/gpui-pre-macos/PATCH.md).
+# resize never shows display-link frames stretched to the window's next size
+# (vendor/gpui-pre-macos/PATCH.md).
 [patch.crates-io]
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }

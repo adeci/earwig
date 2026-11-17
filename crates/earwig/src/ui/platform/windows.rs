@@ -107,9 +107,9 @@ impl Popup {
         // WM_MOVE arrives at once, which GPUI can't take mid-render: post the move to ourselves.
         let packed =
             (i64::from(device(origin.y)) << 32) | i64::from(device(origin.x).cast_unsigned());
-        // SAFETY: posting to a live window of this thread.
         #[allow(clippy::cast_possible_truncation)]
         let packed = packed as LPARAM;
+        // SAFETY: posting to a live window of this thread.
         if unsafe { PostMessageW(self.hwnd, MOVE_TO, 0, packed) } == 0 {
             log::warn!("moving the overlay: {}", std::io::Error::last_os_error());
         }

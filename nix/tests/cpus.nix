@@ -33,6 +33,8 @@ in
 
   testScript = sway.testScript + ''
 
+    import re
+
 
     def cpu_flags(node) -> set[str]:
         return set(node.succeed("grep -m1 '^flags' /proc/cpuinfo").split(":", 1)[1].split())

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Creates the GitHub release of a pushed tag unless it exists: "earwig <tag>", with the
 # annotated tag's message as notes, or GitHub's generated notes for a lightweight tag. A tag
-# with a pre-release suffix (v0.1.0-rc.1) makes a pre-release, which GitHub never marks latest.
-# nixbot's release effect (nix/release.nix) and the Windows CI job both run it.
+# with a pre-release suffix (vx.y.z-rc.1) makes a pre-release, which GitHub never marks latest.
+# nixbot's release effect (nix/release.nix) and the release job of .github/workflows/ci.yml
+# both run it.
 #
 # Usage: GH_TOKEN=... github-release.sh OWNER/REPO TAG
 set -euo pipefail

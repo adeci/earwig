@@ -192,6 +192,16 @@ fn spaced(mut groups: Vec<SettingGroup>) -> Vec<SettingGroup> {
     groups
 }
 
+/// `downloaded` of `total` in percent, 0 while the total is unknown.
+#[allow(clippy::cast_precision_loss)]
+fn percent(downloaded: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.
+    } else {
+        downloaded as f32 * 100. / total as f32
+    }
+}
+
 /// A group headed by its first row, not a title (which would list it in the sidebar).
 fn section(
     title: &'static str,

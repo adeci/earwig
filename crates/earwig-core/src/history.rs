@@ -74,7 +74,7 @@ impl History {
         self.trim()
     }
 
-    pub fn set_limit(&self, limit: usize) -> io::Result<()> {
+    pub(crate) fn set_limit(&self, limit: usize) -> io::Result<()> {
         self.lock().limit = limit;
         self.trim()
     }

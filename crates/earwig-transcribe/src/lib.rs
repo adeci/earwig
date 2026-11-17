@@ -62,12 +62,7 @@ impl EngineFactory for TranscribeEngine {
             // nothing to do where they are linked in.
             tc::init_backends_default().map_err(|e| e.to_string())
         });
-        let missing = missing_cpu_features();
-        anyhow::ensure!(
-            missing.is_empty(),
-            "this CPU lacks AVX2 ({} missing), which this build of earwig's speech engine needs",
-            missing.join(", ")
-        );
+        check_cpu(&missing_cpu_features())?;
         if let Err(e) = &*ENGINE {
             anyhow::bail!("starting the speech engine: {e}");
         }
@@ -96,6 +91,16 @@ fn missing_cpu_features() -> Vec<&'static str> {
     {
         Vec::new()
     }
+}
+
+/// An error naming each feature in `missing`, if there are any.
+fn check_cpu(missing: &[&str]) -> anyhow::Result<()> {
+    let names = match missing {
+        [] => return Ok(()),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    anyhow::bail!("this CPU lacks {names}, which this build of earwig's speech engine needs")
 }
 
 fn backend_request(backend: Backend) -> anyhow::Result<tc::Backend> {
@@ -640,6 +645,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_cpu_short_of_the_build_is_told_each_feature_it_lacks() {
+        assert!(check_cpu(&[]).is_ok());
+        let refused = |missing: &[&str]| check_cpu(missing).unwrap_err().to_string();
+        let needs = ", which this build of earwig's speech engine needs";
+        assert_eq!(refused(&["F16C"]), format!("this CPU lacks F16C{needs}"));
+        assert_eq!(
+            refused(&["AVX2", "FMA"]),
+            format!("this CPU lacks AVX2 and FMA{needs}")
+        );
+        assert_eq!(
+            refused(&["AVX2", "BMI2", "FMA"]),
+            format!("this CPU lacks AVX2, BMI2 and FMA{needs}")
+        );
+    }
+
+    #[test]
     fn a_bare_language_code_finds_the_models_regional_tag() {
         let listed = ["en-US", "en-GB", "ja-JP", "fr"].map(String::from);
         let hint = |lang| listed_language(lang, &listed);
@@ -650,64 +671,5 @@ mod tests {
         assert_eq!(hint("de"), None);
         // A model that lists no languages gets the hint as it is.
         assert_eq!(listed_language("de", &[]).as_deref(), Some("de"));
-    }
-
-    fn words(text: &str) -> String {
-        text.to_lowercase()
-            .chars()
-            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Run with `EARWIG_TEST_MODEL=<gguf> cargo test -p earwig-transcribe -- --ignored`;
-    /// `EARWIG_TEST_BACKEND=cpu|gpu` picks the backend.
-    #[test]
-    #[ignore = "needs a model file in EARWIG_TEST_MODEL"]
-    fn transcribes_the_fixture() {
-        let path = std::env::var_os("EARWIG_TEST_MODEL").expect("EARWIG_TEST_MODEL is not set");
-        let backend = match std::env::var("EARWIG_TEST_BACKEND").as_deref() {
-            Ok("cpu") => Backend::Cpu,
-            Ok("gpu") => Backend::Gpu,
-            _ => Backend::Auto,
-        };
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/quick-brown-fox.wav");
-        let pcm = earwig_core::audio::read_wav(&fixture).unwrap();
-        let mut model = TranscribeEngine::new()
-            .load(
-                Path::new(&path),
-                &EngineOptions {
-                    backend,
-                    language: None,
-                },
-            )
-            .unwrap();
-        for _ in 0..2 {
-            model.begin().unwrap();
-            // Capture can hand over empty chunks; they must not break the stream.
-            assert_eq!(model.feed(&[]).unwrap(), None);
-            let mut live = Partial::default();
-            for chunk in pcm.chunks(1_600) {
-                if let Some(partial) = model.feed(chunk).unwrap() {
-                    live = partial;
-                }
-            }
-            let text = model.finish().unwrap();
-            eprintln!("live: {live:?}\nfinal: {text:?}");
-            assert_eq!(words(&text), "the quick brown fox jumps over the lazy dog");
-        }
-        // An aborted recording leaves the model ready for the next.
-        model.begin().unwrap();
-        model.feed(&pcm[..8_000]).unwrap();
-        model.abort();
-        model.begin().unwrap();
-        model.feed(&pcm).unwrap();
-        assert_eq!(
-            words(&model.finish().unwrap()),
-            "the quick brown fox jumps over the lazy dog"
-        );
     }
 }

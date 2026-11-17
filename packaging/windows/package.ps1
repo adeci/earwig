@@ -9,6 +9,7 @@
 # Output: target/package/earwig-<version>-windows-x64.zip and -setup.exe.
 param([switch]$Build, [switch]$Package)
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\find.ps1"
 $root = Resolve-Path "$PSScriptRoot\..\.."
 Set-Location $root
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
@@ -39,8 +40,10 @@ $name = "earwig-$version-windows-x64"
 $stage = "$out\$name"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
+# earwig's license and the notices of what comes with it: the fonts and icons inside its programs
+# (IBM Plex, Lucide) and the Vulkan loader beside them.
 Copy-Item "$dist\earwig.exe", "$dist\earwigw.exe", "$dist\vulkan-1.dll", LICENSE, README.md,
-    assets\fonts\LICENSE-IBM-Plex-Sans.txt, packaging\windows\LICENSE-Vulkan-Loader.txt $stage
+    assets\fonts\LICENSE-IBM-Plex-Sans.txt, assets\cursors\LICENSE-Lucide.txt, packaging\windows\LICENSE-Vulkan-Loader.txt $stage
 
 # The DLLs a PE image imports (its import directory).
 function Imports([string]$path) {
@@ -77,11 +80,7 @@ foreach ($exe in 'earwig.exe', 'earwigw.exe') {
 Compress-Archive -Force -Path "$stage\*" -DestinationPath "$out\$name.zip"
 Write-Output "$out\$name.zip"
 
-$iscc = Get-Command iscc -ErrorAction SilentlyContinue
-if (-not $iscc) {
-    $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") |
-        Where-Object { Test-Path $_ } | Select-Object -First 1
-}
+$iscc = Iscc
 if (-not $iscc) {
     Write-Warning 'Inno Setup (iscc) not found: no installer'
     exit 0
@@ -89,7 +88,7 @@ if (-not $iscc) {
 # Inno Setup signs Setup and its uninstaller with sign.ps1 too.
 & $iscc /Q "/DVersion=$version" "/DStage=$stage" "/O$out" @(& "$PSScriptRoot\sign.ps1" -Iscc) packaging\windows\earwig.iss
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
-& "$PSScriptRoot\sign.ps1" -Check "$out\$name-setup.exe"
+& "$PSScriptRoot\sign.ps1" -Check "$out\$name-setup.exe" "$stage\earwig.exe" "$stage\earwigw.exe"
 Write-Output "$out\$name-setup.exe"
 
 # winget manifests for the installer as a GitHub release asset of v<version>,

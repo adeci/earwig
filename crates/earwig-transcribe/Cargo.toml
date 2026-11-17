@@ -14,10 +14,11 @@ flume.workspace = true
 log.workspace = true
 
 [features]
-# For packages, which one build serves every CPU: transcribe.cpp as a shared
-# library with each compute backend a module beside it, on x86-64 one CPU
-# module per instruction-set generation, the best one picked at run time.
-# Without it the engine is linked in, tuned to the CPU that builds it.
+# For a package whose one build serves every CPU (Nix's, on x86-64 Linux):
+# transcribe.cpp as a shared library with each compute backend a module beside
+# it, on x86-64 one CPU module per instruction-set generation, the best one
+# picked at run time. Without it the engine is linked in, tuned to the CPU that
+# builds it.
 dynamic-backends = ["transcribe-cpp/dynamic-backends"]
 
 # Every build also has the CPU backend.

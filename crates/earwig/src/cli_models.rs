@@ -1,15 +1,12 @@
 //! `earwig models ...`: list, search, download, select and remove models.
 
-use std::io::{IsTerminal as _, Write as _};
-use std::time::Instant;
-
 use anyhow::Context as _;
 use clap::Subcommand;
 use earwig_core::config::ConfigStore;
 use earwig_core::events::Command;
 use earwig_core::models::{CancelToken, ModelManager, ModelSpec};
 
-use crate::{configured_model, human_size};
+use crate::{ProgressLine, configured_model, human_size};
 
 #[derive(Subcommand)]
 pub enum ModelsCmd {
@@ -211,55 +208,4 @@ fn select(manager: &ModelManager, spec: &ModelSpec) -> anyhow::Result<()> {
         println!("not downloaded yet; run `earwig models download {spec}`");
     }
     Ok(())
-}
-
-/// Redraws one line on a terminal, else prints a line per 10% (logs, CI).
-pub(crate) struct ProgressLine {
-    tty: bool,
-    start: Instant,
-    first: Option<u64>,
-    printed_tenth: Option<u64>,
-    dirty: bool,
-}
-
-impl ProgressLine {
-    pub(crate) fn new() -> Self {
-        Self {
-            tty: std::io::stderr().is_terminal(),
-            start: Instant::now(),
-            first: None,
-            printed_tenth: None,
-            dirty: false,
-        }
-    }
-
-    /// `downloaded` of `total` bytes of `what`.
-    pub(crate) fn update(&mut self, what: &str, downloaded: u64, total: u64) {
-        let first = *self.first.get_or_insert(downloaded);
-        let millis = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let rate = downloaded.saturating_sub(first) * 1000 / millis.max(1);
-        let percent = (downloaded * 100).checked_div(total).unwrap_or(0);
-        let text = format!(
-            "{what}: {} / {}  {percent}%  {}/s",
-            human_size(downloaded),
-            human_size(total),
-            human_size(rate),
-        );
-        let mut err = std::io::stderr().lock();
-        if self.tty {
-            let _ = write!(err, "\r\x1b[2K{text}");
-            let _ = err.flush();
-            self.dirty = true;
-        } else if self.printed_tenth != Some(percent / 10) {
-            self.printed_tenth = Some(percent / 10);
-            let _ = writeln!(err, "{text}");
-        }
-    }
-
-    pub(crate) fn finish(&mut self) {
-        if self.dirty {
-            eprintln!();
-            self.dirty = false;
-        }
-    }
 }

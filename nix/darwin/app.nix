@@ -1,7 +1,7 @@
-# earwig.app around the cargo build: Info.plist, the icon, an ad-hoc signature over the whole
-# bundle, and `bin/earwig` for the command line. The signature designates the bundle identifier
-# alone, which every build meets, so macOS keeps the Microphone and Accessibility access it
-# granted across rebuilds. The app stands alone, so the release signs this very bundle for Macs
+# earwig.app around the cargo build: Info.plist, the icon, the licences, an ad-hoc signature over
+# the whole bundle, and `bin/earwig` for the command line. The signature designates the bundle
+# identifier alone, which every build meets, so macOS keeps the Microphone and Accessibility access
+# it granted across rebuilds. The app stands alone, so the release signs this very bundle for Macs
 # without Nix, under the Developer ID's requirement instead (packaging/macos/dmg.sh).
 {
   lib,
@@ -56,7 +56,7 @@ stdenvNoCC.mkDerivation {
       exit 1
     fi
 
-    # CFBundleVersion is digits and periods only: 0.1.0 for 0.1.0-rc.1.
+    # CFBundleVersion is digits and periods only: x.y.z for x.y.z-rc.1.
     substitute ${plist} $app/Contents/Info.plist \
       --subst-var-by VERSION ${version} \
       --subst-var-by BUNDLE_VERSION ${major version}.${minor version}.${patch version}
@@ -66,6 +66,12 @@ stdenvNoCC.mkDerivation {
       rsvg-convert -w $size -h $size ${../../assets/io.github.adeci.earwig.svg} -o icon_$size.png
     done
     png2icns $app/Contents/Resources/earwig.icns icon_*.png
+    # earwig's licence, and those of the fonts and icons compiled into it.
+    install -m 644 ${../../LICENSE} $app/Contents/Resources/LICENSE
+    install -m 644 ${../../assets/fonts/LICENSE-IBM-Plex-Sans.txt} \
+      $app/Contents/Resources/LICENSE-IBM-Plex-Sans.txt
+    install -m 644 ${../../assets/cursors/LICENSE-Lucide.txt} \
+      $app/Contents/Resources/LICENSE-Lucide.txt
 
     # No certificate: an ad-hoc signature, sealing Info.plist and resources, that designates
     # `identifier "${identifier}"` instead of this build's hash. The requirement compiled as

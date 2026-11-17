@@ -1,13 +1,13 @@
 # Installs what a Windows CI job needs, each tool as tools.psd1 pins it: downloaded from its
 # vendor and checked against its SHA-256 there before anything runs it. Later steps of the job
 # get it through GITHUB_ENV and GITHUB_PATH, the versions as step outputs (the cargo cache key).
-#   pwsh packaging/windows/tools.ps1 Rust VulkanSdk CMake   the build job
-#   pwsh packaging/windows/tools.ps1 InnoSetup               the package job
-#   pwsh packaging/windows/tools.ps1 Sde                     the test job
+#   pwsh packaging/windows/tools.ps1 Rust VulkanSdk CMake         the build job
+#   pwsh packaging/windows/tools.ps1 InnoSetup ArtifactSigning    the package job
+#   pwsh packaging/windows/tools.ps1 Sde                          the test job
 [CmdletBinding()]
 param(
     [Parameter(Mandatory, ValueFromRemainingArguments)]
-    [ValidateSet('Rust', 'VulkanSdk', 'CMake', 'InnoSetup', 'Sde')]
+    [ValidateSet('Rust', 'VulkanSdk', 'CMake', 'InnoSetup', 'ArtifactSigning', 'Sde')]
     [string[]]$Tools
 )
 $ErrorActionPreference = 'Stop'
@@ -114,6 +114,18 @@ function InnoSetup {
     Install (Fetch InnoSetup) '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/PORTABLE=1', '/CURRENTUSER', "/DIR=`"$dir`"" 5
     if (-not (Test-Path "$dir\ISCC.exe")) { throw "Inno Setup $($pin.Version) installed no ISCC.exe in $dir" }
     AddPath $dir
+}
+
+# Unpacked for sign.ps1, which signs a v* tag with its dlib; fetched on every run, so a branch
+# proves the pin before a tag needs it.
+function ArtifactSigning {
+    $pin = $pins.ArtifactSigning
+    $dir = Join-Path $env:RUNNER_TEMP "artifact-signing-client-$($pin.Version)"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::ExtractToDirectory((Fetch ArtifactSigning), $dir)
+    $dlib = "$dir\bin\x64\Azure.CodeSigning.Dlib.dll"
+    if (-not (Test-Path $dlib)) { throw "Microsoft.ArtifactSigning.Client $($pin.Version) has no $dlib" }
+    Export ARTIFACT_SIGNING_DLIB $dlib
 }
 
 function Sde {

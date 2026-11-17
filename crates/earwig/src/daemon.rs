@@ -1,4 +1,4 @@
-//! Daemon wiring and the thin socket clients.
+//! Daemon wiring, the thin socket clients, `earwig transcribe` and `earwig devices`.
 
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ pub fn run(headless: bool, open_settings: bool) -> anyhow::Result<()> {
     let sources = hotkey::sources(&settings.hotkey, &caps);
     let mut hotkey_sources = vec!["socket".to_owned()];
     hotkey_sources.extend(sources.iter().map(|s| s.name().to_owned()));
-    // VM tests make every dictation hear a recording instead of the mic.
+    // Test machines without a mic (Windows CI) make every dictation hear a recording instead.
     let source = match std::env::var_os("EARWIG_AUDIO_FILE") {
         Some(path) => {
             let path = PathBuf::from(path);

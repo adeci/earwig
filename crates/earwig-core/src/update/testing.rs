@@ -1,8 +1,7 @@
 //! A stand-in for GitHub in tests: its API and release files from a local
 //! server.
 
-use std::io::{BufRead as _, BufReader, Write as _};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -10,25 +9,27 @@ use semver::Version;
 use sha2::{Digest as _, Sha256};
 
 use super::{Mode, REPO, Updates, asset_name};
+use crate::test_server::{self, Request};
 
 /// GitHub's API and files, as routes (path to body); the paths asked for
 /// land in `asked`.
 pub(crate) struct Feed {
-    pub url: String,
+    url: String,
     pub asked: Arc<Mutex<Vec<String>>>,
 }
 
 impl Feed {
     /// Serves what `routes(url)` makes, 404 for anything else.
     pub fn start(routes: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let routes = routes(&url);
         let asked = Arc::new(Mutex::new(Vec::new()));
         let log = asked.clone();
-        std::thread::spawn(move || {
-            for conn in listener.incoming().flatten() {
-                answer(conn, &routes, &log);
+        let url = test_server::serve(|url| {
+            let routes = routes(url);
+            move |_: usize, request: &Request, conn: &mut TcpStream| {
+                log.lock().unwrap().push(request.path.clone());
+                let route = request.path.split('?').next().unwrap_or_default();
+                let body = routes.iter().find(|(known, _)| known == route);
+                test_server::reply(conn, body.map(|(_, body)| body.as_slice()));
             }
         });
         Self { url, asked }
@@ -48,35 +49,6 @@ impl Feed {
             dir.join("earwig.app"),
         )
     }
-}
-
-fn answer(mut conn: TcpStream, routes: &[(String, Vec<u8>)], log: &Mutex<Vec<String>>) {
-    let mut reader = BufReader::new(conn.try_clone().unwrap());
-    let mut request = String::new();
-    reader.read_line(&mut request).unwrap();
-    let mut header = String::new();
-    while reader
-        .read_line(&mut header)
-        .is_ok_and(|_| !header.trim().is_empty())
-    {
-        header.clear();
-    }
-    let path = request.split(' ').nth(1).unwrap_or_default().to_owned();
-    let route = path.split('?').next().unwrap_or_default().to_owned();
-    log.lock().unwrap().push(path);
-    let reply = match routes.iter().find(|(known, _)| *known == route) {
-        Some((_, body)) => {
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            [head.as_bytes(), body].concat()
-        }
-        None => {
-            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
-        }
-    };
-    let _ = conn.write_all(&reply);
 }
 
 /// GitHub's JSON for release `version` with this platform's file, listed

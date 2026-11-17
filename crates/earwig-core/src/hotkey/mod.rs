@@ -65,7 +65,7 @@ pub fn sources(config: &HotkeyConfig, caps: &DesktopCaps) -> Vec<Box<dyn HotkeyS
 
 /// Watch [`HotkeyConfig::key`] from now on. A key that does not parse, or
 /// that [`Hotkey::check`] refuses, is not watched until it is fixed.
-pub fn configure(config: &HotkeyConfig) -> Result<(), KeyError> {
+pub(crate) fn configure(config: &HotkeyConfig) -> Result<(), KeyError> {
     KEYBOARD.set_options(Options {
         block: config.block,
     });

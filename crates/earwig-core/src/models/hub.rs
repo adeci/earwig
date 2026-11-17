@@ -6,12 +6,12 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use ureq::Agent;
 
+use super::download;
 use super::gguf::{self, Scan};
 use super::{ModelError, RemoteFile, SearchResult};
 
@@ -64,21 +64,8 @@ pub(crate) struct Lfs {
 
 impl Hub {
     pub fn new(endpoint: &str) -> Self {
-        let user_agent = concat!("earwig/", env!("CARGO_PKG_VERSION"));
-        let api = Agent::config_builder()
-            .user_agent(user_agent)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .new_agent();
-        let files = Agent::config_builder()
-            .user_agent(user_agent)
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(15)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_per_read(Some(Duration::from_secs(60)))
-            .build()
-            .new_agent();
+        // Plain HTTP too: the endpoint may be a test server or a mirror.
+        let (api, files) = download::agents(false);
         Self {
             endpoint: endpoint.trim_end_matches('/').to_owned(),
             api,

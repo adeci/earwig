@@ -77,7 +77,7 @@ impl ModelManager {
 
     /// Read-only stores searched after the user's, in order.
     #[must_use]
-    pub fn with_system_stores(mut self, stores: Vec<PathBuf>) -> Self {
+    fn with_system_stores(mut self, stores: Vec<PathBuf>) -> Self {
         self.system = stores;
         self
     }
@@ -384,13 +384,13 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use std::net::TcpStream;
 
     use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::models::Role;
+    use crate::test_server::{self, Request};
 
     #[test]
     fn builtin_catalog_parses_with_roles() {
@@ -455,45 +455,22 @@ default = true
 
     /// A one-repo fake Hub: the tree listing and the file itself.
     fn fake_hub(data: &'static [u8]) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
         let tree = serde_json::json!([
             {"type": "directory", "path": "sub", "size": 0},
             {"type": "file", "path": "sub/m.gguf", "size": data.len(),
              "lfs": {"oid": hex::encode(Sha256::digest(data)), "size": data.len()}},
         ])
         .to_string();
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let mut conn = conn.unwrap();
-                let mut reader = BufReader::new(conn.try_clone().unwrap());
-                let mut request = String::new();
-                reader.read_line(&mut request).unwrap();
-                // Headers are ignored, but read so closing does not reset.
-                let mut line = String::new();
-                while reader.read_line(&mut line).unwrap() > 2 {
-                    line.clear();
-                }
-                let path = request.split(' ').nth(1).unwrap_or_default().to_owned();
-                let body: &[u8] = if path == "/api/models/o/r/tree/c?recursive=true" {
-                    tree.as_bytes()
-                } else if path == "/o/r/resolve/c/sub/m.gguf" {
-                    data
-                } else {
-                    let _ = conn.write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    );
-                    continue;
+        test_server::serve(|_| {
+            move |_: usize, request: &Request, conn: &mut TcpStream| {
+                let body = match request.path.as_str() {
+                    "/api/models/o/r/tree/c?recursive=true" => Some(tree.as_bytes()),
+                    "/o/r/resolve/c/sub/m.gguf" => Some(data),
+                    _ => None,
                 };
-                let _ = write!(
-                    conn,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = conn.write_all(body);
+                test_server::reply(conn, body);
             }
-        });
-        base
+        })
     }
 
     #[test]

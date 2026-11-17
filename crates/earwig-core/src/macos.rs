@@ -111,31 +111,39 @@ unsafe extern "C" {}
 const RECORD_UNDETERMINED: isize = 0x756e_6474;
 const RECORD_GRANTED: isize = 0x6772_6e74;
 
+/// AVAudioApplication, which holds the microphone permission; macOS 14
+/// brought it.
+fn audio_application() -> anyhow::Result<&'static objc2::runtime::AnyClass> {
+    objc2::runtime::AnyClass::get(c"AVAudioApplication")
+        .ok_or_else(|| anyhow::anyhow!("earwig needs macOS 14 or later"))
+}
+
 /// Some answer, or "not asked yet" (`None`). AVAudioApplication reads it
 /// live, and asks again once it is cleared.
-pub fn microphone_allowed() -> Option<bool> {
-    autoreleasepool(|_| {
-        let permission: isize = unsafe {
-            let app: *mut AnyObject = msg_send![class!(AVAudioApplication), sharedInstance];
-            msg_send![app, recordPermission]
-        };
-        match permission {
-            RECORD_UNDETERMINED => None,
-            RECORD_GRANTED => Some(true),
-            _ => Some(false),
-        }
+pub fn microphone_allowed() -> anyhow::Result<Option<bool>> {
+    let app = audio_application()?;
+    // SAFETY: AVAudioApplication's own messages, with the types it declares.
+    let permission: isize = autoreleasepool(|_| unsafe {
+        let shared: *mut AnyObject = msg_send![app, sharedInstance];
+        msg_send![shared, recordPermission]
+    });
+    Ok(match permission {
+        RECORD_UNDETERMINED => None,
+        RECORD_GRANTED => Some(true),
+        _ => Some(false),
     })
 }
 
 /// Show the system's microphone prompt, if it was never answered.
 pub fn request_microphone() {
+    let Ok(app) = audio_application() else {
+        return;
+    };
     autoreleasepool(|_| {
         let done = block2::RcBlock::new(|_granted: Bool| {});
+        // SAFETY: the method takes a block of a BOOL, and copies it.
         unsafe {
-            let () = msg_send![
-                class!(AVAudioApplication),
-                requestRecordPermissionWithCompletionHandler: &*done
-            ];
+            let () = msg_send![app, requestRecordPermissionWithCompletionHandler: &*done];
         }
     });
 }
@@ -328,6 +336,7 @@ pub fn bundle_id() -> Option<String> {
 
 /// Replace the general pasteboard's contents with `text`.
 pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
+    // SAFETY: NSPasteboard's own messages, with the types it declares.
     let written = autoreleasepool(|_| unsafe {
         let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
         anyhow::ensure!(!board.is_null(), "no general pasteboard");
@@ -343,6 +352,8 @@ pub fn set_clipboard(text: &str) -> anyhow::Result<()> {
 
 /// Press and release Cmd+V in the focused app.
 pub fn press_paste() {
+    // SAFETY: the source and the events are ours and released once; a null
+    // source is allowed, a null event skipped.
     unsafe {
         let source = CGEventSourceCreate(SOURCE_HID);
         for down in [true, false] {

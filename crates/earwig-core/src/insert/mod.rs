@@ -120,6 +120,14 @@ fn is_terminal(app: &str, builtin: &[&str], extra: &[String]) -> bool {
         .any(|terminal| terminal.eq_ignore_ascii_case(app))
 }
 
+/// The refusal of a configured `[insert] method` only Linux has, named as
+/// the settings file spells it.
+#[cfg(any(not(target_os = "linux"), test))]
+fn linux_only(method: crate::config::InsertSetting) -> String {
+    let name = serde_json::to_string(&method).unwrap_or_default();
+    format!("[insert] method {name} works only on Linux; use \"paste\"")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -254,5 +262,14 @@ mod tests {
         assert!(!is_terminal("firefox", &["foot", "xterm"], &[]));
         assert!(!is_terminal("my.custom.term", &["foot"], &[]));
         assert!(is_terminal("my.custom.term", &["foot"], &extra));
+    }
+
+    #[test]
+    fn a_method_only_linux_has_is_named_as_the_settings_file_spells_it() {
+        let refused = linux_only(crate::config::InsertSetting::InputMethod);
+        assert!(
+            refused.contains(r#"method "input-method" works"#),
+            "{refused}"
+        );
     }
 }

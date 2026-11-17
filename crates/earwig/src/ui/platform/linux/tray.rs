@@ -15,7 +15,7 @@ impl TrayHandle {
     }
 
     /// Linux builds never update themselves: their tray says nothing of it.
-    #[allow(clippy::unused_self)] // the other trays' signature
+    #[expect(clippy::unused_self, reason = "the same signature on every OS")]
     pub fn set_update(&self, _update: Option<&UpdateState>) {}
 }
 

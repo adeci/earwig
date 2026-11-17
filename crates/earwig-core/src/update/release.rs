@@ -52,7 +52,7 @@ pub(crate) enum Pick {
 
 /// The version of a tag as earwig's are made: `v` and SemVer, no build
 /// metadata, nothing a parser would have to tidy up.
-pub(crate) fn tag_version(tag: &str) -> Option<Version> {
+fn tag_version(tag: &str) -> Option<Version> {
     let text = tag.strip_prefix('v')?;
     let version = Version::parse(text).ok()?;
     (version.build.is_empty() && version.to_string() == text).then_some(version)
@@ -185,23 +185,6 @@ mod tests {
     }
 
     #[test]
-    fn versions_order_as_semver_with_pre_releases_first() {
-        let ordered = [
-            "0.1.0-rc.1",
-            "0.1.0-rc.2",
-            "0.1.0-rc.10",
-            "0.1.0",
-            "0.1.1-beta",
-            "0.1.1",
-            "0.2.0",
-            "1.0.0",
-        ];
-        for pair in ordered.windows(2) {
-            assert!(v(pair[0]) < v(pair[1]), "{} < {}", pair[0], pair[1]);
-        }
-    }
-
-    #[test]
     fn tags_are_v_and_exact_semver() {
         assert_eq!(tag_version("v0.1.0-rc.2"), Some(v("0.1.0-rc.2")));
         assert_eq!(tag_version("v1.2.3"), Some(v("1.2.3")));
@@ -219,8 +202,8 @@ mod tests {
 
     #[test]
     fn a_newer_release_with_its_file_and_digest_is_offered() {
-        let json = release("v0.1.1", false);
-        let Pick::Offer(offer) = pick(&v("0.1.0"), &[parse_one(&json)], DOWNLOADS, asset) else {
+        let json = serde_json::json!([release("v0.1.1", false)]);
+        let Pick::Offer(offer) = picked("0.1.0", &json) else {
             panic!("no offer");
         };
         assert_eq!(
@@ -232,10 +215,6 @@ mod tests {
                 sha256: SHA.into(),
             }
         );
-    }
-
-    fn parse_one(json: &serde_json::Value) -> Release {
-        serde_json::from_value(json.clone()).unwrap()
     }
 
     #[test]

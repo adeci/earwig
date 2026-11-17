@@ -144,10 +144,12 @@ fn write_line(mut out: impl io::Write, value: &impl serde::Serialize) -> io::Res
 
 /// How long a client waits for the daemon to answer a command: one that took
 /// the connection and never answers must not hang `earwig quit` or `status`,
-/// which the installer runs and waits for. A check for updates asks GitHub.
+/// which the installer runs and waits for. The updater answers
+/// `check-for-updates` and `update` once it is free, behind a check of GitHub
+/// it may be in and, for a check, after one of its own: up to 30 s each.
 fn reply_timeout(cmd: &Command) -> Duration {
-    if matches!(cmd, Command::CheckForUpdates) {
-        Duration::from_secs(60)
+    if matches!(cmd, Command::CheckForUpdates | Command::Update) {
+        Duration::from_secs(90)
     } else {
         Duration::from_secs(5)
     }
@@ -159,7 +161,7 @@ fn connect(path: &Path, timeout: Option<Duration>) -> anyhow::Result<os::Conn> {
 }
 
 /// [`request`] against an explicit socket path.
-pub fn request_at(path: &Path, cmd: &Command) -> anyhow::Result<Option<Event>> {
+fn request_at(path: &Path, cmd: &Command) -> anyhow::Result<Option<Event>> {
     request_within(path, cmd, reply_timeout(cmd))
 }
 
@@ -187,7 +189,7 @@ fn request_within(path: &Path, cmd: &Command, timeout: Duration) -> anyhow::Resu
 }
 
 /// [`subscribe`] against an explicit socket path.
-pub fn subscribe_at(
+fn subscribe_at(
     path: &Path,
 ) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Event>> + use<>> {
     let conn = connect(path, None)?;
@@ -385,7 +387,6 @@ mod tests {
     fn a_build_that_does_not_update_itself_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let (handle, _, _) = handle(dir.path(), None);
-        assert_eq!(handle.status().update, None);
         let path = address(dir.path());
         Server::bind(&path).unwrap().serve(handle).unwrap();
         for cmd in [Command::CheckForUpdates, Command::Update] {

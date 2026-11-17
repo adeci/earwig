@@ -3,7 +3,7 @@
 //! puts nothing on the linker's path.
 //!
 //! `pinned_avx2`: the Windows packages build transcribe.cpp for AVX2 CPUs
-//! (packaging/windows/package.ps1), so the engine checks the CPU before it
+//! (packaging/windows/release-env.ps1), so the engine checks the CPU before it
 //! loads rather than dying on an illegal instruction.
 
 fn main() {

@@ -114,12 +114,11 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
         quit.id().clone(),
         update.id().clone(),
     ];
-    let clicked = local.clone();
-    #[cfg(not(windows))]
-    drop(local);
+    #[cfg(windows)]
+    let left_click = local.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == ids[0] {
-            let _ = clicked.send(Local::ShowSettings);
+            let _ = local.send(Local::ShowSettings);
         } else if event.id == ids[1] {
             handle.send(Command::Toggle);
         } else if event.id == ids[2] {
@@ -131,7 +130,7 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
                     version,
                     installable: false,
                 }) => {
-                    let _ = clicked.send(Local::OpenUrl(release_page(&version)));
+                    let _ = local.send(Local::OpenUrl(release_page(&version)));
                 }
                 _ => handle.send(Command::Update),
             }
@@ -146,7 +145,7 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
             ..
         } = event
         {
-            let _ = local.send(Local::ShowSettings);
+            let _ = left_click.send(Local::ShowSettings);
         }
     }));
     let builder = TrayIconBuilder::new()

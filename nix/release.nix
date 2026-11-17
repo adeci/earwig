@@ -1,7 +1,6 @@
 # A pushed v* tag's GitHub release, made with the release token nixbot holds, and the Mac
 # download on it: earwig.app, built on the Mac, signed with the Developer ID in a DMG that Apple
-# notarizes (packaging/macos/dmg.sh). The Windows CI job runs the same release script before it
-# attaches its packages; whichever is first creates the release.
+# notarizes (packaging/macos/dmg.sh).
 {
   lib,
   mkEffect,

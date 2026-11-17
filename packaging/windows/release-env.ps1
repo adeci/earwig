@@ -3,7 +3,7 @@
 # then `cargo build --release`.
 
 # transcribe.cpp tunes its CPU code to the machine that builds it (GGML_NATIVE),
-# so a package built on a runner with AVX-512 crashed on every CPU without it.
+# so a package built on a runner with AVX-512 would crash on every CPU without it.
 # Pin ggml's x86 tiers up to AVX2 instead (Haswell, Zen and newer): the
 # SSE2 floor decodes slower than real time.
 $env:TRANSCRIBE_CMAKE_ARGS = "$env:TRANSCRIBE_CMAKE_ARGS -DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_BMI2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DTRANSCRIBE_X86_CONSERVATIVE=ON".Trim()

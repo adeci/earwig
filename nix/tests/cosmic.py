@@ -97,6 +97,9 @@ with subtest("Dictate into the editor with the shortcut"):
     print(machine.succeed("cat /tmp/edit.txt"))
     assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
 
+with subtest("A recording cancelled mid-clip leaves the streaming model ready for the next"):
+    cancel_mid_clip(lambda: as_alice("earwig toggle"))
+
 with subtest("Dictate into a terminal with `earwig toggle`"):
     # The editor still shows the sentence, which would satisfy the OCR.
     machine.succeed("pkill -f 'cosmic-edit /tmp/edit.txt'")

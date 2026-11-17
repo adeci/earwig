@@ -115,9 +115,10 @@
         {
           package = earwig;
           inherit (earwig.passthru.tests) clippy tests;
-          treefmt = treefmt.${system}.config.build.check self;
         }
         // lib.optionalAttrs (system == "x86_64-linux") {
+          # Formatting is the same on every system: checked once.
+          treefmt = treefmt.${system}.config.build.check self;
           vm-niri = vmTest ./nix/tests/niri.nix;
           vm-sway = vmTest ./nix/tests/sway.nix;
           vm-keyd = vmTest ./nix/tests/keyd.nix;
@@ -126,6 +127,7 @@
           vm-models = vmTest ./nix/tests/models.nix;
           vm-gnome = vmTest ./nix/tests/gnome.nix;
           vm-cpus = vmTest ./nix/tests/cpus.nix;
+          vm-uinput = vmTest ./nix/tests/uinput.nix;
         }
       );
 

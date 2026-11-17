@@ -11,7 +11,7 @@
   #error Pass /DStage=<folder with the binaries>
 #endif
 
-; Windows' file version is digits and periods only: 0.1.0 for 0.1.0-rc.1.
+; Windows' file version is digits and periods only: x.y.z for x.y.z-rc.1.
 #if Pos("-", Version) > 0
   #define NumericVersion Copy(Version, 1, Pos("-", Version) - 1)
 #else
@@ -60,6 +60,7 @@ Source: "{#Stage}\earwigw.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\vulkan-1.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"
 Source: "..\..\assets\fonts\LICENSE-IBM-Plex-Sans.txt"; DestDir: "{app}"
+Source: "..\..\assets\cursors\LICENSE-Lucide.txt"; DestDir: "{app}"
 Source: "LICENSE-Vulkan-Loader.txt"; DestDir: "{app}"
 Source: "..\..\README.md"; DestDir: "{app}"
 

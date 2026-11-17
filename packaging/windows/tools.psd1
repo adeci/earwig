@@ -1,7 +1,6 @@
-# Everything Windows CI downloads to build, package and test earwig: an exact version from its
-# vendor's official URL and the SHA-256 that tools.ps1 checks before anything runs it. A bump
-# changes a tool's lines here and nothing else. (sign.ps1 pins the Artifact Signing client it
-# fetches on a tag; models.toml the speech model.)
+# Everything Windows CI downloads to build, package, sign and test earwig: an exact version from
+# its vendor's official URL and the SHA-256 that tools.ps1 checks before anything runs it. A bump
+# changes a tool's lines here and nothing else. (models.toml pins the speech model.)
 @{
     # rustup, the runner image's, installs this toolchain and checks every component against the
     # SHA-256 its channel manifest lists: this file, checked against Sha256.
@@ -31,6 +30,13 @@
         Version = '6.7.4'
         Url = 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe'
         Sha256 = 'a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c'
+    }
+    # Microsoft's dlib for SignTool, Microsoft.ArtifactSigning.Client from nuget.org, with which
+    # sign.ps1 signs a v* tag.
+    ArtifactSigning = @{
+        Version = '1.0.151'
+        Url = 'https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/1.0.151/microsoft.artifactsigning.client.1.0.151.nupkg'
+        Sha256 = '35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a'
     }
     # Intel SDE, for the smoke test's emulated CPUs.
     Sde = @{

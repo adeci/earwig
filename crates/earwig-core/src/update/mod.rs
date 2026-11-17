@@ -5,8 +5,12 @@
 //! installer, when this earwig isn't signed), the app on macOS. Builds from
 //! Nix, cargo or a package manager never check.
 
+#[cfg(any(target_os = "macos", test))]
+mod bundle;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(windows, test))]
+mod publisher;
 mod release;
 mod service;
 #[cfg(test)]
@@ -75,7 +79,7 @@ fn asset_name(version: &Version) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     /// Say it is out; its release page has it.
-    #[cfg_attr(target_os = "linux", allow(dead_code))] // Linux only tests
+    #[cfg_attr(target_os = "linux", allow(dead_code))] // on Linux only tests make one
     Notify,
     /// Download and install it.
     Install,
@@ -96,8 +100,15 @@ pub enum UpdateError {
     /// updating.
     #[error("another earwig is installing an update")]
     Busy,
-    #[error(transparent)]
-    Io(#[from] io::Error),
+    /// Something done to a local file or folder, and how it failed.
+    #[error("{doing}: {source}")]
+    Io { doing: String, source: io::Error },
+}
+
+impl UpdateError {
+    fn io(source: io::Error, doing: String) -> Self {
+        Self::Io { doing, source }
+    }
 }
 
 /// Held for a whole download and install, so that two earwigs (the daemon
@@ -183,23 +194,7 @@ impl Updates {
         https_only: bool,
         #[cfg(target_os = "macos")] app: PathBuf,
     ) -> Self {
-        let user_agent = concat!("earwig/", env!("CARGO_PKG_VERSION"));
-        let api_agent = Agent::config_builder()
-            .user_agent(user_agent)
-            .https_only(https_only)
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .new_agent();
-        let files = Agent::config_builder()
-            .user_agent(user_agent)
-            .https_only(https_only)
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(15)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_per_read(Some(Duration::from_secs(60)))
-            .build()
-            .new_agent();
+        let (api_agent, files) = download::agents(https_only);
         Self {
             mode,
             running,
@@ -274,22 +269,26 @@ impl Updates {
     pub fn lock(&self) -> Result<Option<UpdateLock>, UpdateError> {
         let path = self.dir.with_file_name("update.lock");
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(|e| UpdateError::io(e, format!("creating {}", parent.display())))?;
         }
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|e| UpdateError::io(e, format!("opening {}", path.display())))?;
         match file.try_lock() {
             Ok(()) => Ok(Some(UpdateLock { _file: file })),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
-            Err(fs::TryLockError::Error(e)) => Err(e.into()),
+            Err(fs::TryLockError::Error(e)) => {
+                Err(UpdateError::io(e, format!("locking {}", path.display())))
+            }
         }
     }
 
     /// Download `offer` into the private folder, no more bytes than GitHub
-    /// lists, within [`DOWNLOAD_LIMIT`], and checked against its SHA-256 and,
+    /// lists, within `DOWNLOAD_LIMIT`, and checked against its SHA-256 and,
     /// on Windows, for this earwig's publisher's signature; nothing is left of
     /// a download that fails. `progress(downloaded, total)`.
     pub fn download(
@@ -299,7 +298,9 @@ impl Updates {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<PathBuf, UpdateError> {
         self.clear(lock);
-        create_private(&self.dir)?;
+        create_private(&self.dir).map_err(|e| {
+            UpdateError::io(e, format!("the download folder {}", self.dir.display()))
+        })?;
         let file = self.dir.join(asset_name(&offer.version));
         let source = Source {
             url: &offer.url,
@@ -316,7 +317,8 @@ impl Updates {
                 if end.recv_timeout(DOWNLOAD_LIMIT) == Err(flume::RecvTimeoutError::Timeout) {
                     deadline.cancel();
                 }
-            })?;
+            })
+            .map_err(|e| UpdateError::io(e, "starting the download".into()))?;
         let fetched = download::fetch(&self.files, &source, &file, progress, &cancel);
         drop(ended);
         fetched.map_err(|e| {
@@ -330,12 +332,14 @@ impl Updates {
                 ModelError::Http(message) => {
                     UpdateError::Download(format!("downloading {message}"))
                 }
-                ModelError::Io(e) => UpdateError::Io(e),
+                ModelError::Io(e) => {
+                    UpdateError::io(e, format!("downloading to {}", file.display()))
+                }
                 other => UpdateError::Download(other.to_string()),
             }
         })?;
         #[cfg(windows)]
-        if let Err(e) = windows::check_publisher(&file) {
+        if let Err(e) = windows::check_publisher(&file, &release_page(&offer.version.to_string())) {
             self.clear(lock);
             return Err(e);
         }
@@ -378,7 +382,7 @@ impl Updates {
 
     /// Delete what an earlier update left behind, unless another earwig is
     /// updating right now.
-    pub fn clean(&self) {
+    pub(crate) fn clean(&self) {
         match self.lock() {
             Ok(Some(lock)) => self.clear(&lock),
             Ok(None) => log::info!("another earwig is updating; its files stay"),
@@ -415,216 +419,10 @@ fn create_private(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt as _;
         let meta = fs::metadata(dir)?;
         if meta.uid() != rustix::process::getuid().as_raw() || meta.mode() & 0o077 != 0 {
-            return Err(io::Error::other(format!(
-                "{} is not private to this user",
-                dir.display()
-            )));
+            return Err(io::Error::other("not private to this user"));
         }
     }
     Ok(())
-}
-
-/// The app bundle `exe` runs from, `<app>/Contents/MacOS/<exe>`, and what it
-/// may do: only a bundle signed with a Developer ID (a team) updates, and
-/// only where it can replace itself (not translocated, its folder and
-/// itself writable); one in the Nix store never does.
-#[cfg(any(target_os = "macos", test))]
-fn mac_mode(
-    exe: &Path,
-    team: Option<&str>,
-    writable: impl Fn(&Path) -> bool,
-) -> Option<(PathBuf, Mode)> {
-    team.filter(|team| !team.is_empty())?;
-    let contents = exe
-        .parent()
-        .filter(|dir| dir.ends_with("MacOS"))?
-        .parent()?;
-    let app = contents
-        .parent()
-        .filter(|_| contents.ends_with("Contents"))?;
-    if app.extension().is_none_or(|ext| ext != "app") || app.starts_with("/nix/store") {
-        return None;
-    }
-    // Gatekeeper runs a quarantined app it hasn't seen moved from a
-    // read-only copy at a random path.
-    let translocated = app
-        .components()
-        .any(|c| c.as_os_str() == "AppTranslocation");
-    let replaceable = !translocated && app.parent().is_some_and(&writable) && writable(app);
-    let mode = if replaceable {
-        Mode::Install
-    } else {
-        Mode::Notify
-    };
-    Some((app.to_owned(), mode))
-}
-
-/// Puts `staged` where `installed` is in one step, rolled back if that
-/// fails; on success the old app is at `staged`. Where the file system
-/// can't swap two names at once (HFS+, exFAT): moved aside, the new one in,
-/// the old one back if that failed.
-#[cfg(any(target_os = "macos", all(test, unix)))]
-fn swap(installed: &Path, staged: &Path) -> io::Result<()> {
-    use rustix::fs::{CWD, RenameFlags, renameat_with};
-    match renameat_with(CWD, staged, CWD, installed, RenameFlags::EXCHANGE) {
-        Ok(()) => Ok(()),
-        Err(e) if e == rustix::io::Errno::INVAL || e == rustix::io::Errno::NOTSUP => {
-            swap_by_renames(installed, staged)
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-#[cfg(any(target_os = "macos", all(test, unix)))]
-fn swap_by_renames(installed: &Path, staged: &Path) -> io::Result<()> {
-    let aside = aside(installed);
-    fs::rename(installed, &aside)?;
-    if let Err(e) = fs::rename(staged, installed) {
-        if let Err(back) = fs::rename(&aside, installed) {
-            log::error!(
-                "earwig is at {} now: moving it back to {} failed: {back}",
-                aside.display(),
-                installed.display()
-            );
-        }
-        return Err(e);
-    }
-    // The new app is in: the old one only has to go somewhere.
-    if let Err(e) = fs::rename(&aside, staged) {
-        log::warn!("moving the old app to {}: {e}", staged.display());
-    }
-    Ok(())
-}
-
-/// Where the swap without an atomic rename moves the old app meanwhile.
-#[cfg(any(target_os = "macos", all(test, unix)))]
-fn aside(app: &Path) -> PathBuf {
-    app.with_file_name(".earwig-old.app")
-}
-
-/// Where the new app is copied, next to the installed `app` so the swap
-/// stays on one volume.
-#[cfg(any(target_os = "macos", all(test, unix)))]
-fn staged(app: &Path) -> PathBuf {
-    app.with_file_name(".earwig-update.app")
-}
-
-/// Tidy what a swap cut short left next to `app`: an app moved aside is put
-/// back when it is all there is; the copies go only once `app` is there.
-#[cfg(any(target_os = "macos", all(test, unix)))]
-fn settle(app: &Path) {
-    let aside = aside(app);
-    if !app.exists() && aside.exists() {
-        match fs::rename(&aside, app) {
-            Ok(()) => log::warn!(
-                "put earwig back at {} from {}",
-                app.display(),
-                aside.display()
-            ),
-            Err(e) => {
-                log::error!(
-                    "earwig is at {}: moving it back failed: {e}",
-                    aside.display()
-                );
-                return;
-            }
-        }
-    }
-    if !app.exists() {
-        return;
-    }
-    for leftover in [staged(app), aside] {
-        match fs::remove_dir_all(&leftover) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                log::warn!("removing {}: {e}", leftover.display());
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Whether `requirement` is what a Developer ID of `team` designates:
-/// Apple's anchor, and that team (quoted or not) as the leaf's OU.
-#[cfg(any(target_os = "macos", test))]
-fn developer_id_requirement(requirement: &str, team: &str) -> bool {
-    const OU: &str = "certificate leaf[subject.OU] = ";
-    !team.is_empty()
-        && requirement.contains("anchor apple generic")
-        && requirement.match_indices(OU).any(|(at, _)| {
-            let value = &requirement[at + OU.len()..];
-            let value = value.strip_prefix('"').unwrap_or(value);
-            value
-                .strip_prefix(team)
-                .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric()))
-        })
-}
-
-/// Who signed a file, by an Authenticode signature Windows accepts.
-#[cfg(any(windows, test))]
-struct Publisher {
-    /// The signing certificate's name.
-    name: String,
-    /// The signing certificate's extended key usages.
-    ekus: Vec<String>,
-    /// The SHA-256 of the root certificate its chain ends at, and its name.
-    root: [u8; 32],
-    root_name: String,
-}
-
-#[cfg(any(windows, test))]
-impl Publisher {
-    /// Its Artifact Signing Public Trust certificate profiles: the certificates
-    /// of a profile, a new one every day, carry its own EKU right under
-    /// 1.3.6.1.4.1.311.97, whose .1 holds the kinds of profile (.1.0 is Public
-    /// Trust) and the other kinds' EKUs.
-    fn profiles(&self) -> impl Iterator<Item = &str> {
-        self.ekus.iter().map(String::as_str).filter(|eku| {
-            eku.strip_prefix("1.3.6.1.4.1.311.97.")
-                .is_some_and(|rest| !rest.is_empty() && rest.split('.').next() != Some("1"))
-        })
-    }
-
-    fn root(&self) -> String {
-        format!("{} ({})", self.root_name, hex::encode(&self.root[..8]))
-    }
-}
-
-/// Why `new` isn't signed by the publisher of `running`, if it isn't: it must
-/// chain to the same root and carry each of `running`'s certificate profiles,
-/// which only the profile's own certificates from that root's authority do.
-/// A subject is just a name that anyone can give their own certificate.
-#[cfg(any(windows, test))]
-fn same_publisher(running: &Publisher, new: &Publisher) -> Result<(), String> {
-    let ours: Vec<&str> = running.profiles().collect();
-    if ours.is_empty() {
-        return Err(format!(
-            "this earwig's signing certificate ({}) names no Artifact Signing certificate \
-             profile, so it can't tell its publisher's installers from others",
-            running.name
-        ));
-    }
-    if new.root != running.root {
-        return Err(format!(
-            "the installer's signature ({}) chains to another root certificate, {}, not {}",
-            new.name,
-            new.root(),
-            running.root()
-        ));
-    }
-    let theirs: Vec<&str> = new.profiles().collect();
-    match ours.iter().find(|profile| !theirs.contains(profile)) {
-        Some(profile) => Err(format!(
-            "the installer is signed by {} under another certificate profile ({}), \
-             not this earwig's {profile}",
-            new.name,
-            if theirs.is_empty() {
-                "none".to_owned()
-            } else {
-                theirs.join(", ")
-            }
-        )),
-        None => Ok(()),
-    }
 }
 
 #[cfg(test)]
@@ -747,412 +545,5 @@ mod tests {
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
         let err = create_private(&shared).unwrap_err();
         assert!(err.to_string().contains("not private"), "{err}");
-    }
-
-    #[test]
-    fn only_a_developer_id_requirement_is_trusted() {
-        let quoted = r#"identifier "io.github.adeci.earwig" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "ABCDE12345""#;
-        assert!(developer_id_requirement(quoted, "ABCDE12345"));
-        let bare = quoted.replace(r#""ABCDE12345""#, "ABCDE12345");
-        assert!(developer_id_requirement(&bare, "ABCDE12345"));
-        assert!(!developer_id_requirement(quoted, "OTHERTEAM1"));
-        assert!(
-            !developer_id_requirement(quoted, "ABCDE"),
-            "a prefix of the team"
-        );
-        assert!(!developer_id_requirement(quoted, ""));
-        for odd in [
-            r#"cdhash H"0123456789abcdef0123456789abcdef01234567""#,
-            r#"identifier "io.github.adeci.earwig" and certificate root = H"4c96ea84b4946b554e63ad9daa79ed4749474980""#,
-            r#"identifier "io.github.adeci.earwig" and certificate leaf[subject.OU] = "ABCDE12345""#,
-        ] {
-            assert!(!developer_id_requirement(odd, "ABCDE12345"), "{odd}");
-        }
-    }
-
-    // The EKUs of a real Artifact Signing certificate (python.org's installer,
-    // October 2026), and of one with Microsoft's example of another profile.
-    const CODE_SIGNING: &str = "1.3.6.1.5.5.7.3.3";
-    const PUBLIC_TRUST: &str = "1.3.6.1.4.1.311.97.1.0";
-    const PROFILE: &str = "1.3.6.1.4.1.311.97.608394634.79987812.305991749.578777327";
-    const OURS: &[&str] = &[PUBLIC_TRUST, CODE_SIGNING, PROFILE];
-    const THEIRS: &[&str] = &[
-        PUBLIC_TRUST,
-        CODE_SIGNING,
-        "1.3.6.1.4.1.311.97.990309390.766961637.194916062.941502583",
-    ];
-
-    fn publisher(name: &str, ekus: &[&str], root: u8) -> Publisher {
-        Publisher {
-            name: name.to_owned(),
-            ekus: ekus.iter().map(|&eku| eku.to_owned()).collect(),
-            root: [root; 32],
-            root_name: format!("root {root}"),
-        }
-    }
-
-    #[test]
-    fn an_installer_from_the_same_certificate_profile_and_root_is_the_publishers() {
-        let running = publisher("Alexander Decious", OURS, 1);
-        // Another day's certificate: a new key and thumbprint, the profile's EKU.
-        let next = publisher("Alexander Decious", &[CODE_SIGNING, PROFILE], 1);
-        assert_eq!(same_publisher(&running, &next), Ok(()));
-        // A name changed with a renewed identity validation, a marker added.
-        let marked = [OURS, &["1.3.6.1.4.1.311.97.1.9"]].concat();
-        let later = publisher("Alexander J. Decious", &marked, 1);
-        assert_eq!(same_publisher(&running, &later), Ok(()));
-    }
-
-    #[test]
-    fn an_installer_from_anyone_else_is_refused() {
-        let running = publisher("Alexander Decious", OURS, 1);
-        // Another certificate profile from the same authority: another
-        // subscriber, or this one's profile deleted and made anew.
-        let other = publisher("Someone Else", THEIRS, 1);
-        let err = same_publisher(&running, &other).unwrap_err();
-        assert!(err.contains("another certificate profile"), "{err}");
-        // The same name and EKUs under another root: a look-alike, self-signed
-        // or from another authority.
-        let look_alike = publisher("Alexander Decious", OURS, 2);
-        let err = same_publisher(&running, &look_alike).unwrap_err();
-        assert!(err.contains("another root certificate"), "{err}");
-        let plain = publisher("Alexander Decious", &[CODE_SIGNING], 1);
-        let err = same_publisher(&running, &plain).unwrap_err();
-        assert!(err.contains("another certificate profile (none)"), "{err}");
-    }
-
-    #[test]
-    fn only_a_public_trust_profile_eku_names_a_publisher() {
-        let installer = publisher("Alexander Decious", OURS, 1);
-        for ekus in [
-            &[CODE_SIGNING][..],
-            &[CODE_SIGNING, PUBLIC_TRUST],
-            &[CODE_SIGNING, "1.3.6.1.4.1.311.97.1.3.1.29433.35007"],
-            &[CODE_SIGNING, "1.3.6.1.4.1.311.970.608394634"],
-            &[CODE_SIGNING, "1.3.6.1.4.1.311.97."],
-        ] {
-            let running = publisher("Alexander Decious", ekus, 1);
-            let err = same_publisher(&running, &installer).unwrap_err();
-            assert!(
-                err.contains("names no Artifact Signing certificate profile"),
-                "{ekus:?}: {err}"
-            );
-        }
-    }
-
-    fn writable_except<'a>(read_only: &'a [&'a str]) -> impl Fn(&Path) -> bool + 'a {
-        move |path| !read_only.iter().any(|ro| path == Path::new(ro))
-    }
-
-    const TEAM: Option<&str> = Some("ABCDE12345");
-
-    #[test]
-    fn a_mac_app_updates_where_it_may_replace_itself() {
-        let exe = Path::new("/Applications/earwig.app/Contents/MacOS/earwig");
-        let app = PathBuf::from("/Applications/earwig.app");
-        assert_eq!(
-            mac_mode(exe, TEAM, writable_except(&[])),
-            Some((app.clone(), Mode::Install))
-        );
-        // A standard user can't write to /Applications, nor into an admin's app.
-        assert_eq!(
-            mac_mode(exe, TEAM, writable_except(&["/Applications"])),
-            Some((app.clone(), Mode::Notify))
-        );
-        assert_eq!(
-            mac_mode(exe, TEAM, writable_except(&["/Applications/earwig.app"])),
-            Some((app, Mode::Notify))
-        );
-        let translocated = Path::new(
-            "/private/var/folders/xy/T/AppTranslocation/0F1E2D3C/d/earwig.app/Contents/MacOS/earwig",
-        );
-        assert!(matches!(
-            mac_mode(translocated, TEAM, writable_except(&[])),
-            Some((_, Mode::Notify))
-        ));
-        let mounted = Path::new("/Volumes/earwig/earwig.app/Contents/MacOS/earwig");
-        assert!(matches!(
-            mac_mode(mounted, TEAM, writable_except(&["/Volumes/earwig"])),
-            Some((_, Mode::Notify))
-        ));
-    }
-
-    #[test]
-    fn mac_builds_without_a_developer_id_or_a_bundle_never_update() {
-        let exe = Path::new("/Applications/earwig.app/Contents/MacOS/earwig");
-        // Ad hoc signed: nix-darwin's app, cargo builds.
-        assert_eq!(mac_mode(exe, None, writable_except(&[])), None);
-        assert_eq!(mac_mode(exe, Some(""), writable_except(&[])), None);
-        let store =
-            Path::new("/nix/store/abc-earwig/Applications/earwig.app/Contents/MacOS/earwig");
-        assert_eq!(mac_mode(store, TEAM, writable_except(&[])), None);
-        for bare in [
-            "/Users/me/.cargo/bin/earwig",
-            "/Applications/earwig/Contents/MacOS/earwig",
-            "/Applications/earwig.app/MacOS/earwig",
-        ] {
-            assert_eq!(
-                mac_mode(Path::new(bare), TEAM, writable_except(&[])),
-                None,
-                "{bare}"
-            );
-        }
-    }
-
-    /// An app folder that says `version`.
-    #[cfg(unix)]
-    fn app(path: &Path, version: &str) {
-        fs::create_dir_all(path.join("Contents")).unwrap();
-        fs::write(path.join("Contents/version"), version).unwrap();
-    }
-
-    #[cfg(unix)]
-    fn version(path: &Path) -> String {
-        fs::read_to_string(path.join("Contents/version")).unwrap()
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_swap_puts_the_new_app_in_and_the_old_one_where_it_was_staged() {
-        let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("earwig.app");
-        let staged = dir.path().join(".earwig-update.app");
-        for swap in [swap, swap_by_renames] {
-            app(&installed, "old");
-            app(&staged, "new");
-            swap(&installed, &staged).unwrap();
-            assert_eq!(version(&installed), "new");
-            assert_eq!(version(&staged), "old");
-            assert!(!aside(&installed).exists());
-            fs::remove_dir_all(&installed).unwrap();
-            fs::remove_dir_all(&staged).unwrap();
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_failed_swap_leaves_the_installed_app() {
-        let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("earwig.app");
-        app(&installed, "old");
-        let missing = dir.path().join(".earwig-update.app");
-        for swap in [swap, swap_by_renames] {
-            assert!(swap(&installed, &missing).is_err());
-            assert_eq!(version(&installed), "old");
-            assert!(!aside(&installed).exists());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_app_moved_aside_and_left_alone_is_put_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("earwig.app");
-        // A swap cut short between its renames: the old app aside, the new
-        // one still staged.
-        app(&aside(&installed), "old");
-        app(&staged(&installed), "new");
-        settle(&installed);
-        assert_eq!(version(&installed), "old");
-        assert!(!aside(&installed).exists());
-        assert!(!staged(&installed).exists());
-        // With the app in place, leftovers just go.
-        app(&aside(&installed), "older");
-        app(&staged(&installed), "newer");
-        settle(&installed);
-        assert_eq!(version(&installed), "old");
-        assert!(!aside(&installed).exists());
-        assert!(!staged(&installed).exists());
-        // No app and nothing aside: a staged copy is all there is, and stays.
-        fs::remove_dir_all(&installed).unwrap();
-        app(&staged(&installed), "new");
-        settle(&installed);
-        assert_eq!(version(&staged(&installed)), "new");
-    }
-
-    /// The Mac's update end to end, but for the program running it (a test,
-    /// not an app): apps signed with throwaway identities and the hardened
-    /// runtime like the release's, in disk images from hdiutil beside a link
-    /// to Applications. On a Mac:
-    /// `nix shell nixpkgs#rcodesign -c cargo test -p earwig-core mac_update -- --ignored`
-    #[cfg(target_os = "macos")]
-    mod mac {
-        use std::os::unix::fs::PermissionsExt as _;
-        use std::process::Command;
-
-        use sha2::{Digest as _, Sha256};
-
-        use super::super::macos::{self, Running};
-        use super::super::testing::release;
-        use super::*;
-        use crate::macos::{Requirement, check_app};
-
-        #[test]
-        #[ignore = "signs apps with rcodesign and makes disk images with hdiutil"]
-        fn mac_update_installs_only_a_newer_app_signed_like_the_running_one() {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path();
-            let ours = identity(root, "ours");
-            let theirs = identity(root, "theirs");
-            let installed = root.join("Applications/earwig.app");
-            app(&installed, "0.1.0", &ours, |_| {});
-            let requirement = Requirement::of(&installed).unwrap();
-            let was = Version::parse("0.1.0").unwrap();
-            let next = Version::parse("0.1.1").unwrap();
-            let running = Running::on_disk(&installed, &was);
-            let work = root.join("work");
-            let intact = |version: &str| {
-                assert_eq!(
-                    check_app(&installed, &requirement),
-                    Ok(Some(version.to_owned()))
-                );
-                let apps: Vec<_> = fs::read_dir(root.join("Applications"))
-                    .unwrap()
-                    .map(|entry| entry.unwrap().file_name())
-                    .collect();
-                assert_eq!(apps, ["earwig.app"]);
-                assert!(
-                    !macos::mounted(&work.join("mount")),
-                    "the image is still attached"
-                );
-            };
-
-            for (name, version, identity, why) in [
-                // The same identifier, another identity.
-                ("theirs", "0.1.1", &theirs, "not signed like this one"),
-                ("older", "0.0.9", &ours, "not newer than this one"),
-                ("other", "0.1.2", &ours, "not 0.1.1"),
-            ] {
-                let image = image(root, name, version, identity, |_| {});
-                let err = macos::install(&image, &next, &running, &work).unwrap_err();
-                assert!(err.to_string().contains(why), "{name}: {err}");
-                intact("0.1.0");
-            }
-            let altered = image(root, "altered", "0.1.1", &ours, |app| {
-                fs::write(app.join("Contents/MacOS/extra"), "after signing").unwrap();
-            });
-            let err = macos::install(&altered, &next, &running, &work).unwrap_err();
-            assert!(
-                err.to_string().contains("not signed like this one"),
-                "{err}"
-            );
-            intact("0.1.0");
-
-            // Through the feed: changed on the way it fails its digest; as
-            // released it goes in, and the old app is gone.
-            let good = fs::read(image(root, "good", "0.1.1", &ours, |_| {})).unwrap();
-            let sha256 = hex::encode(Sha256::digest(&good));
-            let mut tampered = good.clone();
-            let middle = tampered.len() / 2;
-            tampered[middle] ^= 1;
-            for (served, as_released) in [(tampered, false), (good, true)] {
-                let size = served.len();
-                let feed = Feed::start(|url| {
-                    vec![
-                        (
-                            format!("/repos/{REPO}/releases/latest"),
-                            release(url, "0.1.1", &sha256, size)
-                                .to_string()
-                                .into_bytes(),
-                        ),
-                        (
-                            format!("/{REPO}/releases/download/v0.1.1/{}", asset_name(&next)),
-                            served,
-                        ),
-                    ]
-                });
-                let updates = feed.updates("0.1.0", root);
-                let offer = updates.check().unwrap().unwrap();
-                let lock = updates.lock().unwrap().unwrap();
-                let download = updates.download(&lock, &offer, &mut |_, _| {});
-                if !as_released {
-                    assert!(
-                        matches!(download, Err(UpdateError::Checksum)),
-                        "{download:?}"
-                    );
-                    intact("0.1.0");
-                    continue;
-                }
-                let app =
-                    macos::install(&download.unwrap(), &offer.version, &running, &work).unwrap();
-                assert_eq!(app, installed);
-                intact("0.1.1");
-            }
-        }
-
-        /// A throwaway signing identity: its certificate and key.
-        fn identity(root: &Path, name: &str) -> [PathBuf; 2] {
-            let base = root.join(name);
-            run(Command::new("rcodesign")
-                .args(["generate-self-signed-certificate", "--person-name"])
-                .arg(format!("earwig test {name}"))
-                .arg("--pem-filename")
-                .arg(&base));
-            [base.with_extension("crt"), base.with_extension("key")]
-        }
-
-        /// earwig.app `version` at `path`, signed by `identity`, then `alter`ed.
-        fn app(path: &Path, version: &str, identity: &[PathBuf; 2], alter: impl FnOnce(&Path)) {
-            let exe = path.join("Contents/MacOS/earwig");
-            fs::create_dir_all(exe.parent().unwrap()).unwrap();
-            // Any Mach-O does; this one is small.
-            fs::copy("/usr/bin/true", &exe).unwrap();
-            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
-            fs::write(
-                path.join("Contents/Info.plist"),
-                format!(
-                    r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>io.github.adeci.earwig</string>
-<key>CFBundleExecutable</key><string>earwig</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>{version}</string>
-<key>CFBundleVersion</key><string>{version}</string>
-</dict></plist>
-"#
-                ),
-            )
-            .unwrap();
-            run(Command::new("rcodesign")
-                .arg("sign")
-                .arg("--pem-file")
-                .arg(&identity[0])
-                .arg("--pem-file")
-                .arg(&identity[1])
-                .args(["--code-signature-flags", "runtime"])
-                .arg(path));
-            alter(path);
-        }
-
-        /// A disk image of `app(version, identity, alter)` beside a link to
-        /// Applications, as releases are.
-        fn image(
-            root: &Path,
-            name: &str,
-            version: &str,
-            identity: &[PathBuf; 2],
-            alter: impl FnOnce(&Path),
-        ) -> PathBuf {
-            let folder = root.join(name);
-            app(&folder.join("earwig.app"), version, identity, alter);
-            std::os::unix::fs::symlink("/Applications", folder.join("Applications")).unwrap();
-            let dmg = root.join(format!("{name}.dmg"));
-            run(Command::new("/usr/bin/hdiutil")
-                .args(["create", "-quiet", "-volname", "earwig", "-fs", "HFS+"])
-                .args(["-format", "UDZO", "-srcfolder"])
-                .arg(&folder)
-                .arg(&dmg));
-            dmg
-        }
-
-        fn run(command: &mut Command) {
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{command:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
     }
 }

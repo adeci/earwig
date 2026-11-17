@@ -35,7 +35,7 @@ The Windows release packages (the installer and the portable zip) and the
 Mac app from the DMG look for a newer earwig a minute after they start, then
 once a day. That is one request to GitHub's API,
 `https://api.github.com/repos/adeci/earwig/releases/latest` (a pre-release
-such as `0.1.0-rc.1` asks for `…/releases` and takes the newest), with
+such as `x.y.z-rc.1` asks for `…/releases` and takes the newest), with
 earwig's version in its User-Agent; nothing else is sent. **Check for
 updates** in Settings → General turns it off, as does:
 
@@ -45,22 +45,27 @@ check = false
 ```
 
 A newer release puts **Update to …** in the tray and at the bottom of the
-settings window; `earwig update` installs it from a terminal, `earwig update
---check` only asks. earwig downloads this system's file of the release over
-HTTPS from where GitHub lists it, no more bytes than GitHub lists and within
-30 minutes, and keeps it only if its SHA-256 matches the digest GitHub took
-when it was uploaded. An older release is never installed. Then:
+settings window; clicking it installs the release. From a terminal,
+`earwig update` installs it and `earwig update --check` only asks. earwig
+downloads this system's file of the release over HTTPS from where GitHub
+lists it, no more bytes than GitHub lists and within 30 minutes, and keeps it
+only if its SHA-256 matches the digest GitHub took when it was uploaded. An
+older release is never installed. Then:
 
 - **Windows**: a signed earwig runs the installer only if Windows finds its
   Authenticode signature valid and it comes from earwig's own publisher: a
   certificate of the same Artifact Signing certificate profile (the EKU
   under 1.3.6.1.4.1.311.97 that every day's new certificate carries),
-  chaining to the same root certificate as earwig's own signature. An
-  unsigned earwig, from before the releases were signed or built from
-  source, takes the installer on its SHA-256 alone. The installer runs
-  without a window. It stops earwig, replaces it and starts it again;
-  **Start at sign-in** stays as it was. If the installer fails it starts
-  earwig again, but files it had already replaced stay replaced.
+  chaining to the same root certificate as earwig's own signature. If the
+  installer is not signed by earwig's own publisher (as after the publisher's
+  certificate identity changes), or Windows cannot reach the certificate
+  authority to check that a certificate was not revoked, earwig refuses the
+  update and says why; download the installer from the release page and run
+  it yourself. An unsigned earwig, one packaged from source outside CI, takes
+  the installer on its SHA-256 alone. The installer runs without a window. It
+  stops earwig, replaces it and starts it again; **Start at sign-in** stays
+  as it was. If the installer fails it starts earwig again, but files it had
+  already replaced stay replaced.
 - **macOS**: the earwig.app in the disk image must be validly signed, all of
   it and strictly, so that it meets the running app's own designated
   requirement (the same app and Developer ID team), and be the newer version.

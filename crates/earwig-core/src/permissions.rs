@@ -58,15 +58,16 @@ pub fn check() -> Vec<PermissionStatus> {
     #[cfg(target_os = "macos")]
     {
         use crate::macos;
-        let answered = |answer: Option<bool>| match answer {
-            Some(true) => Access::Granted,
-            Some(false) => Access::Denied,
-            None => Access::NotAsked,
+        // Before macOS 14 there is no asking, and no microphone for earwig.
+        let microphone = match macos::microphone_allowed() {
+            Ok(Some(true)) => Access::Granted,
+            Ok(None) => Access::NotAsked,
+            Ok(Some(false)) | Err(_) => Access::Denied,
         };
         vec![
             PermissionStatus {
                 permission: Permission::Microphone,
-                access: answered(macos::microphone_allowed()),
+                access: microphone,
             },
             PermissionStatus {
                 permission: Permission::Accessibility,
@@ -137,12 +138,13 @@ pub fn ask(permission: Permission) {
         use crate::macos;
         match permission {
             Permission::Microphone => match macos::microphone_allowed() {
-                Some(true) => {}
-                Some(false) => {
+                Ok(Some(true)) => {}
+                Ok(Some(false)) => {
                     forget(permission);
                     macos::request_microphone();
                 }
-                None => macos::request_microphone(),
+                Ok(None) => macos::request_microphone(),
+                Err(e) => log::error!("{e}"),
             },
             Permission::Accessibility => {
                 if !macos::accessibility_allowed() {

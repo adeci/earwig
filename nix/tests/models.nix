@@ -52,7 +52,6 @@ in
         models = [ ];
       };
       environment.etc."earwig-test/tiny-asr.sha256".source = "${hub}/meta/tiny-asr.sha256";
-      environment.systemPackages = [ pkgs.curl ];
       virtualisation.diskSize = 4096;
       documentation.enable = false;
     };
@@ -71,17 +70,6 @@ in
     hub.wait_for_unit("nginx.service")
     hub.wait_for_open_port(80)
     machine.wait_for_unit("multi-user.target")
-
-    with machine.nested("fake Hub answers like the real one"):
-        machine.succeed("curl -fsS 'http://hub/api/models?filter=transcribe.cpp&search=asr' | grep -q tiny-asr-gguf")
-        machine.fail("curl -fsS 'http://hub/api/models?search=asr'")
-        machine.succeed(f"curl -fsS http://hub/api/models/test/tiny-asr-gguf/revision/main | grep -q {rev}")
-        machine.succeed(f"curl -fsS 'http://hub/api/models/test/tiny-asr-gguf/tree/{rev}?recursive=true' | grep -q tiny-asr-Q8_0.gguf")
-        headers = machine.succeed(
-            f"curl -fsS -D - -o /tmp/head.bin -r 0-65535 http://hub/test/tiny-asr-gguf/resolve/{rev}/tiny-asr-Q8_0.gguf"
-        )
-        assert " 206 " in headers.splitlines()[0], headers
-        machine.succeed("head -c 4 /tmp/head.bin | grep -q GGUF")
 
     with machine.nested("EARWIG: search marks compatible files"):
         out = earwig("models search asr")

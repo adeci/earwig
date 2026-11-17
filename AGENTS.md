@@ -7,7 +7,8 @@ overlay and settings window, transcribe.cpp for speech. NixOS first.
 ## Layout
 
 - `crates/earwig-core`: everything but pixels (config, controller, audio,
-  models, insertion, hotkeys, control socket). No GPUI, so tests are fast.
+  models, insertion, hotkeys, control socket, updates). No GPUI, so tests are
+  fast.
 - `crates/earwig-keys`: the hotkey on its own: parse and check it, watch the
   keyboard (evdev, an event tap, a keyboard hook) and record a new one.
 - `crates/earwig-transcribe`: the transcribe.cpp `EngineFactory` (GGUF,
@@ -18,23 +19,21 @@ overlay and settings window, transcribe.cpp for speech. NixOS first.
 - `crates/earwig-core/models.toml`: the curated model catalog.
 - `nix/`: package, NixOS module, model fetchers, dev shells, treefmt, VM tests,
   the release effect; `nix/darwin/`: earwig.app and the nix-darwin module.
-- `tests/fixtures/`: speech clips for engine and VM tests.
-- `packaging/`: `github-release.sh` makes a tag's GitHub release (a pre-release
-  for a tag like `v0.1.0-rc.1`); `macos/` signs earwig.app with the Developer ID
-  into a notarized DMG, on Linux (`nix develop .#release` has the tools);
-  `windows/` the portable zip, the installer and winget manifests, signed by
-  `sign.ps1` (Artifact Signing on a tag, a throwaway test publisher in CI);
-  `tools.psd1` pins every tool Windows CI downloads (version, URL, SHA-256).
-- CI is the flake's `checks` (package, clippy, tests, treefmt; VM tests on
-  x86_64-linux), built by nixbot on Linux and a Mac. A pushed `v*` tag gets its
-  GitHub release and the Mac DMG from the `release` effect (`herculesCI` in
-  `flake.nix`) once its commit built green. `.github/workflows/ci.yml` builds,
-  tests and packages Windows, which Nix can't, and attaches the packages to the
-  release (making it first if nixbot hasn't yet), in separate jobs: `build`
-  runs cargo but can't sign, `package` signs but runs no cargo, `test` and
-  `release` (the only one that may write to the repository) come after. Of
-  actions it uses only GitHub's own, pinned to commits. Release assets carry
-  the workspace version, so a release's tag is `v` and that version.
+- `tests/fixtures/`: speech clips for the tests.
+- `packaging/`: `github-release.sh` makes a tag's GitHub release; `macos/`
+  signs earwig.app with the Developer ID into a notarized DMG, on Linux
+  (`nix develop .#release` has the tools); `windows/` the portable zip, the
+  installer and winget manifests, signed by `sign.ps1`; `tools.psd1` pins
+  every tool Windows CI downloads.
+- CI is the flake's `checks` (package, clippy and tests on every system;
+  treefmt and VM tests on x86_64-linux), built by nixbot on Linux and a Mac. A
+  pushed `v*` tag gets its GitHub release and the Mac DMG from the `release`
+  effect (`herculesCI` in `flake.nix`) once its commit built green.
+  `.github/workflows/ci.yml` builds, tests and packages Windows, which Nix
+  can't, and attaches the packages to the release; its header says how its
+  jobs keep building apart from signing. Release assets carry the workspace
+  version, so a release's tag is `v` and that version; the release effect and
+  `ci.yml` stop at any other `v*` tag.
 
 Per-OS code lives in `linux`, `macos` and `windows` modules behind one
 signature each: `audio/`, `desktop/`, `insert/` and `paths/` in earwig-core,
@@ -54,7 +53,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 nix fmt
 nix flake check -L                                # package, clippy, tests, VM tests (KVM)
-nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome kde cosmic models cpus
+nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome kde cosmic models cpus uinput
 ```
 
 ## Rules

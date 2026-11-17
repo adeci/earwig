@@ -9,7 +9,8 @@ use std::process::{Command, Stdio};
 
 use semver::Version;
 
-use super::{Mode, UpdateError, developer_id_requirement, mac_mode, settle, staged, swap};
+use super::bundle::{developer_id_requirement, mac_mode, settle, staged, swap};
+use super::{Mode, UpdateError};
 use crate::macos::{self as mac, Requirement};
 
 /// The running earwig.app and what it may do; `None` when it never updates.
@@ -91,12 +92,13 @@ pub(super) fn install(
         running.requirement.text()
     );
     let mount = work.join("mount");
-    fs::create_dir_all(&mount)?;
+    fs::create_dir_all(&mount)
+        .map_err(|e| UpdateError::io(e, format!("creating {}", mount.display())))?;
     let image = Image::attach(dmg, &mount)?;
     let app = mount.join("earwig.app");
     check(&app, version, running)?;
     let staged = staged(running.app);
-    remove(&staged)?;
+    remove(&staged).map_err(|e| UpdateError::io(e, format!("removing {}", staged.display())))?;
     if let Err(e) = run(Command::new("/usr/bin/ditto").arg(&app).arg(&staged)) {
         let _ = fs::remove_dir_all(&staged);
         return Err(UpdateError::Install(format!(
@@ -225,5 +227,189 @@ pub(super) fn mounted(dir: &Path) -> bool {
     match (fs::metadata(dir), dir.parent().map(fs::metadata)) {
         (Ok(dir), Some(Ok(parent))) => dir.dev() != parent.dev(),
         _ => false,
+    }
+}
+
+/// The Mac's update end to end, but for the program running it (a test,
+/// not an app): apps signed with throwaway identities and the hardened
+/// runtime like the release's, in disk images from hdiutil beside a link
+/// to Applications. On a Mac:
+/// `nix shell nixpkgs#rcodesign -c cargo test -p earwig-core mac_update -- --ignored`
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use sha2::{Digest as _, Sha256};
+
+    use super::super::testing::{Feed, release};
+    use super::super::{REPO, asset_name, macos};
+    use super::*;
+    use crate::macos::check_app;
+
+    #[test]
+    #[ignore = "signs apps with rcodesign and makes disk images with hdiutil"]
+    fn mac_update_installs_only_a_newer_app_signed_like_the_running_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ours = identity(root, "ours");
+        let theirs = identity(root, "theirs");
+        let installed = root.join("Applications/earwig.app");
+        app(&installed, "0.1.0", &ours, |_| {});
+        let requirement = Requirement::of(&installed).unwrap();
+        let was = Version::parse("0.1.0").unwrap();
+        let next = Version::parse("0.1.1").unwrap();
+        let running = Running::on_disk(&installed, &was);
+        let work = root.join("work");
+        let intact = |version: &str| {
+            assert_eq!(
+                check_app(&installed, &requirement),
+                Ok(Some(version.to_owned()))
+            );
+            let apps: Vec<_> = fs::read_dir(root.join("Applications"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(apps, ["earwig.app"]);
+            assert!(
+                !macos::mounted(&work.join("mount")),
+                "the image is still attached"
+            );
+        };
+
+        for (name, version, identity, why) in [
+            // The same identifier, another identity.
+            ("theirs", "0.1.1", &theirs, "not signed like this one"),
+            ("older", "0.0.9", &ours, "not newer than this one"),
+            ("other", "0.1.2", &ours, "not 0.1.1"),
+        ] {
+            let image = image(root, name, version, identity, |_| {});
+            let err = macos::install(&image, &next, &running, &work).unwrap_err();
+            assert!(err.to_string().contains(why), "{name}: {err}");
+            intact("0.1.0");
+        }
+        let altered = image(root, "altered", "0.1.1", &ours, |app| {
+            fs::write(app.join("Contents/MacOS/extra"), "after signing").unwrap();
+        });
+        let err = macos::install(&altered, &next, &running, &work).unwrap_err();
+        assert!(
+            err.to_string().contains("not signed like this one"),
+            "{err}"
+        );
+        intact("0.1.0");
+
+        // Through the feed: changed on the way it fails its digest; as
+        // released it goes in, and the old app is gone.
+        let good = fs::read(image(root, "good", "0.1.1", &ours, |_| {})).unwrap();
+        let sha256 = hex::encode(Sha256::digest(&good));
+        let mut tampered = good.clone();
+        let middle = tampered.len() / 2;
+        tampered[middle] ^= 1;
+        for (served, as_released) in [(tampered, false), (good, true)] {
+            let size = served.len();
+            let feed = Feed::start(|url| {
+                vec![
+                    (
+                        format!("/repos/{REPO}/releases/latest"),
+                        release(url, "0.1.1", &sha256, size)
+                            .to_string()
+                            .into_bytes(),
+                    ),
+                    (
+                        format!("/{REPO}/releases/download/v0.1.1/{}", asset_name(&next)),
+                        served,
+                    ),
+                ]
+            });
+            let updates = feed.updates("0.1.0", root);
+            let offer = updates.check().unwrap().unwrap();
+            let lock = updates.lock().unwrap().unwrap();
+            let download = updates.download(&lock, &offer, &mut |_, _| {});
+            if !as_released {
+                assert!(
+                    matches!(download, Err(UpdateError::Checksum)),
+                    "{download:?}"
+                );
+                intact("0.1.0");
+                continue;
+            }
+            let app = macos::install(&download.unwrap(), &offer.version, &running, &work).unwrap();
+            assert_eq!(app, installed);
+            intact("0.1.1");
+        }
+    }
+
+    /// A throwaway signing identity: its certificate and key.
+    fn identity(root: &Path, name: &str) -> [PathBuf; 2] {
+        let base = root.join(name);
+        run(Command::new("rcodesign")
+            .args(["generate-self-signed-certificate", "--person-name"])
+            .arg(format!("earwig test {name}"))
+            .arg("--pem-filename")
+            .arg(&base));
+        [base.with_extension("crt"), base.with_extension("key")]
+    }
+
+    /// earwig.app `version` at `path`, signed by `identity`, then `alter`ed.
+    fn app(path: &Path, version: &str, identity: &[PathBuf; 2], alter: impl FnOnce(&Path)) {
+        let exe = path.join("Contents/MacOS/earwig");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        // Any Mach-O does; this one is small.
+        fs::copy("/usr/bin/true", &exe).unwrap();
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+                path.join("Contents/Info.plist"),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.adeci.earwig</string>
+<key>CFBundleExecutable</key><string>earwig</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+<key>CFBundleVersion</key><string>{version}</string>
+</dict></plist>
+"#
+                ),
+            )
+            .unwrap();
+        run(Command::new("rcodesign")
+            .arg("sign")
+            .arg("--pem-file")
+            .arg(&identity[0])
+            .arg("--pem-file")
+            .arg(&identity[1])
+            .args(["--code-signature-flags", "runtime"])
+            .arg(path));
+        alter(path);
+    }
+
+    /// A disk image of `app(version, identity, alter)` beside a link to
+    /// Applications, as releases are.
+    fn image(
+        root: &Path,
+        name: &str,
+        version: &str,
+        identity: &[PathBuf; 2],
+        alter: impl FnOnce(&Path),
+    ) -> PathBuf {
+        let folder = root.join(name);
+        app(&folder.join("earwig.app"), version, identity, alter);
+        std::os::unix::fs::symlink("/Applications", folder.join("Applications")).unwrap();
+        let dmg = root.join(format!("{name}.dmg"));
+        run(Command::new("/usr/bin/hdiutil")
+            .args(["create", "-quiet", "-volname", "earwig", "-fs", "HFS+"])
+            .args(["-format", "UDZO", "-srcfolder"])
+            .arg(&folder)
+            .arg(&dmg));
+        dmg
+    }
+
+    fn run(command: &mut Command) {
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

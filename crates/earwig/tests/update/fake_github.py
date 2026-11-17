@@ -4,10 +4,9 @@ instead of GitHub (EARWIG_UPDATE_TEST_FEED=http://127.0.0.1:<PORT> when they
 are compiled).
 
 Usage: fake_github.py --port PORT --version VERSION --file FILE [--name NAME]
-                      [--wrong-digest] [--seconds SECONDS]
+                      [--wrong-digest]
   --name           the file's name in the release (FILE's own by default)
   --wrong-digest   list a SHA-256 that does not match the file
-  --seconds        spread the download over this long
 """
 
 import argparse
@@ -15,7 +14,6 @@ import hashlib
 import http.server
 import json
 import sys
-import time
 from pathlib import Path
 
 REPO = "adeci/earwig"
@@ -26,7 +24,6 @@ parser.add_argument("--version", required=True)
 parser.add_argument("--file", type=Path, required=True)
 parser.add_argument("--name")
 parser.add_argument("--wrong-digest", action="store_true")
-parser.add_argument("--seconds", type=float, default=0)
 args = parser.parse_args()
 
 data = args.file.read_bytes()
@@ -70,11 +67,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        chunks = [body[i : i + 65536] for i in range(0, len(body), 65536)] or [b""]
-        for chunk in chunks:
-            self.wfile.write(chunk)
-            if args.seconds and kind != "application/json":
-                time.sleep(args.seconds / len(chunks))
+        self.wfile.write(body)
 
     def log_message(self, format, *rest):
         print(format % rest, file=sys.stderr, flush=True)

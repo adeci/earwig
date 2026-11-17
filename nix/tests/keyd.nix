@@ -34,6 +34,7 @@ in
   testScript = ''
     ${common.prelude}
 
+    import time
     from typing import Any
 
 

@@ -1,3 +1,5 @@
+import time
+
 BUS = "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
 TOKEN = "/home/alice/.local/state/earwig/remote-desktop.token"
 PORTAL_KDE = "org.freedesktop.impl.portal.desktop.kde"
@@ -147,8 +149,8 @@ with subtest("EARWIG: RemoteDesktop asks once; accepted, a restore token is save
 
 with subtest("EARWIG: GlobalShortcuts asks to bind the default shortcut; accepted"):
     accept_dialog("Global Shortcuts Requested", "02-global-shortcuts-dialog")
-    # Only the daemon knows when the portal finished binding.
-    print(wait_log(r"portal shortcut dictate: .*Space", timeout=30))
+    st = wait_status(lambda s: s["hotkey"]["source"] == "portal", "the portal shortcut", timeout=30)
+    print(st["hotkey"])
 
 with subtest("EARWIG: status shows the portal paths"):
     st = status()
@@ -184,12 +186,11 @@ with subtest("EARWIG: dictation lands in Konsole through the terminal chord"):
     assert "^V" not in received, received
 
 with subtest("EARWIG: after a restart the restore token skips the dialog"):
-    since = log_lines()
     user("systemctl --user restart earwig.service")
     user_unit_active("earwig.service")
     st = wait_status(lambda s: s["insert_methods"], "insertion methods")
     assert st["insert_methods"] == ["portal-paste"], st
-    print(wait_log(r"portal shortcut dictate: .*Space", timeout=60, since=since))
+    wait_status(lambda s: s["hotkey"]["source"] == "portal", "the portal shortcut again", timeout=60)
     machine.sleep(10)
     assert not dialogs("Requested"), f"a consent dialog after restart: {windows()}"
     machine.screenshot("07-after-restart")

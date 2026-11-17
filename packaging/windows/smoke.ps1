@@ -1,11 +1,11 @@
-# The packaged earwig end to end on a desktop session (CI's windows runner):
-# the installer's version info; silent install; the installer and what it
-# installed signed as sign.ps1 signs; start as sign-in does with
-# EARWIG_AUDIO_FILE; a held and a tapped Ctrl+Space into Notepad through the
-# keyboard hook; the engine on other CPUs under Intel SDE ($env:SDE_PATH);
-# uninstall while running.
+# The packaged earwig end to end on a desktop session (CI's test job):
+# the installer's version info; silent install, with earwig's license and its
+# notices; the installer and what it installed signed as sign.ps1 signs; start
+# as sign-in does with EARWIG_AUDIO_FILE; a held and a tapped Ctrl+Space into
+# Notepad through the keyboard hook; the engine on other CPUs under Intel SDE
+# ($env:SDE_PATH); uninstall while running.
 #   pwsh packaging/windows/smoke.ps1   (after package.ps1)
-# Fails with ::error:: annotations; every wait is bounded.
+# Fails with ::error:: annotations, reports to the job summary; every wait is bounded.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = Resolve-Path "$PSScriptRoot\..\.."
@@ -46,7 +46,6 @@ public static class Desk
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
-    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr hwnd, StringBuilder text, int max);
     delegate bool EnumProc(IntPtr hwnd, IntPtr lparam);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lparam);
@@ -139,6 +138,12 @@ function Fail([string]$what) {
     Write-Host "::error title=smoke::$($what -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A')"
 }
 
+# Into the log and the job summary.
+function Report([string]$markdown) {
+    Write-Host $markdown
+    if ($env:GITHUB_STEP_SUMMARY) { "$markdown`n" | Add-Content $env:GITHUB_STEP_SUMMARY }
+}
+
 function Step([string]$name, [scriptblock]$body) {
     Write-Host "== $name"
     $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -212,6 +217,8 @@ function States([string]$file, [int]$from) {
         ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 4 }) -join ' '
 }
 
+Report '### Smoke test'
+
 # Windows shows the file version, digits only: the version without its pre-release suffix. Inno
 # Setup pads the version strings with spaces.
 Step 'installer version' {
@@ -219,7 +226,7 @@ Step 'installer version' {
     $file = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
     $text = $info.FileVersion.Trim()
     $product = $info.ProductVersion.Trim()
-    Write-Host "::notice title=installer version::$($setup.Name): file version $file ($text), product version $product"
+    Report "$($setup.Name): file version $file ($text), product version $product"
     if ($file -ne "$(($version -split '-')[0]).0" -or $text -ne $version -or $product -ne $version) {
         Fail "$($setup.Name) has file version $file ($text) and product version $product, not those of $version"
     }
@@ -231,6 +238,11 @@ Step 'install' {
     if ($p.ExitCode -ne 0) { Fail "the installer exited with $($p.ExitCode)" }
     $script:signIn = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').earwig
     if ($script:signIn -ne "`"$app\earwigw.exe`"") { Fail "start at sign-in is '$script:signIn'" }
+    # earwig's license and the notices of what comes with it, as package.ps1 puts them in the zip.
+    foreach ($notice in 'LICENSE', 'assets\fonts\LICENSE-IBM-Plex-Sans.txt', 'assets\cursors\LICENSE-Lucide.txt', 'packaging\windows\LICENSE-Vulkan-Loader.txt') {
+        $installed = "$app\$(Split-Path -Leaf $notice)"
+        if (-not (Test-Path $installed) -or (Get-FileHash $installed).Hash -ne (Get-FileHash "$root\$notice").Hash) { Fail "the installer did not install $notice as $installed" }
+    }
 }
 
 Step 'signatures' {
@@ -249,7 +261,8 @@ Step 'model' {
     }
     $list = Run $earwig @('models', 'list')
     if ($list.Out -notmatch '\*\s+parakeet-unified-en-0\.6b\s+.*installed') {
-        $download = Run $earwig @('models', 'download', 'parakeet-unified-en-0.6b') 900
+        # Well within the step's 10 minutes (ci.yml), which the rest of this test shares.
+        $download = Run $earwig @('models', 'download', 'parakeet-unified-en-0.6b') 420
         if ($download.Code -ne 0) { Fail "earwig models download: $($download.Err)" }
     }
 }
@@ -260,17 +273,18 @@ if ($env:SDE_PATH) {
     Step 'sde' {
         $hsw = Run $sde @('-hsw', '--', $earwig, 'transcribe', $clip) 300
         if ($hsw.Code -ne 0 -or $hsw.Out -notmatch $sentence) { Fail "on an emulated Haswell: exit $($hsw.Code) '$($hsw.Out)' $($hsw.Err)" }
-        $version = Run $sde @('-ivb', '--', $earwig, '--version') 120
+        $ivbVersion = Run $sde @('-ivb', '--', $earwig, '--version') 120
         $ivb = Run $sde @('-ivb', '--', $earwig, 'transcribe', $clip) 300
-        Write-Host "::notice title=Ivy Bridge (no AVX2)::earwig --version: exit $($version.Code) '$($version.Out)'%0Aearwig transcribe: exit $($ivb.Code) '$($ivb.Err -replace "`r?`n", ' ')'"
-        if ($ivb.Code -eq 0 -or $ivb.Err -notmatch 'lacks AVX2' -or "$($ivb.Out)$($ivb.Err)" -match 'SDE-ERROR') {
+        Report "Emulated Ivy Bridge (no AVX2): ``earwig --version`` exit $($ivbVersion.Code) ``$($ivbVersion.Out)``, ``earwig transcribe`` exit $($ivb.Code) ``$($ivb.Err -replace "`r?`n", ' ')``"
+        if ($ivb.Code -eq 0 -or $ivb.Err -notmatch 'this CPU lacks' -or "$($ivb.Out)$($ivb.Err)" -match 'SDE-ERROR') {
             Fail "on an emulated Ivy Bridge: exit $($ivb.Code) $($ivb.Err)"
         }
         # The daemon there starts and reports why the model can't load.
         $daemon = Start-Process $sde -ArgumentList '-ivb', '--', $earwig, 'daemon', '--headless' -WindowStyle Hidden -PassThru
         $failed = WaitFor { if ($daemon.HasExited) { 'exited' } else { $s = Status; if ($s.model.state -eq 'failed') { $s } } } 180
-        Write-Host "::notice title=Ivy Bridge daemon::$(if ($failed -eq 'exited') { "exited with $($daemon.ExitCode)" } else { $failed.model | ConvertTo-Json -Compress })"
-        if ($failed.model.message -notmatch 'lacks AVX2') { Fail "on an emulated Ivy Bridge the daemon: $failed $(Status | ConvertTo-Json -Compress -Depth 4)" }
+        $said = if ($failed -eq 'exited') { "exited with $($daemon.ExitCode)" } else { $failed.model | ConvertTo-Json -Compress }
+        Report "Its daemon: ``$said``"
+        if ($failed.model.message -notmatch 'this CPU lacks') { Fail "on an emulated Ivy Bridge the daemon: $failed $(Status | ConvertTo-Json -Compress -Depth 4)" }
         Run $earwig @('quit') | Out-Null
         if (-not (WaitFor { $daemon.HasExited } 60)) {
             Fail 'the emulated daemon did not quit'
@@ -353,6 +367,5 @@ Step 'uninstall while running' {
     }
 }
 
-$summary = ($script:timings.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value) s" }) -join ', '
-Write-Host "::notice title=smoke timings::$summary"
+Report "Timings: $(($script:timings.GetEnumerator() | ForEach-Object { "$($_.Key) $($_.Value) s" }) -join ', ')"
 if ($script:failures) { exit 1 }

@@ -49,7 +49,6 @@ pub(crate) fn spawn(
     incoming: flume::Receiver<Request>,
 ) -> io::Result<()> {
     let service = Service {
-        installable: updates.installable(),
         enabled: checks_enabled(&shared),
         updates,
         shared,
@@ -76,7 +75,6 @@ fn checks_enabled(shared: &Shared) -> bool {
 
 struct Service {
     updates: Updates,
-    installable: bool,
     shared: Arc<Shared>,
     /// For the install worker's reports.
     requests: flume::Sender<Request>,
@@ -174,7 +172,7 @@ impl Service {
                     Some(offer) => log::info!("earwig {} is out", offer.version),
                     None => log::info!("earwig {VERSION} is the newest"),
                 }
-                if self.machine.checked(offer, self.installable) {
+                if self.machine.checked(offer, self.updates.installable()) {
                     self.publish();
                 }
                 Ok(self.machine.state.clone())

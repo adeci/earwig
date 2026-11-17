@@ -13,9 +13,33 @@ use ureq::Agent;
 use super::{CancelToken, ModelError};
 
 const CHUNK: usize = 256 * 1024;
-/// Transfers that fail mid-way are resumed this many times per call.
+/// Transfers per call at most: the first, and the ones resuming after a break.
 const ATTEMPTS: u32 = 4;
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+
+/// The HTTP clients, with earwig's User-Agent and every status an answer:
+/// `api` for JSON and header ranges, bounded as a whole; `files` for
+/// downloads, which may take long but fail on a stalled connection.
+pub(crate) fn agents(https_only: bool) -> (Agent, Agent) {
+    let user_agent = concat!("earwig/", env!("CARGO_PKG_VERSION"));
+    let api = Agent::config_builder()
+        .user_agent(user_agent)
+        .https_only(https_only)
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .new_agent();
+    let files = Agent::config_builder()
+        .user_agent(user_agent)
+        .https_only(https_only)
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(Duration::from_secs(60)))
+        .build()
+        .new_agent();
+    (api, files)
+}
 
 pub(crate) struct Source<'a> {
     pub url: &'a str,
@@ -123,8 +147,8 @@ struct Part<'p> {
 }
 
 impl Part<'_> {
-    /// Hash what an earlier attempt left behind, then fetch the rest,
-    /// resuming a broken transfer up to [`ATTEMPTS`] times.
+    /// Hash what an earlier attempt left behind, then fetch the rest in at
+    /// most [`ATTEMPTS`] transfers, resuming after a break.
     fn complete(
         &mut self,
         agent: &Agent,
@@ -297,11 +321,11 @@ fn parse_content_range(v: &str) -> Option<(u64, Option<u64>)> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpStream;
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::test_server::{self, Request};
 
     /// How the fake server answers request number `n` (0-based).
     #[derive(Clone, Copy)]
@@ -323,45 +347,26 @@ mod tests {
     }
 
     fn serve(data: Vec<u8>, replies: Vec<Reply>) -> Server {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!(
-            "http://{}/o/r/resolve/c/model.gguf",
-            listener.local_addr().unwrap()
-        );
         let ranges = Arc::new(Mutex::new(Vec::new()));
         let seen = ranges.clone();
-        std::thread::spawn(move || {
-            for (n, conn) in listener.incoming().enumerate() {
-                let Ok(conn) = conn else { return };
+        let url = test_server::serve(|_| {
+            move |n: usize, request: &Request, conn: &mut TcpStream| {
+                seen.lock().unwrap().push(request.range.clone());
                 let reply = replies
                     .get(n)
                     .copied()
                     .unwrap_or(Reply::Ranged { limit: None });
-                let range = answer(conn, &data, reply);
-                seen.lock().unwrap().push(range);
+                answer(conn, &data, reply, request.range.as_deref());
             }
         });
-        Server { url, ranges }
+        Server {
+            url: format!("{url}/o/r/resolve/c/model.gguf"),
+            ranges,
+        }
     }
 
-    fn answer(mut conn: TcpStream, data: &[u8], reply: Reply) -> Option<String> {
-        let mut range = None;
-        let mut reader = BufReader::new(conn.try_clone().unwrap());
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let line = line.trim_end();
-            if line.is_empty() {
-                break;
-            }
-            if let Some((k, v)) = line.split_once(':')
-                && k.eq_ignore_ascii_case("range")
-            {
-                range = Some(v.trim().to_owned());
-            }
-        }
+    fn answer(conn: &mut TcpStream, data: &[u8], reply: Reply, range: Option<&str>) {
         let start = range
-            .as_deref()
             .and_then(|r| r.strip_prefix("bytes="))
             .and_then(|r| r.strip_suffix('-'))
             .map(|s| s.parse::<usize>().unwrap());
@@ -383,7 +388,7 @@ mod tests {
         if let Reply::Unsized { limit } = reply {
             let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
             let _ = conn.write_all(&data[..limit]);
-            return range;
+            return;
         }
         let _ = conn.write_all(format!("{head}Connection: close\r\n\r\n").as_bytes());
         match reply {
@@ -400,7 +405,6 @@ mod tests {
             }
             Reply::Unsized { .. } => unreachable!("answered above"),
         }
-        range
     }
 
     fn data() -> (Vec<u8>, String) {

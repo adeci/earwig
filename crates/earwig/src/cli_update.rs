@@ -5,7 +5,7 @@ use earwig_core::events::{Command, Event, UpdateState};
 use earwig_core::ipc;
 use earwig_core::update::{self, Installed, UpdateError, Updates};
 
-use crate::cli_models::ProgressLine;
+use crate::ProgressLine;
 
 pub fn run(check_only: bool) -> anyhow::Result<()> {
     match ipc::subscribe() {
@@ -85,6 +85,13 @@ fn follow(
         UpdateState::Downloading { .. } | UpdateState::Installing { .. }
     );
     let mut installing = None;
+    // Installing already: no event says so again.
+    if let UpdateState::Installing { version } = started {
+        if installer_takes_over(version) {
+            return Ok(());
+        }
+        installing = Some(version.clone());
+    }
     for event in events {
         let Event::Update { update } = event? else {
             continue;
@@ -100,9 +107,7 @@ fn follow(
             }
             UpdateState::Installing { version } if underway => {
                 line.finish();
-                println!("installing earwig {version}");
-                if cfg!(windows) {
-                    println!("the installer stops earwig, replaces it and starts it again");
+                if installer_takes_over(&version) {
                     return Ok(());
                 }
                 installing = Some(version);
@@ -123,6 +128,16 @@ fn follow(
         }
         None => anyhow::bail!("earwig quit before the update was done"),
     }
+}
+
+/// Says `version` is going in; true on Windows, where the installer takes it
+/// from here.
+fn installer_takes_over(version: &str) -> bool {
+    println!("installing earwig {version}");
+    if cfg!(windows) {
+        println!("the installer stops earwig, replaces it and starts it again");
+    }
+    cfg!(windows)
 }
 
 /// No daemon: check, download and install right here. Nothing was running,
@@ -163,4 +178,32 @@ fn alone(check_only: bool) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_update_is_done_once_it_installs_however_far_it_was_when_asked() {
+        let downloading = UpdateState::Downloading {
+            version: "0.2.0".into(),
+            downloaded: 0,
+            total: 0,
+        };
+        let installing = UpdateState::Installing {
+            version: "0.2.0".into(),
+        };
+        let event = |update: &UpdateState| -> anyhow::Result<Event> {
+            Ok(Event::Update {
+                update: update.clone(),
+            })
+        };
+        // Started here: it installs, then the daemon quits to start the new earwig.
+        assert!(follow([event(&installing)].into_iter(), &downloading).is_ok());
+        // Started from the tray and installing already: no event says so again.
+        assert!(follow(std::iter::empty(), &installing).is_ok());
+        // The daemon quit before anything went in.
+        assert!(follow(std::iter::empty(), &downloading).is_err());
+    }
 }

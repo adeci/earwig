@@ -24,4 +24,4 @@ pub(crate) use os::{
     Popup, TrayHandle, application, follow_accent, home_display, overlay_surface, spawn_tray,
 };
 #[cfg(target_os = "macos")]
-pub(crate) use os::{autostart, set_autostart, set_input_region};
+pub(crate) use os::{autostart, from_nix_store, set_autostart, set_input_region};

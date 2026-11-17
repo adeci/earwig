@@ -1,8 +1,8 @@
 # Test audio
 
-Synthetic speech for engine tests, `earwig transcribe`, and `EARWIG_AUDIO_FILE`
-in the VM tests. 16 kHz, mono, 16-bit PCM WAV, with 0.25 s of silence at each
-end.
+Synthetic speech for the spectrum test, `earwig transcribe`, the VM tests'
+virtual microphone and `EARWIG_AUDIO_FILE` in the Windows tests. 16 kHz, mono,
+16-bit PCM WAV, with 0.25 s of silence at each end.
 
 | File | Duration | Text |
 | --- | --- | --- |

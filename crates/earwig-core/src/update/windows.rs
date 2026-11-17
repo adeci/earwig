@@ -12,7 +12,8 @@ use std::ptr;
 
 use sha2::{Digest as _, Sha256};
 use windows_sys::Win32::Foundation::{
-    HANDLE, INVALID_HANDLE_VALUE, TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN,
+    CERT_E_REVOCATION_FAILURE, CRYPT_E_NO_REVOCATION_CHECK, CRYPT_E_REVOCATION_OFFLINE, HANDLE,
+    INVALID_HANDLE_VALUE, TRUST_E_NOSIGNATURE, TRUST_E_PROVIDER_UNKNOWN,
     TRUST_E_SUBJECT_FORM_UNKNOWN,
 };
 use windows_sys::Win32::Security::Cryptography::{
@@ -26,7 +27,8 @@ use windows_sys::Win32::Security::WinTrust::{
 };
 use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 
-use super::{Mode, Publisher, UpdateError};
+use super::publisher::{Publisher, Signature, judge};
+use super::{Mode, UpdateError};
 use crate::win32;
 
 /// Where the installer (`AppId` in packaging/windows/earwig.iss) records the
@@ -56,52 +58,12 @@ pub(super) fn detect() -> Option<Mode> {
     })
 }
 
-/// Refuses `installer` unless it is signed by this earwig's publisher
-/// ([`super::same_publisher`]), when this earwig is signed: an unsigned one, a
-/// release from before they were signed or a build, takes it on its SHA-256
-/// alone.
-pub(super) fn check_publisher(installer: &Path) -> Result<(), UpdateError> {
-    let refuse = |why: String| Err(UpdateError::Install(why));
-    let running = match signature(&std::env::current_exe()?) {
-        Signature::Unsigned => {
-            log::info!("this earwig is not signed, so the installer needn't be");
-            return Ok(());
-        }
-        Signature::Invalid(why) => {
-            return refuse(format!(
-                "this earwig's own signature is not valid ({why}), so it can't tell its \
-                 publisher's installers from others"
-            ));
-        }
-        Signature::Valid(publisher) => publisher,
-    };
-    let new = match signature(installer) {
-        Signature::Unsigned => {
-            return refuse(format!(
-                "the installer is not signed, unlike this earwig ({})",
-                running.name
-            ));
-        }
-        Signature::Invalid(why) => {
-            return refuse(format!("the installer's signature is not valid: {why}"));
-        }
-        Signature::Valid(publisher) => publisher,
-    };
-    super::same_publisher(&running, &new).map_err(UpdateError::Install)?;
-    log::info!(
-        "the installer is signed by {} under {}, as this earwig is",
-        new.name,
-        new.root()
-    );
-    Ok(())
-}
-
-/// What Windows makes of a file's Authenticode signature.
-enum Signature {
-    Unsigned,
-    /// One Windows rejects, and why.
-    Invalid(String),
-    Valid(Publisher),
+/// Refuses `installer` unless this earwig may run it ([`judge`]); `page` has
+/// it for an install by hand.
+pub(super) fn check_publisher(installer: &Path, page: &str) -> Result<(), UpdateError> {
+    let exe =
+        std::env::current_exe().map_err(|e| UpdateError::io(e, "finding this program".into()))?;
+    judge(signature(&exe), || signature(installer), page).map_err(UpdateError::Install)
 }
 
 /// What WinVerifyTrust makes of the signature of `path`, under Authenticode's
@@ -142,16 +104,7 @@ fn signature(path: &Path) -> Signature {
             || Signature::Invalid("Windows found no signer in it".into()),
             Signature::Valid,
         ),
-        // What Microsoft's example takes for no signature at all.
-        TRUST_E_NOSIGNATURE
-            if matches!(
-                error,
-                Some(TRUST_E_NOSIGNATURE | TRUST_E_SUBJECT_FORM_UNKNOWN | TRUST_E_PROVIDER_UNKNOWN)
-            ) =>
-        {
-            Signature::Unsigned
-        }
-        status => Signature::Invalid(describe(status)),
+        status => failed(status, error),
     };
     data.dwStateAction = WTD_STATEACTION_CLOSE;
     // SAFETY: frees what the verification kept in `data`.
@@ -163,6 +116,28 @@ fn signature(path: &Path) -> Signature {
         )
     };
     signature
+}
+
+/// What a verification that failed with `status`, the thread's last error
+/// then `error`, says about the file.
+fn failed(status: i32, error: Option<i32>) -> Signature {
+    match status {
+        // What Microsoft's example takes for no signature at all.
+        TRUST_E_NOSIGNATURE
+            if matches!(
+                error,
+                Some(TRUST_E_NOSIGNATURE | TRUST_E_SUBJECT_FORM_UNKNOWN | TRUST_E_PROVIDER_UNKNOWN)
+            ) =>
+        {
+            Signature::Unsigned
+        }
+        // No word on revocation, as when the certificate authority's servers
+        // are out of reach.
+        CERT_E_REVOCATION_FAILURE | CRYPT_E_REVOCATION_OFFLINE | CRYPT_E_NO_REVOCATION_CHECK => {
+            Signature::Unchecked
+        }
+        status => Signature::Invalid(describe(status)),
+    }
 }
 
 /// Who signed the file whose verification left `state`, by the chain
@@ -285,4 +260,29 @@ pub(super) fn launch(setup: &Path, log: &Path) -> io::Result<Child> {
         .stderr(Stdio::null())
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
         .spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::Foundation::CERT_E_REVOKED;
+
+    use super::*;
+
+    #[test]
+    fn no_word_on_revocation_is_unchecked_and_a_revoked_certificate_invalid() {
+        for status in [
+            CERT_E_REVOCATION_FAILURE,
+            CRYPT_E_REVOCATION_OFFLINE,
+            CRYPT_E_NO_REVOCATION_CHECK,
+        ] {
+            assert!(
+                matches!(failed(status, None), Signature::Unchecked),
+                "{status:#X}"
+            );
+        }
+        assert!(matches!(
+            failed(CERT_E_REVOKED, None),
+            Signature::Invalid(_)
+        ));
+    }
 }

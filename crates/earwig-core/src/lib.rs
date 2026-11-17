@@ -23,6 +23,8 @@ pub mod paths;
 pub mod permissions;
 pub mod session;
 pub mod spectrum;
+#[cfg(test)]
+mod test_server;
 pub mod update;
 #[cfg(windows)]
 mod win32;

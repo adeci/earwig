@@ -1,6 +1,7 @@
 //! The Linux backend driven by a real uinput keyboard, plugged in after the listener started.
-//! Skips without write access to `/dev/uinput`; set `EARWIG_KEYS_KEYD=1` where keyd holds the
-//! keyboards (the hotkey is then seen but not swallowed).
+//! Ignored by default: it needs write access to `/dev/uinput`, which a VM test gives it as root.
+//! Set `EARWIG_KEYS_KEYD=1` where keyd holds the keyboards (the hotkey is then seen but not
+//! swallowed).
 #![cfg(target_os = "linux")]
 
 use std::ffi::c_void;
@@ -53,9 +54,10 @@ struct Keyboard {
 }
 
 impl Keyboard {
-    fn plug_in() -> Option<Self> {
+    fn plug_in() -> Self {
         let flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC;
-        let fd = rustix::fs::open("/dev/uinput", flags, Mode::empty()).ok()?;
+        let fd =
+            rustix::fs::open("/dev/uinput", flags, Mode::empty()).expect("opening /dev/uinput");
         let set = |number: u8, value: u16| {
             let opcode = opcode::write::<i32>(b'U', number);
             // SAFETY: UI_SET_*BIT take the bit as the argument itself.
@@ -111,7 +113,7 @@ impl Keyboard {
         }
         // Long enough for udev and the listener (and keyd) to find it.
         thread::sleep(Duration::from_secs(2));
-        Some(Self { fd })
+        Self { fd }
     }
 
     fn key(&self, code: u16, down: bool) {
@@ -164,11 +166,8 @@ fn nothing<T: std::fmt::Debug>(rx: &Receiver<T>) {
 }
 
 #[test]
+#[ignore = "needs write access to /dev/uinput"]
 fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
-    if rustix::fs::access("/dev/uinput", rustix::fs::Access::WRITE_OK).is_err() {
-        eprintln!("skipped: no write access to /dev/uinput");
-        return;
-    }
     let keyd = std::env::var_os("EARWIG_KEYS_KEYD").is_some();
     let listener = Listener::new(Options::default());
     listener.set_hotkey(Some("Super+Space".parse().unwrap()));
@@ -177,7 +176,7 @@ fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
         let listener = listener.clone();
         thread::spawn(move || listener.run(move |event| tx.send(event).is_ok()))
     };
-    let keyboard = Keyboard::plug_in().unwrap();
+    let keyboard = Keyboard::plug_in();
 
     // A key with modifiers.
     keyboard.press(&[KEY_LEFTMETA, KEY_SPACE]);

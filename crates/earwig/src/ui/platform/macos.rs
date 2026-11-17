@@ -252,6 +252,18 @@ pub(crate) fn autostart() -> bool {
     launch_agent().is_some_and(|path| path.is_file())
 }
 
+/// earwig from the Nix store, which nix-darwin's module starts at login: a login item made here
+/// would name a store path, gone after a rebuild and a garbage collection.
+pub(crate) fn from_nix_store() -> bool {
+    std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .is_ok_and(|exe| in_nix_store(&exe))
+}
+
+fn in_nix_store(exe: &std::path::Path) -> bool {
+    exe.starts_with("/nix/store")
+}
+
 /// A launch agent running this binary's daemon, from the next login.
 pub(crate) fn set_autostart(enabled: bool) -> anyhow::Result<()> {
     use anyhow::Context as _;
@@ -298,4 +310,22 @@ pub(crate) fn set_autostart(enabled: bool) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     std::fs::write(&path, plist).with_context(|| format!("writing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::in_nix_store;
+
+    #[test]
+    fn only_an_earwig_in_the_nix_store_leaves_its_startup_to_nix() {
+        let app = "Applications/earwig.app/Contents/MacOS/earwig";
+        let under = |dir: &str| in_nix_store(&Path::new(dir).join(app));
+        assert!(under("/nix/store/abc-earwig-0.1.0"));
+        for elsewhere in ["/", "/Users/me", "/nix/store-backup"] {
+            assert!(!under(elsewhere), "{elsewhere}");
+        }
+        assert!(!in_nix_store(Path::new("/Users/me/.cargo/bin/earwig")));
+    }
 }

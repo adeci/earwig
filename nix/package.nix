@@ -99,12 +99,13 @@ let
     removeAttrs commonArgs [ "src" ]
     // {
       # The patched GPUI crates (vendor/) are path dependencies, which would get stubbed out
-      # like the workspace's own crates.
+      # like the workspace's own crates. Copied alone, so a change elsewhere in the source
+      # doesn't rebuild every dependency.
       dummySrc = craneLib.mkDummySrc {
         inherit src;
         extraDummyScript = ''
           rm -rf $out/vendor
-          cp -r --no-preserve=mode ${src}/vendor $out/vendor
+          cp -r --no-preserve=mode ${../vendor} $out/vendor
         '';
       };
     }
@@ -157,7 +158,7 @@ craneLib.buildPackage (
             cargoClippyExtraArgs = "--workspace --all-targets -- --deny warnings";
           }
         );
-        # Model tests stay #[ignore]d: the sandbox has no network and no model.
+        # The uinput test stays #[ignore]d: the sandbox has no /dev/uinput (vm-uinput runs it).
         tests = craneLib.cargoTest (
           commonArgs
           // {
@@ -167,6 +168,23 @@ craneLib.buildPackage (
           }
         );
       };
+      # earwig-keys' test with a real uinput keyboard, for vm-uinput to run as root.
+      uinputTest = craneLib.mkCargoDerivation (
+        commonArgs
+        // {
+          inherit cargoArtifacts;
+          pnameSuffix = "-uinput-test";
+          doInstallCargoArtifacts = false;
+          buildPhaseCargoCommand = ''
+            cargoWithProfile test --locked -p earwig-keys --test linux_uinput --no-run \
+              --message-format json-render-diagnostics >build.json
+          '';
+          installPhaseCommand = ''
+            install -Dm755 "$(${lib.getExe jq} -r 'select(.target.name == "linux_uinput") | .executable // empty' build.json)" \
+              $out/bin/earwig-keys-uinput-test
+          '';
+        }
+      );
     };
 
     meta = {

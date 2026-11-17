@@ -9,7 +9,7 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, v_flex};
 use gpui_kit::{AnyElement, App, IntoElement, ParentElement as _, SharedString, Styled as _, div};
 
-use super::models::percent;
+use super::percent;
 use crate::human_size_of;
 use crate::ui::UiState;
 
@@ -39,8 +39,7 @@ fn newer(update: &UpdateState, cx: &App) -> Option<AnyElement> {
         UpdateState::Available {
             version,
             installable: false,
-        } => release_link("release-page", format!("{version} is available"), version)
-            .into_any_element(),
+        } => release_link(format!("{version} is available"), version).into_any_element(),
         UpdateState::Downloading {
             version,
             downloaded,
@@ -73,7 +72,7 @@ fn newer(update: &UpdateState, cx: &App) -> Option<AnyElement> {
                     .text_color(cx.theme().danger)
                     .child(format!("Couldn't update: {reason}.")),
             )
-            .child(release_link("release-page", "Release page".into(), version))
+            .child(release_link("Release page".into(), version))
             .into_any_element(),
     })
 }
@@ -88,9 +87,9 @@ fn install_button(version: &str) -> Button {
 }
 
 /// `label`, opening the release page of `version`.
-fn release_link(id: &'static str, label: String, version: &str) -> Button {
+fn release_link(label: String, version: &str) -> Button {
     let page = update::release_page(version);
-    Button::new(id)
+    Button::new("release-page")
         .link()
         .xsmall()
         .label(SharedString::from(label))

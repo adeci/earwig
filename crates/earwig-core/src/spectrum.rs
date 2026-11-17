@@ -400,8 +400,8 @@ mod tests {
             .collect()
     }
 
-    /// The bands as they were before the analyzer learned noise floors: the
-    /// absolute gate alone, nothing taken off.
+    /// The bands under the absolute gate alone: no noise floor, nothing taken
+    /// off.
     #[allow(clippy::cast_possible_truncation)]
     fn with_absolute_gate(analyzer: &Analyzer) -> [f32; BANDS] {
         let gate = ((decibels(analyzer.level_power) - GATE) / GATE_KNEE).clamp(0., 1.);

@@ -165,13 +165,13 @@ impl Handle {
 
     /// Check for a newer release now, and wait for the answer (socket
     /// clients do).
-    pub fn check_for_updates(&self) -> Result<UpdateState, String> {
+    pub(crate) fn check_for_updates(&self) -> Result<UpdateState, String> {
         self.ask_updater(update::Request::Check)
     }
 
     /// Install the newer release the last check found; answers once it is
     /// underway, or why it won't be.
-    pub fn install_update(&self) -> Result<UpdateState, String> {
+    pub(crate) fn install_update(&self) -> Result<UpdateState, String> {
         self.ask_updater(update::Request::Install)
     }
 
@@ -733,7 +733,7 @@ impl Controller {
             Command::UseModel { model } => self.use_model(&model),
             Command::CheckForUpdates => self.update(update::Request::Check(None)),
             Command::Update => self.update(update::Request::Install(None)),
-            // Answered by the socket server; nothing to do here.
+            // The socket server answers Status and Subscribe; `run` ends on Quit.
             Command::Status | Command::Subscribe | Command::Quit => {}
         }
     }

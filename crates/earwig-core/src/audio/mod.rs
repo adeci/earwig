@@ -58,7 +58,7 @@ pub struct InputDevices {
 }
 
 /// The microphones there are now, plus `configured` under its own name when
-/// it is an older kind of name that still opens (an ALSA PCM on Linux).
+/// it opens but is not one of them (an ALSA PCM name on Linux).
 pub fn input_devices(configured: Option<&str>) -> anyhow::Result<InputDevices> {
     os::input_devices(configured)
 }

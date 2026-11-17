@@ -23,14 +23,14 @@ use std::{fs, io};
 const APP: &str = "earwig";
 
 /// The user's settings file, e.g. `$XDG_CONFIG_HOME/earwig/config.toml`.
-pub fn user_config() -> PathBuf {
+pub(crate) fn user_config() -> PathBuf {
     os::config_dir().join("config.toml")
 }
 
 /// Machine-wide settings files that exist, lowest precedence first (e.g.
 /// `earwig/config.toml` under `$XDG_CONFIG_DIRS`, whose spec lists the most
 /// important directory first).
-pub fn system_configs() -> Vec<PathBuf> {
+pub(crate) fn system_configs() -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = os::system_config_dirs()
         .into_iter()
         .map(|d| d.join("config.toml"))
@@ -47,7 +47,7 @@ pub fn models_dir() -> PathBuf {
 
 /// Read-only model stores, most important first (e.g. `earwig/models` in
 /// each `$XDG_DATA_DIRS` entry).
-pub fn system_model_dirs() -> Vec<PathBuf> {
+pub(crate) fn system_model_dirs() -> Vec<PathBuf> {
     os::system_data_dirs()
         .into_iter()
         .map(|d| d.join("models"))
@@ -66,7 +66,7 @@ pub fn state_dir() -> PathBuf {
 /// Downloaded updates while they are checked and installed: private to the
 /// user, and emptied once they are done. `None` without a home directory,
 /// where the state directory falls back to a temporary one others can use.
-pub fn update_dir() -> Option<PathBuf> {
+pub(crate) fn update_dir() -> Option<PathBuf> {
     dirs::home_dir()?;
     Some(os::state_dir().join("update"))
 }

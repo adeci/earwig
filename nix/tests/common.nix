@@ -87,10 +87,8 @@
   # Python helpers; the compositor-specific script comes after this.
   prelude = ''
     import json
-    import re
     import shlex
     import subprocess
-    import time
     from datetime import timedelta as td
 
     RUNTIME = "/run/user/1000"
@@ -108,30 +106,12 @@
         return machine.succeed("journalctl _UID=1000 _SYSTEMD_USER_UNIT=earwig.service -o cat --no-pager")
 
 
-    def log_lines() -> int:
-        return len(earwig_log().splitlines())
-
-
-    def wait_log(pattern: str, timeout: float = 60, since: int = 0) -> str:
-        """Wait for a daemon log line matching `pattern` after the first
-        `since` lines; returns the line."""
-        deadline = time.monotonic() + timeout
-        while True:
-            lines = earwig_log().splitlines()[since:]
-            for line in lines:
-                if re.search(pattern, line):
-                    return line
-            if time.monotonic() > deadline:
-                print("\n".join(lines[-60:]))
-                raise Exception(f"the daemon never logged {pattern!r}")
-            time.sleep(0.5)
-
-
     def play_clip() -> None:
-        """Speak the clip into the virtual microphone, in the background."""
+        """Speak the clip into the virtual microphone, in the background; returns once it plays."""
         machine.succeed(
             f"su - alice -c {shlex.quote(f'XDG_RUNTIME_DIR={RUNTIME} pw-play --target test_mic_in /etc/earwig-test/clip.wav')} >&2 &"
         )
+        machine.wait_until_succeeds("pgrep -x pw-play", timeout=td(seconds=30))
 
 
     def read_overlay() -> str:
@@ -278,6 +258,25 @@
         retry(done, timeout=td(seconds=timeout))
         assert result["event"] == "inserted", result
         return result
+
+
+    def cancel_mid_clip(start) -> None:
+        """Start a recording with `start()` while the clip plays and cancel it once its live
+        transcript has words, the engine mid-recording; then wait for idle and the clip's end."""
+        events = watch_events()
+        start()
+        play_clip()
+
+        def heard(_last_try: bool) -> bool:
+            return any(
+                e["event"] == "transcript" and (e["committed"] or e["tentative"])
+                for e in map(json.loads, machine.succeed(f"cat {events}").splitlines())
+            )
+
+        retry(heard, timeout=td(minutes=2))
+        as_alice("earwig cancel")
+        wait_status(lambda s: s["state"]["state"] == "idle", "idle after the cancel")
+        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
 
 
     def print_latency() -> None:

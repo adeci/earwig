@@ -50,8 +50,8 @@ pub(super) fn backends(
         InsertSetting::Auto | InsertSetting::Paste => Ok(vec![Box::new(Paste {
             terminals: config.terminals.clone(),
         })]),
-        InsertSetting::InputMethod | InsertSetting::Portal => {
-            bail!("insert method {:?} is Linux only; use paste", config.method)
+        method @ (InsertSetting::InputMethod | InsertSetting::Portal) => {
+            bail!(super::linux_only(method))
         }
     }
 }
@@ -73,7 +73,6 @@ impl Inserter for Paste {
         }
         let process = Process::of(window);
         if process.as_ref().is_some_and(Process::is_elevated) && !is_elevated(current()) {
-            set_clipboard(text)?;
             return Err(InsertError::NotApplicable(
                 "the focused app runs as administrator, which Windows keeps earwig from typing into"
                     .into(),
@@ -113,6 +112,11 @@ fn set_clipboard(text: &str) -> anyhow::Result<()> {
             return Err(std::io::Error::last_os_error()).context("allocating clipboard memory");
         }
         let target = GlobalLock(memory).cast::<u16>();
+        if target.is_null() {
+            let err = std::io::Error::last_os_error();
+            GlobalFree(memory);
+            return Err(err).context("locking clipboard memory");
+        }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), target, wide.len());
         GlobalUnlock(memory);
         if SetClipboardData(u32::from(CF_UNICODETEXT), memory as HANDLE).is_null() {

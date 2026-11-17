@@ -182,12 +182,13 @@ in
                 and "Remote Desktop" not in titles
                 and "Add Keyboard Shortcuts" not in titles
                 and machine.execute(f"test -s {TOKEN}")[0] == 0
-                # Only the daemon knows when the portal finished binding.
-                and "portal shortcut dictate" in daemon_log()
             )
 
         wait_for(accept_dialogs, "both portal consents", timeout=180)
-        st = wait_status(lambda s: s["insert_methods"], "insertion methods")
+        st = wait_status(
+            lambda s: s["insert_methods"] and s["hotkey"]["source"] == "portal",
+            "insertion methods and the portal shortcut",
+        )
         print(f"status: {st}")
         assert st["insert_methods"] == ["portal-paste"], st
         assert "portal" in st["hotkey_sources"], st

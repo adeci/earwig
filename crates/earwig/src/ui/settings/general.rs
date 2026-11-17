@@ -1,5 +1,5 @@
 //! General settings: hotkey, microphone, appearance, then typing (Linux) or
-//! startup, and updates where earwig updates itself.
+//! startup, updates where earwig updates itself, and macOS's permissions.
 
 use std::iter;
 use std::sync::PoisonError;
@@ -362,6 +362,10 @@ fn typing(cx: &App) -> SettingGroup {
 
 #[cfg(any(windows, target_os = "macos"))]
 fn startup() -> SettingGroup {
+    #[cfg(target_os = "macos")]
+    if crate::ui::platform::from_nix_store() {
+        return nix_startup();
+    }
     section(
         "Startup",
         None,
@@ -382,6 +386,56 @@ fn startup() -> SettingGroup {
             ),
         )],
     )
+}
+
+/// earwig from Nix starts with nix-darwin's module, so no switch; a login item made here before
+/// shows, with a way to remove it.
+#[cfg(target_os = "macos")]
+fn nix_startup() -> SettingGroup {
+    use gpui_kit::IntoElement as _;
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    const TITLE: &str = "Start at login";
+    let item = SettingItem::render(|options, _, cx| {
+        let stray = crate::ui::platform::autostart();
+        let control = if stray {
+            Button::new("remove-login-item")
+                .primary()
+                .small()
+                .label("Remove")
+                .tooltip(format!(
+                    "Deletes ~/Library/LaunchAgents/{}.plist",
+                    earwig_core::APP_ID
+                ))
+                .on_click(|_, _, cx| {
+                    if let Err(e) = crate::ui::platform::set_autostart(false) {
+                        log::error!("{e:#}");
+                    }
+                    cx.refresh_windows();
+                })
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
+        shortcut::row(
+            TITLE,
+            Some((
+                "Set by services.earwig in your nix-darwin configuration.".into(),
+                shortcut::Tone::Muted,
+            )),
+            control,
+            stray.then(|| {
+                (
+                    "A login item set here earlier starts a second earwig.".into(),
+                    shortcut::Tone::Warning,
+                )
+            }),
+            options.layout(),
+            cx,
+        )
+    })
+    .keywords([TITLE]);
+    section("Startup", None, [item])
 }
 
 fn updates(cx: &App) -> SettingGroup {
