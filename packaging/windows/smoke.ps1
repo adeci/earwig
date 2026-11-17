@@ -239,7 +239,7 @@ Step 'install' {
     $script:signIn = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').earwig
     if ($script:signIn -ne "`"$app\earwigw.exe`"") { Fail "start at sign-in is '$script:signIn'" }
     # earwig's license and the notices of what comes with it, as package.ps1 puts them in the zip.
-    foreach ($notice in 'LICENSE', 'assets\fonts\LICENSE-IBM-Plex-Sans.txt', 'assets\cursors\LICENSE-Lucide.txt', 'packaging\windows\LICENSE-Vulkan-Loader.txt') {
+    foreach ($notice in 'LICENSE', 'assets\fonts\LICENSE-IBM-Plex-Sans.txt', 'assets\cursors\LICENSE-Lucide.txt', 'packaging\windows\LICENSE-Vulkan-Loader.txt', 'packaging\THIRD-PARTY-NOTICES.txt') {
         $installed = "$app\$(Split-Path -Leaf $notice)"
         if (-not (Test-Path $installed) -or (Get-FileHash $installed).Hash -ne (Get-FileHash "$root\$notice").Hash) { Fail "the installer did not install $notice as $installed" }
     }

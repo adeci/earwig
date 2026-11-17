@@ -1,0 +1,25 @@
+Third-party notices
+====================
+
+earwig is built from the libraries below. Each block is one licence text and
+the libraries it covers. earwig's own licence is the separate file LICENSE.
+
+Where a crate ships no licence file, the standard text of its declared licence
+is used. option-ext and dwrote are Mozilla Public License 2.0, unmodified, and
+their source is the crate linked in that block.
+
+wayland-protocols-misc (Linux only) compiles protocols/server-decoration.xml,
+which names LGPL-2.1-or-later. The full text of that licence is the one
+reproduced for wayland-protocols-plasma.
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{else}} <https://crates.io/crates/{{{crate.name}}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

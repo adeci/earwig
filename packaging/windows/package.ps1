@@ -41,9 +41,10 @@ $stage = "$out\$name"
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
 # earwig's license and the notices of what comes with it: the fonts and icons inside its programs
-# (IBM Plex, Lucide) and the Vulkan loader beside them.
+# (IBM Plex, Lucide), the Vulkan loader beside them, and the libraries compiled in.
 Copy-Item "$dist\earwig.exe", "$dist\earwigw.exe", "$dist\vulkan-1.dll", LICENSE, README.md,
-    assets\fonts\LICENSE-IBM-Plex-Sans.txt, assets\cursors\LICENSE-Lucide.txt, packaging\windows\LICENSE-Vulkan-Loader.txt $stage
+    assets\fonts\LICENSE-IBM-Plex-Sans.txt, assets\cursors\LICENSE-Lucide.txt, packaging\windows\LICENSE-Vulkan-Loader.txt,
+    packaging\THIRD-PARTY-NOTICES.txt $stage
 
 # The DLLs a PE image imports (its import directory).
 function Imports([string]$path) {

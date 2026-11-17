@@ -119,6 +119,7 @@
         // lib.optionalAttrs (system == "x86_64-linux") {
           # Formatting is the same on every system: checked once.
           treefmt = treefmt.${system}.config.build.check self;
+          notices = pkgs.callPackage ./nix/notices.nix { craneLib = crane.mkLib pkgs; };
           vm-niri = vmTest ./nix/tests/niri.nix;
           vm-sway = vmTest ./nix/tests/sway.nix;
           vm-keyd = vmTest ./nix/tests/keyd.nix;

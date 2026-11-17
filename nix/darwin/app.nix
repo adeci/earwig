@@ -66,12 +66,14 @@ stdenvNoCC.mkDerivation {
       rsvg-convert -w $size -h $size ${../../assets/io.github.adeci.earwig.svg} -o icon_$size.png
     done
     png2icns $app/Contents/Resources/earwig.icns icon_*.png
-    # earwig's licence, and those of the fonts and icons compiled into it.
+    # earwig's licence, the fonts and icons compiled into it, and the libraries.
     install -m 644 ${../../LICENSE} $app/Contents/Resources/LICENSE
     install -m 644 ${../../assets/fonts/LICENSE-IBM-Plex-Sans.txt} \
       $app/Contents/Resources/LICENSE-IBM-Plex-Sans.txt
     install -m 644 ${../../assets/cursors/LICENSE-Lucide.txt} \
       $app/Contents/Resources/LICENSE-Lucide.txt
+    install -m 644 ${../../packaging/THIRD-PARTY-NOTICES.txt} \
+      $app/Contents/Resources/THIRD-PARTY-NOTICES.txt
 
     # No certificate: an ad-hoc signature, sealing Info.plist and resources, that designates
     # `identifier "${identifier}"` instead of this build's hash. The requirement compiled as

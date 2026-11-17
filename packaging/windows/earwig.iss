@@ -62,6 +62,7 @@ Source: "..\..\LICENSE"; DestDir: "{app}"
 Source: "..\..\assets\fonts\LICENSE-IBM-Plex-Sans.txt"; DestDir: "{app}"
 Source: "..\..\assets\cursors\LICENSE-Lucide.txt"; DestDir: "{app}"
 Source: "LICENSE-Vulkan-Loader.txt"; DestDir: "{app}"
+Source: "..\..\packaging\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"
 Source: "..\..\README.md"; DestDir: "{app}"
 
 [Icons]

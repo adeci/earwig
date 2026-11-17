@@ -1,0 +1,132 @@
+# Accepted licences, in priority order. A crate whose expression cannot be met
+# from this list fails generation. GPL-family licences are not here: the two
+# Linux Wayland crates below are the only exception, and only for themselves.
+accepted = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-3-Clause",
+  "BSD-2-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "MPL-2.0",
+  "CDLA-Permissive-2.0",
+]
+targets = [
+  "x86_64-pc-windows-msvc",
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Compiles KDE protocol XML. Most of it is LGPL-2.1-or-later; Linux builds only.
+[wayland-protocols-plasma]
+accepted = ["LGPL-2.1-or-later", "MIT-CMU"]
+
+[wayland-protocols-plasma.clarify]
+license = "MIT AND LGPL-2.1-or-later AND MIT-CMU AND BSD-3-Clause AND CC0-1.0"
+
+[[wayland-protocols-plasma.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+checksum = "1cb6f4dee8c649f175736380495f0af0c753c87f22d50931692968bb24bf2161"
+
+[[wayland-protocols-plasma.clarify.files]]
+path = "plasma-wayland-protocols/LICENSES/LGPL-2.1-or-later.txt"
+license = "LGPL-2.1-or-later"
+checksum = "1ccf09bf2f598308df4bed9cd8e9657dc5cd0973d2800318f2e241486e2edf3f"
+
+[[wayland-protocols-plasma.clarify.files]]
+path = "plasma-wayland-protocols/LICENSES/MIT-CMU.txt"
+license = "MIT-CMU"
+checksum = "577bcdce29392adc2d1eb2233d999589e2950bd0ea5aa5e6525568794571fead"
+
+[[wayland-protocols-plasma.clarify.files]]
+path = "plasma-wayland-protocols/LICENSES/MIT.txt"
+license = "MIT"
+checksum = "8f25018489d6fe0dec34a352314c38dc146247b7de65735790f4398a92afa84b"
+
+[[wayland-protocols-plasma.clarify.files]]
+path = "plasma-wayland-protocols/LICENSES/BSD-3-Clause.txt"
+license = "BSD-3-Clause"
+checksum = "e11af671c491efac2f94c1d752bea92f4308ca2450c7d11e582e4b48c40e4de1"
+
+[[wayland-protocols-plasma.clarify.files]]
+path = "plasma-wayland-protocols/LICENSES/CC0-1.0.txt"
+license = "CC0-1.0"
+checksum = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+# Linux only. protocols/server-decoration.xml is LGPL-2.1-or-later; the crate
+# ships the identifier, and the full text is the plasma crate's.
+[wayland-protocols-misc]
+accepted = ["LGPL-2.1-or-later"]
+
+[wayland-protocols-misc.clarify]
+license = "MIT AND LGPL-2.1-or-later"
+
+[[wayland-protocols-misc.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+checksum = "1cb6f4dee8c649f175736380495f0af0c753c87f22d50931692968bb24bf2161"
+
+[[wayland-protocols-misc.clarify.files]]
+path = "protocols/server-decoration.xml"
+license = "LGPL-2.1-or-later"
+checksum = "9e7e861869120a450e9c6b6a7bc8a0c459c4e7eacfe454959d8626155931abfb"
+start = "SPDX-FileCopyrightText: 2015 Martin Gräßlin"
+end = "SPDX-License-Identifier: LGPL-2.1-or-later"
+
+# Vendored C and C++ whose licence text is not the crate's own file.
+[transcribe-cpp-sys.clarify]
+license = "MIT"
+
+[[transcribe-cpp-sys.clarify.files]]
+path = "LICENSE"
+checksum = "86a53633b56f6b029d3cb42158bcc7aac0cdff898aceb13e83b93e368bbc4ac6"
+
+[[transcribe-cpp-sys.clarify.files]]
+path = "ggml/LICENSE"
+checksum = "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d"
+
+[[transcribe-cpp-sys.clarify.files]]
+path = "src/third_party/miniz/LICENSE"
+checksum = "6f20fa7672b00e2e975c291df737cf227addf3ad32e36fef3fe0f416e4664d3d"
+
+[[transcribe-cpp-sys.clarify.files]]
+path = "src/third_party/silero_vad/LICENSE"
+checksum = "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b"
+
+[[transcribe-cpp-sys.clarify.files]]
+path = "ggml/src/ggml-cpu/llamafile/sgemm.cpp"
+checksum = "cb2ef98a8a9b297a54554edb651807cb7aff61e71b2e6bc30e4e72d7e9934dec"
+start = "Copyright 2024 Mozilla Foundation"
+end = "SOFTWARE."
+
+# BoringSSL is Apache-2.0 in this version; the crate's LICENSE only points at the files.
+[ring.clarify]
+license = "Apache-2.0 AND ISC AND MIT"
+
+[[ring.clarify.files]]
+path = "LICENSE-BoringSSL"
+license = "Apache-2.0"
+checksum = "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d"
+
+[[ring.clarify.files]]
+path = "LICENSE-other-bits"
+license = "ISC"
+checksum = "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"
+
+[[ring.clarify.files]]
+path = "src/polyfill/once_cell/LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+
+[[ring.clarify.files]]
+path = "src/polyfill/once_cell/LICENSE-MIT"
+license = "MIT"
+checksum = "6ee2ed6c77710de911761acd5fc1ad1da00f476beb1a7ef27e78c2d1858deafc"

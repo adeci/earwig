@@ -24,10 +24,11 @@ overlay and settings window, transcribe.cpp for speech. NixOS first.
   signs earwig.app with the Developer ID into a notarized DMG, on Linux
   (`nix develop .#release` has the tools); `windows/` the portable zip, the
   installer and winget manifests, signed by `sign.ps1`; `tools.psd1` pins
-  every tool Windows CI downloads.
+  every tool Windows CI downloads. `packaging/notices/generate.sh` regenerates
+  `packaging/THIRD-PARTY-NOTICES.txt`; the `notices` check fails if it is stale.
 - CI is the flake's `checks` (package, clippy and tests on every system;
-  treefmt and VM tests on x86_64-linux), built by nixbot on Linux and a Mac. A
-  pushed `v*` tag gets its GitHub release and the Mac DMG from the `release`
+  treefmt, the notices check and VM tests on x86_64-linux), built by nixbot on
+  Linux and a Mac. A pushed `v*` tag gets its GitHub release and the Mac DMG from the `release`
   effect (`herculesCI` in `flake.nix`) once its commit built green.
   `.github/workflows/ci.yml` builds, tests and packages Windows, which Nix
   can't, and attaches the packages to the release; its header says how its
