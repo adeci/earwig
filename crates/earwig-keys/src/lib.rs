@@ -1,6 +1,7 @@
 //! One global hotkey: parse and check it, watch the keyboard for it, record a new one.
 //! A key with modifiers (`Super+Space`) is swallowed; modifiers alone (`RightCtrl`) pass through.
 //! Linux reads evdev directly, macOS uses an event tap, Windows a low-level keyboard hook.
+//! On Linux it also makes earwig's paste keyboard (uinput), which its own listener never reads.
 
 mod check;
 mod hotkey;
@@ -26,6 +27,8 @@ use windows as backend;
 pub use check::Check;
 pub use hotkey::{Hotkey, ParseError};
 pub use key::{Key, Modifier, Side};
+#[cfg(target_os = "linux")]
+pub use linux::{PasteKeyboard, modifier_held};
 pub use listener::{Blocking, Listener, Options, Status};
 pub use recorder::Recorded;
 

@@ -163,7 +163,7 @@ fn fallback(desktop: &str, portal: bool) -> Fallback {
     } else if is("kde") {
         works("System Settings → Keyboard → Shortcuts")
     } else if is("gnome") {
-        works("Settings → Keyboard → Shortcuts")
+        works("Settings → Apps → earwig → Global Shortcuts")
     } else {
         works("the desktop's keyboard settings")
     }
@@ -658,7 +658,8 @@ mod tests {
         assert_eq!(
             fallback("ubuntu:GNOME", true),
             Fallback::Text(
-                "Meanwhile, the shortcut set in Settings → Keyboard → Shortcuts works.".into()
+                "Meanwhile, the shortcut set in Settings → Apps → earwig → Global Shortcuts works."
+                    .into()
             )
         );
         let Fallback::Text(kde) = fallback("KDE", true) else {

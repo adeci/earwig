@@ -105,8 +105,13 @@ pub enum InsertMethod {
     InputMethod,
     /// Clipboard set, then one paste chord through a virtual keyboard.
     Paste,
-    /// Clipboard set through the RemoteDesktop portal, paste chord over libei.
+    /// The clipboard and the primary selection set without focus, then
+    /// Shift+Insert through the RemoteDesktop portal; GNOME and KDE without
+    /// keyboard access, once the user allowed it in the desktop's dialog.
     PortalPaste,
+    /// Clipboard set without focus, then one paste chord through earwig's own
+    /// keyboard (uinput); GNOME and KDE with keyboard access.
+    UinputPaste,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -140,7 +145,8 @@ pub enum ModelStatus {
 pub struct Status {
     pub state: DictationState,
     pub model: ModelStatus,
-    /// Insertion backends usable in this session, best first.
+    /// Insertion backends set up in this session, best first;
+    /// `portal-paste` types once the user allowed it.
     pub insert_methods: Vec<InsertMethod>,
     /// Hotkey sources running in this session: `socket` always, `keyboard`
     /// (earwig watching the key itself), `portal`.

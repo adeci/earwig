@@ -1,65 +1,13 @@
-import ast
 import re
-import time
 from pathlib import Path
-from typing import Any
 
-BUS = f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus"
 HOTKEY = "meta_l-spc"
+HOTKEY_KEYS = HOTKEY
 EXTENSION = "appindicatorsupport@rgcjonas.gmail.com"
 WATCHER = "org.kde.StatusNotifierWatcher"
 # The tray icon's blue, and its red while dictating (crates/earwig/src/ui/icon.rs).
 IDLE = (0x35, 0x84, 0xE4)
 DICTATING = (0xE5, 0x48, 0x4D)
-
-
-def user(cmd: str) -> str:
-    """Run `cmd` as alice with her session bus."""
-    return machine.succeed(f"runuser -u alice -- env XDG_RUNTIME_DIR={RUNTIME} {BUS} {cmd}")
-
-
-def shell_js(js: str) -> Any:
-    """Evaluate JavaScript in gnome-shell; Eval returns the value as JSON."""
-    out = user(
-        f"gdbus call --session -d org.gnome.Shell -o /org/gnome/Shell -m org.gnome.Shell.Eval {shlex.quote(js)}"
-    ).strip()
-    assert out.startswith("(true, "), out
-    return json.loads(ast.literal_eval(out[len("(true, ") : -1]))
-
-
-def shell_started(_last_try: bool) -> bool:
-    code, out = machine.execute(
-        f"runuser -u alice -- env {BUS} gdbus call --session -d org.gnome.Shell -o /org/gnome/Shell "
-        "-m org.gnome.Shell.Eval Main.layoutManager._startingUp"
-    )
-    return code == 0 and out.strip() == "(true, 'false')"
-
-
-def windows() -> list[dict[str, Any]]:
-    return shell_js(
-        "global.get_window_actors().map(a => a.meta_window)"
-        ".map(w => ({title: w.title, app: w.get_wm_class(), focus: w.has_focus()}))"
-    )
-
-
-def titles() -> list[str]:
-    return [w["title"] for w in windows()]
-
-
-def focused() -> str | None:
-    return shell_js("global.display.focus_window?.get_wm_class() ?? null")
-
-
-def wait_for(what: str, predicate, timeout: float = 60):
-    """Poll until `predicate()` gives something and return it."""
-    deadline = time.monotonic() + timeout
-    while not (got := predicate()):
-        if time.monotonic() > deadline:
-            machine.screenshot(f"failed-{what.replace(' ', '-')}")
-            print(earwig_log())
-            raise Exception(f"timed out waiting for {what}; windows: {windows()}")
-        time.sleep(0.5)
-    return got
 
 
 def box(actor: str) -> dict[str, float]:
@@ -93,71 +41,6 @@ def click_actor(actor: str) -> None:
     click(at["x"] + at["w"] / 2, at["y"] + at["h"] / 2)
 
 
-def click_word(word: str) -> None:
-    """Click `word` where OCR finds it on screen, twice as large for the small text of a window."""
-    with machine._managed_screenshot() as shot:
-        large = Path(shot).with_suffix(".large.png")
-        subprocess.run(["magick", shot, "-filter", "Catrom", "-resize", "200%", large], check=True)
-        tsv = subprocess.run(
-            ["tesseract", large, "-", "--psm", "11", "tsv"], capture_output=True, text=True, check=True
-        ).stdout
-        large.unlink()
-    for row in tsv.splitlines()[1:]:
-        cells = row.split("\t")
-        if len(cells) == 12 and cells[11].strip() == word:
-            left, top, width, height = (int(cell) / 2 for cell in cells[6:10])
-            click(left + width / 2, top + height / 2)
-            return
-    raise Exception(f"no {word!r} on screen")
-
-
-def try_status() -> dict[str, Any]:
-    """`earwig status`, or nothing while the daemon does not answer."""
-    code, out = machine.execute(f"runuser -u alice -- env XDG_RUNTIME_DIR={RUNTIME} earwig status")
-    return json.loads(out) if code == 0 else {}
-
-
-def may_type(st: dict[str, Any]) -> bool:
-    return bool(st.get("insert_methods")) and all(
-        p["access"] == "granted" for p in st.get("permissions", [])
-    )
-
-
-def allow_typing() -> dict[str, Any]:
-    """Give earwig what it needs to type, where it asks: its own Allow button, then GNOME's
-    Remote Desktop dialog. Returns the status once it may type."""
-    done: set[str] = set()
-
-    def answered():
-        open_windows = titles()
-        if "Remote Desktop" in open_windows:
-            if "desktop" not in done:
-                # As a click on the dialog would: it then has the keys.
-                shell_js(
-                    "(global.get_window_actors().map(a => a.meta_window)"
-                    ".find(w => w.title === 'Remote Desktop').activate(global.get_current_time()), true)"
-                )
-                machine.sleep(td(seconds=2))
-                machine.screenshot("consent")
-                machine.send_key("alt-i")
-                machine.sleep(td(seconds=1))
-                machine.send_key("alt-s")
-                done.add("desktop")
-            return None
-        st = try_status()
-        if (
-            "earwig" not in done
-            and "earwig settings" in open_windows
-            and any(p["access"] != "granted" for p in st.get("permissions", []))
-        ):
-            machine.sleep(td(seconds=2))
-            click_word("Allow")
-            done.add("earwig")
-        return st if may_type(st) else None
-
-    return wait_for("earwig to be allowed to type", answered, timeout=180)
-
-
 def close_settings() -> None:
     """Close the settings window as its close button would."""
     shell_js(
@@ -167,15 +50,18 @@ def close_settings() -> None:
     wait_for("the settings window to close", lambda: "earwig settings" not in titles())
 
 
+def asked() -> set[str]:
+    """Dialogs and earwig settings windows that opened since the last call."""
+    return {"Remote Desktop", "Add Keyboard Shortcuts", "earwig settings"} & set(
+        shell_js("global.__opened.splice(0)")
+    )
+
+
 def on_bus(name: str) -> bool:
     """Whether a program owns `name` on alice's session bus."""
     return "true" in user(
         f"busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s {name}"
     )
-
-
-def earwig_pid() -> str:
-    return machine.succeed("systemctl --user -M alice@ show -P MainPID earwig.service").strip()
 
 
 def pixels(actor: str, colour: tuple[int, int, int]) -> int:
@@ -223,20 +109,23 @@ def gnome_untouched(tap: str) -> None:
 start_all()
 
 with subtest("GNOME session"):
-    machine.wait_for_unit("display-manager.service")
-    machine.wait_for_file(f"{RUNTIME}/wayland-0")
-    retry(shell_started, timeout=td(minutes=3))
-    # GNOME logs in to the Activities overview, where keys go to its search: leave it.
-    shell_js("(Main.overview.hide(), true)")
+    gnome_session()
+    # Note every title a window takes from now on, to tell whether anything ever asks.
+    shell_js(
+        "(global.__opened = global.get_window_actors().map(a => a.meta_window.title),"
+        " global.display.connect('window-created', (_d, w) => { global.__opened.push(w.title);"
+        " w.connect('notify::title', () => global.__opened.push(w.title)); }), true)"
+    )
 
 check_virtual_mic()
 user_unit_active("earwig.service")
 
-with subtest("EARWIG: reads the keyboard itself and may type"):
-    st = allow_typing()
+with subtest("EARWIG: reads the keyboard itself and pastes without asking"):
+    st = wait_status(lambda s: s["insert_methods"], "earwig to be ready to type", timeout=180)
     print(f"status: {st}")
+    assert st["insert_methods"] == ["uinput-paste"], st
     assert st["hotkey"]["source"] == "keyboard" and st["hotkey"]["blocking"], st
-    close_settings()
+    assert not (seen := asked()), seen
 
 with subtest("EARWIG: its icon is in the top bar"):
     icon = wait_for("earwig's icon in the top bar", tray_icon)
@@ -252,6 +141,8 @@ with subtest("EARWIG: the icon's menu opens the settings"):
     machine.sleep(td(seconds=2))
     machine.screenshot("settings-from-tray")
     close_settings()
+    # The one window the test asked for; it shows the record sees windows.
+    assert (seen := asked()) == {"earwig settings"}, seen
 
 with subtest("EARWIG: model ready"):
     wait_status(lambda s: s["model"]["state"] == "ready", "the model", timeout=300)
@@ -271,6 +162,7 @@ with subtest("EARWIG: Super+Space dictates into Text Editor and stays out of GNO
     assert any(w in heard.lower() for w in ("quick", "brown", "fox")), heard
     machine.send_key(HOTKEY)
     inserted = wait_insertion(events)
+    assert inserted["method"] == "uinput-paste", inserted
     gnome_untouched("the tap that stops")
     assert focused() == "org.gnome.TextEditor", focused()
     machine.send_key("ctrl-s")
@@ -281,6 +173,22 @@ with subtest("EARWIG: Super+Space dictates into Text Editor and stays out of GNO
     assert saved.strip("\n") == inserted["text"], saved
     machine.screenshot("inserted")
     print_latency()
+    assert not (seen := asked()), seen
+
+with subtest("EARWIG: dictation lands in foot, a terminal not on the accessibility bus"):
+    start_target_terminal()
+    wait_for("foot", lambda: focused() == "earwig-target")
+    machine.sleep(td(seconds=2))
+    events = watch_events()
+    dictate()
+    assert wait_insertion(events)["method"] == "uinput-paste"
+    machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(seconds=30))
+    received = machine.succeed("cat -v /tmp/out")
+    print(f"foot received: {received!r}")
+    # Ctrl+V would arrive as a literal ^V, a Shift+Insert foot ignored as ^[[2;2~.
+    assert "^V" not in received and "^[" not in received, received
+    machine.screenshot("foot-inserted")
+    assert not (seen := asked()), seen
 
 with subtest("EARWIG: the icon appears when the tray starts after earwig"):
     user(f"gnome-extensions disable {EXTENSION}")
@@ -294,6 +202,7 @@ with subtest("EARWIG: the icon appears when the tray starts after earwig"):
     user(f"gnome-extensions enable {EXTENSION}")
     icon = wait_for("earwig's icon in the tray that started later", tray_icon)
     machine.screenshot("top-bar-tray-started-later")
+    assert not (seen := asked()), seen
 
 with subtest("EARWIG: once it quits, Super+Space is GNOME's again"):
     as_alice("earwig quit")

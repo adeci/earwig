@@ -6,6 +6,7 @@
 
 mod codes;
 mod evdev;
+mod paste;
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -22,6 +23,7 @@ use rustix::fs::inotify;
 use self::evdev::{
     Device, EV_KEY, EV_LED, EV_SYN, InputEvent, KeyBits, SYN_DROPPED, SYN_REPORT, Uinput,
 };
+pub use self::paste::{PasteKeyboard, modifier_held};
 use crate::Event;
 use crate::hotkey::Hotkey;
 use crate::key::Held;

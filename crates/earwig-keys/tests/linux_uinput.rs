@@ -214,6 +214,22 @@ fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
     keyboard.release(&[KEY_RIGHTCTRL, KEY_C]);
     nothing(&events);
 
+    // earwig's own paste keyboard is never read, and a held Ctrl holds up its chord.
+    listener.set_hotkey(Some("Shift+Insert".parse().unwrap()));
+    let paste = earwig_keys::PasteKeyboard::new().unwrap();
+    thread::sleep(Duration::from_millis(500));
+    paste.shift_insert().unwrap();
+    nothing(&events);
+    assert!(!earwig_keys::modifier_held());
+    keyboard.press(&[KEY_LEFTCTRL]);
+    thread::sleep(Duration::from_millis(100));
+    assert!(earwig_keys::modifier_held());
+    keyboard.release(&[KEY_LEFTCTRL]);
+    thread::sleep(Duration::from_millis(100));
+    assert!(!earwig_keys::modifier_held());
+    drop(paste);
+    listener.set_hotkey(Some("RightCtrl".parse().unwrap()));
+
     // Recording takes the keys instead of the hotkey.
     let (tx, recorded) = mpsc::channel();
     let record = |listener: &Listener| {

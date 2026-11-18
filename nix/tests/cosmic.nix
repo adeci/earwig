@@ -1,7 +1,8 @@
-# Dictation end to end on COSMIC without keyboard access: insertion through input-method-v2,
-# the hotkey a COSMIC custom shortcut running `earwig toggle` (no GlobalShortcuts portal, and
-# cosmic-comp binds fire on press only), and a streaming recording cancelled mid-clip before the
-# next dictation. Setup as in nixpkgs' cosmic test.
+# Dictation end to end on COSMIC without keyboard access: insertion through input-method-v2 into
+# COSMIC Text Editor, then, with `[insert] method = "paste"`, Shift+Insert from COSMIC's virtual
+# keyboard into a terminal; the hotkey a COSMIC custom shortcut running `earwig toggle` (no
+# GlobalShortcuts portal, and cosmic-comp binds fire on press only), and a streaming recording
+# cancelled mid-clip before the next dictation. Setup as in nixpkgs' cosmic test.
 { self }:
 let
   common = import ./common.nix { inherit self; };

@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::{AudioEvent, Capture, Source};
-use crate::config::{AudioConfig, Config, ConfigStore, InsertConfig};
+use crate::config::{AudioConfig, Config, ConfigStore, InsertConfig, InsertSetting};
 use crate::engine::{EngineFactory, EngineOptions, Model, ModelInfo, Partial};
 use crate::events::{
     Command, DictationState, Event, InsertMethod, ModelStatus, Status, UpdateState,
@@ -26,8 +26,8 @@ use crate::session::{Action, Input, Phase, Session};
 use crate::spectrum::Feed;
 use crate::update::{self, Updates};
 
-/// Builds the inserter for `[insert]`. May block on a consent dialog; never
-/// fails (where nothing works, a stand-in fails each insertion instead).
+/// Builds the inserter for `[insert]`. Never fails (where nothing works, a
+/// stand-in fails each insertion instead).
 pub type InserterFactory = dyn Fn(&InsertConfig) -> Box<dyn Inserter> + Send;
 
 pub struct Parts {
@@ -258,11 +258,13 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     let (output_tx, output_jobs) = flume::unbounded();
     let (output_events_tx, output_events) = flume::unbounded();
     let output_shared = shared.clone();
+    let insert_config = settings.insert.clone();
     let output_worker = thread::Builder::new()
         .name("earwig-output".into())
         .spawn(move || {
             output_thread(
                 &*build_inserter,
+                insert_config,
                 inserter,
                 &output_shared,
                 &output_jobs,
@@ -488,6 +490,10 @@ fn engine_thread(
     }
 }
 
+/// How often an inserter that needs the desktop's leave to type looks for
+/// keyboard access, which needs nobody's.
+const ACCESS_POLL: Duration = Duration::from_secs(1);
+
 enum OutputJob {
     Deliver(Box<Delivery>),
     /// The `[insert]` settings changed: replace the inserter.
@@ -512,26 +518,54 @@ enum OutputEvent {
 
 fn output_thread(
     build: &InserterFactory,
+    mut config: InsertConfig,
     mut inserter: Box<dyn Inserter>,
     shared: &Shared,
     jobs: &flume::Receiver<OutputJob>,
     events: &flume::Sender<OutputEvent>,
 ) {
-    for job in jobs {
+    let mut waiting = waits_for_access(&config, inserter.as_ref());
+    loop {
+        let job = if waiting {
+            match jobs.recv_timeout(ACCESS_POLL) {
+                Ok(job) => job,
+                Err(flume::RecvTimeoutError::Timeout) if crate::hotkey::keyboard_access() => {
+                    log::info!("keyboard access appeared: pasting without the portal");
+                    OutputJob::Rebuild(config.clone())
+                }
+                Err(flume::RecvTimeoutError::Timeout) => continue,
+                Err(flume::RecvTimeoutError::Disconnected) => return,
+            }
+        } else {
+            match jobs.recv() {
+                Ok(job) => job,
+                Err(flume::RecvError::Disconnected) => return,
+            }
+        };
         match job {
             OutputJob::Deliver(delivery) => {
                 deliver(inserter.as_mut(), shared, &delivery);
                 let _ = events.send(OutputEvent::Delivered(delivery.id));
             }
-            OutputJob::Rebuild(config) => {
+            OutputJob::Rebuild(new) => {
+                config = new;
                 // Only one input method may hold the seat: the old inserter
                 // lets go before the new one connects.
                 drop(inserter);
                 inserter = build(&config);
+                waiting = waits_for_access(&config, inserter.as_ref());
                 let _ = events.send(OutputEvent::Rebuilt(inserter.methods()));
             }
         }
     }
+}
+
+/// Whether `auto` settled on the portal for want of keyboard access, which
+/// would spare the user the desktop's dialog.
+fn waits_for_access(config: &InsertConfig, inserter: &dyn Inserter) -> bool {
+    config.method == InsertSetting::Auto
+        && inserter.methods().contains(&InsertMethod::PortalPaste)
+        && !crate::hotkey::keyboard_access()
 }
 
 /// Replace, filter, insert, record, announce.
@@ -1023,8 +1057,7 @@ impl Controller {
             self.audio_config = config.audio.clone();
         }
         if config.insert != self.insert_config {
-            // Built on the output thread between deliveries: connecting can
-            // wait on a consent dialog.
+            // Built on the output thread, between deliveries.
             self.insert_config = config.insert.clone();
             let _ = self.output.send(OutputJob::Rebuild(config.insert));
         }

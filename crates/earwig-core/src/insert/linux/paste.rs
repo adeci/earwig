@@ -1,17 +1,20 @@
-//! Insertion by clipboard and one paste chord (wlroots compositors, niri,
-//! Hyprland): the selection is set through data-control and served from
-//! earwig's own thread (so it outlives the paste), then a virtual keyboard
-//! presses Ctrl+V, or Ctrl+Shift+V in a terminal. Requests reach the
-//! compositor in order on one connection, so no delay is needed.
+//! Insertion by pasting: earwig puts the text on the clipboard and in the
+//! primary selection (through data-control, or X11 through Xwayland on GNOME),
+//! served from its own thread so it outlives the paste, then presses
+//! Shift+Insert (on the compositor's virtual keyboard, or on its own through
+//! uinput with keyboard access). Every app pastes on Shift+Insert, whatever the
+//! keyboard layout: editors and browsers from the clipboard, terminals from the
+//! primary selection. Both keep the text.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use wayland_client::backend::ObjectId;
+use earwig_keys::PasteKeyboard;
 use wayland_client::globals::{GlobalList, GlobalListContents};
 use wayland_client::protocol::wl_keyboard::{KeyState, KeymapFormat};
 use wayland_client::protocol::wl_registry::WlRegistry;
@@ -33,158 +36,185 @@ use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
-use wayland_protocols_wlr::foreign_toplevel::v1::client::{
-    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
-    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
-};
 use xkbcommon::xkb;
 
+use self::x11::X11Clipboard;
 use super::wayland::Worker;
 use super::{InsertError, Inserter, MIME_TYPES};
+use crate::desktop::DesktopCaps;
 use crate::events::InsertMethod;
-use crate::insert::is_terminal;
 
-/// App ids that paste with Ctrl+Shift+V, besides `[insert] terminals`.
-const TERMINALS: &[&str] = &[
-    "Alacritty",
-    "com.gexperts.Tilix",
-    "com.mitchellh.ghostty",
-    "com.raggesilver.BlackBox",
-    "dev.warp.Warp",
-    "foot",
-    "footclient",
-    "io.elementary.terminal",
-    "kgx",
-    "kitty",
-    "konsole",
-    "org.gnome.Console",
-    "org.gnome.Ptyxis",
-    "org.gnome.Terminal",
-    "org.kde.konsole",
-    "org.wezfurlong.wezterm",
-    "rio",
-    "st",
-    "st-256color",
-    "terminator",
-    "URxvt",
-    "xfce4-terminal",
-    "xterm",
-];
+mod x11;
 
-/// The virtual keyboard's keymap: just the three keys of the paste chords,
-/// self-contained so compiling it needs no XKB data files. Keycodes are the
-/// evdev positions of Left Ctrl, Left Shift and V (+8), so clients that match
-/// shortcuts by key position see the usual keys too.
+/// How long a held Ctrl, Alt or Super may hold up Shift+Insert on earwig's
+/// own keyboard, which it would turn into another shortcut.
+const MODIFIER_WAIT: Duration = Duration::from_secs(1);
+
+/// The virtual keyboard's keymap: Shift and Insert alone, self-contained so
+/// compiling it needs no XKB data files, at their evdev positions (+8). GTK
+/// looks keys up below the highest keycode only, so one more key sits above.
 const KEYMAP: &str = r#"xkb_keymap {
     xkb_keycodes "earwig" {
-        minimum = 8;
-        maximum = 255;
-        <LCTL> = 37;
         <LFSH> = 50;
-        <AB04> = 55;
+        <INS> = 118;
+        <I255> = 255;
     };
     xkb_types "earwig" {
         type "ONE_LEVEL" {
             modifiers = none;
             level_name[Level1] = "Any";
         };
-        type "ALPHABETIC" {
-            modifiers = Shift + Lock;
-            map[Shift] = Level2;
-            map[Lock] = Level2;
-            level_name[Level1] = "Base";
-            level_name[Level2] = "Caps";
-        };
     };
     xkb_compatibility "earwig" {
-        interpret Control_L { action = SetMods(modifiers = Control); };
         interpret Shift_L { action = SetMods(modifiers = Shift); };
     };
     xkb_symbols "earwig" {
-        key <LCTL> { type = "ONE_LEVEL", [ Control_L ] };
         key <LFSH> { type = "ONE_LEVEL", [ Shift_L ] };
-        key <AB04> { type = "ALPHABETIC", [ v, V ] };
-        modifier_map Control { <LCTL> };
+        key <INS> { type = "ONE_LEVEL", [ Insert ] };
         modifier_map Shift { <LFSH> };
     };
 };
 "#;
 
 pub struct PasteInserter {
-    worker: Worker<State>,
-    /// `false`: clipboard only, `insert` is not applicable.
-    chord: bool,
+    keyboard: Keyboard,
+    selections: Selections,
+}
+
+enum Keyboard {
+    /// The compositor's (wlroots, niri, Hyprland, COSMIC).
+    Virtual(Worker<VirtualKeyboard>),
+    /// earwig's own, with keyboard access (GNOME, KDE).
+    Uinput(PasteKeyboard),
 }
 
 impl PasteInserter {
-    /// Clipboard plus paste chord (data-control and a virtual keyboard); wlr
-    /// foreign-toplevel, when offered, tells terminals apart.
-    pub fn connect(terminals: &[String]) -> anyhow::Result<Self> {
-        Self::spawn(Some(terminals.to_vec()))
+    /// The compositor's virtual keyboard where it offers one, else earwig's
+    /// own, which fails without write access to `/dev/uinput`.
+    pub fn connect(caps: &DesktopCaps) -> anyhow::Result<Self> {
+        let keyboard = if caps.virtual_keyboard {
+            Keyboard::Virtual(Worker::spawn("earwig-keyboard", VirtualKeyboard::new)?)
+        } else {
+            Keyboard::Uinput(PasteKeyboard::new().context("making a keyboard through /dev/uinput")?)
+        };
+        Ok(Self {
+            keyboard,
+            selections: Selections::connect(caps)?,
+        })
     }
 
-    /// Clipboard only, for [`Inserter::copy_to_clipboard`] where no paste
-    /// chord can be sent (or another backend inserts).
-    pub fn clipboard_only() -> anyhow::Result<Self> {
-        Self::spawn(None)
-    }
-
-    fn spawn(terminals: Option<Vec<String>>) -> anyhow::Result<Self> {
-        let chord = terminals.is_some();
-        let worker = Worker::spawn("earwig-paste", move |globals, qh| {
-            State::new(globals, qh, terminals)
-        })?;
-        Ok(Self { worker, chord })
+    fn method(&self) -> InsertMethod {
+        match self.keyboard {
+            Keyboard::Virtual(_) => InsertMethod::Paste,
+            Keyboard::Uinput(_) => InsertMethod::UinputPaste,
+        }
     }
 }
 
 impl Inserter for PasteInserter {
     fn methods(&self) -> Vec<InsertMethod> {
-        if self.chord {
-            vec![InsertMethod::Paste]
-        } else {
-            Vec::new()
-        }
+        vec![self.method()]
     }
 
     fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError> {
-        if !self.chord {
-            return Err(InsertError::NotApplicable(
-                "no virtual keyboard for a paste chord".into(),
-            ));
+        self.selections.set(text, true)?;
+        match &self.keyboard {
+            Keyboard::Virtual(keyboard) => keyboard.call(VirtualKeyboard::shift_insert)??,
+            Keyboard::Uinput(keyboard) => {
+                wait_for_modifiers()?;
+                keyboard.shift_insert().context("pressing Shift+Insert")?;
+            }
         }
-        let text: Arc<str> = text.into();
-        self.worker
-            .call(move |state, queue| state.paste(text, queue))?
+        Ok(self.method())
     }
 
     fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError> {
-        let text: Arc<str> = text.into();
-        self.worker
-            .call(move |state, queue| -> anyhow::Result<()> {
-                state.set_clipboard(text, &queue.handle())?;
-                queue.roundtrip(state).context("clipboard roundtrip")?;
-                Ok(())
-            })??;
+        self.selections.set(text, false)
+    }
+}
+
+/// Wait until the user lets go of Ctrl, Alt and Super; fail if they don't.
+fn wait_for_modifiers() -> anyhow::Result<()> {
+    let deadline = Instant::now() + MODIFIER_WAIT;
+    while earwig_keys::modifier_held() {
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Ctrl, Alt or Super was held down"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+/// What owns the clipboard and the primary selection.
+pub(super) struct Selections(Owner);
+
+enum Owner {
+    DataControl(Worker<DataControl>),
+    X11(X11Clipboard),
+}
+
+impl Selections {
+    /// Through data-control where the compositor offers it, else through
+    /// Xwayland on GNOME.
+    pub(super) fn connect(caps: &DesktopCaps) -> anyhow::Result<Self> {
+        let owner = if caps.data_control {
+            Owner::DataControl(Worker::spawn("earwig-selections", DataControl::new)?)
+        } else if mutter(caps) {
+            Owner::X11(X11Clipboard::connect()?)
+        } else {
+            anyhow::bail!(
+                "the compositor offers no data-control, and this is no GNOME with Xwayland"
+            )
+        };
+        Ok(Self(owner))
+    }
+
+    /// Own the clipboard with `text`, and the primary selection too with
+    /// `primary`; returns once the compositor has them.
+    pub(super) fn set(&self, text: &str, primary: bool) -> Result<(), InsertError> {
+        match &self.0 {
+            Owner::DataControl(worker) => {
+                let text: Arc<str> = text.into();
+                worker.call(move |state, queue| -> anyhow::Result<()> {
+                    state.set(&text, primary, &queue.handle())?;
+                    queue.roundtrip(state).context("clipboard roundtrip")?;
+                    Ok(())
+                })??;
+            }
+            Owner::X11(clipboard) => clipboard.set(text, primary)?,
+        }
         Ok(())
     }
 }
 
-struct State {
-    clipboard: Clipboard,
-    /// `None` for clipboard-only.
-    keyboard: Option<Keyboard>,
-    /// Toplevels from wlr foreign-toplevel; empty without it.
-    toplevels: HashMap<ObjectId, ToplevelState>,
-    /// Added to [`TERMINALS`].
-    terminals: Vec<String>,
+/// The clipboard alone, where nothing can press the keys.
+impl Inserter for Selections {
+    fn methods(&self) -> Vec<InsertMethod> {
+        Vec::new()
+    }
+
+    fn insert(&mut self, _: &str) -> Result<InsertMethod, InsertError> {
+        Err(InsertError::NotApplicable(
+            "no keyboard to paste with".into(),
+        ))
+    }
+
+    fn copy_to_clipboard(&mut self, text: &str) -> Result<(), InsertError> {
+        self.set(text, false)
+    }
+}
+
+/// Only Mutter is known to hand an X11 selection to Wayland clients.
+fn mutter(caps: &DesktopCaps) -> bool {
+    caps.wayland && caps.x11 && caps.desktop.split(':').any(|name| name == "gnome")
 }
 
 /// ext and wlr data-control are message-for-message the same; ext preferred.
-enum Clipboard {
+/// The device is `None` after the compositor sent `finished`.
+enum DataControl {
     Ext {
         manager: ExtDataControlManagerV1,
-        /// `None` after the compositor sent `finished`.
         device: Option<ExtDataControlDeviceV1>,
     },
     Wlr {
@@ -193,112 +223,69 @@ enum Clipboard {
     },
 }
 
-impl State {
-    fn new(
-        globals: &GlobalList,
-        qh: &QueueHandle<Self>,
-        terminals: Option<Vec<String>>,
-    ) -> anyhow::Result<Self> {
+impl DataControl {
+    fn new(globals: &GlobalList, qh: &QueueHandle<Self>) -> anyhow::Result<Self> {
         let seat: WlSeat = globals.bind(qh, 1..=1, ()).context("no wl_seat")?;
-        let clipboard = if let Ok(manager) =
-            globals.bind::<ExtDataControlManagerV1, _, _>(qh, 1..=1, ())
-        {
+        if let Ok(manager) = globals.bind::<ExtDataControlManagerV1, _, _>(qh, 1..=1, ()) {
             let device = manager.get_data_device(&seat, qh, ());
-            Clipboard::Ext {
+            return Ok(Self::Ext {
                 manager,
                 device: Some(device),
-            }
-        } else {
-            let manager: ZwlrDataControlManagerV1 = globals.bind(qh, 1..=2, ()).context(
-                "the compositor offers neither ext_data_control_manager_v1 nor zwlr_data_control_manager_v1",
-            )?;
-            let device = manager.get_data_device(&seat, qh, ());
-            Clipboard::Wlr {
-                manager,
-                device: Some(device),
-            }
-        };
-        let keyboard = if terminals.is_some() {
-            let manager: ZwpVirtualKeyboardManagerV1 = globals
-                .bind(qh, 1..=1, ())
-                .context("the compositor does not offer zwp_virtual_keyboard_manager_v1")?;
-            if globals
-                .bind::<ZwlrForeignToplevelManagerV1, _, _>(qh, 1..=3, ())
-                .is_err()
-            {
-                log::info!("no wlr foreign-toplevel: pasting with Ctrl+V everywhere");
-            }
-            Some(Keyboard::new(&manager, &seat, qh)?)
-        } else {
-            None
-        };
-        Ok(Self {
-            clipboard,
-            keyboard,
-            toplevels: HashMap::new(),
-            terminals: terminals.unwrap_or_default(),
+            });
+        }
+        let manager: ZwlrDataControlManagerV1 = globals.bind(qh, 1..=2, ()).context(
+            "the compositor offers neither ext_data_control_manager_v1 nor zwlr_data_control_manager_v1",
+        )?;
+        let device = manager.get_data_device(&seat, qh, ());
+        Ok(Self::Wlr {
+            manager,
+            device: Some(device),
         })
     }
 
-    /// Own the clipboard selection with `text` until another client takes it.
-    fn set_clipboard(&self, text: Arc<str>, qh: &QueueHandle<Self>) -> anyhow::Result<()> {
+    /// Own the clipboard selection with `text` until another client takes
+    /// it, and the primary selection too with `primary`.
+    fn set(&self, text: &Arc<str>, primary: bool, qh: &QueueHandle<Self>) -> anyhow::Result<()> {
         macro_rules! offer {
             ($manager:expr, $device:expr) => {{
-                let source = $manager.create_data_source(qh, text);
-                for mime in MIME_TYPES {
-                    source.offer((*mime).to_owned());
+                let source = || {
+                    let source = $manager.create_data_source(qh, text.clone());
+                    for mime in MIME_TYPES {
+                        source.offer((*mime).to_owned());
+                    }
+                    source
+                };
+                $device.set_selection(Some(&source()));
+                if primary {
+                    $device.set_primary_selection(Some(&source()));
                 }
-                $device.set_selection(Some(&source));
             }};
         }
-        match &self.clipboard {
-            Clipboard::Ext {
+        match self {
+            Self::Ext {
                 manager,
                 device: Some(device),
             } => offer!(manager, device),
-            Clipboard::Wlr {
+            Self::Wlr {
                 manager,
                 device: Some(device),
-            } => offer!(manager, device),
+            } => {
+                anyhow::ensure!(
+                    !primary || device.version() >= 2,
+                    "the compositor's data-control has no primary selection"
+                );
+                offer!(manager, device);
+            }
             _ => anyhow::bail!("the compositor withdrew the clipboard device"),
         }
         Ok(())
-    }
-
-    fn paste(
-        &mut self,
-        text: Arc<str>,
-        queue: &mut EventQueue<Self>,
-    ) -> Result<InsertMethod, InsertError> {
-        self.set_clipboard(text, &queue.handle())?;
-        // Applies the selection and brings the activated toplevel up to date.
-        queue.roundtrip(self).context("clipboard roundtrip")?;
-        let app_id = self.activated_app_id();
-        let terminal = app_id.is_some_and(|app_id| is_terminal(app_id, TERMINALS, &self.terminals));
-        log::debug!(
-            "pasting into {app_id:?} with {}",
-            if terminal { "Ctrl+Shift+V" } else { "Ctrl+V" }
-        );
-        self.keyboard
-            .as_ref()
-            .context("no virtual keyboard")?
-            .paste_chord(terminal);
-        queue.roundtrip(self).context("paste chord roundtrip")?;
-        Ok(InsertMethod::Paste)
-    }
-
-    fn activated_app_id(&self) -> Option<&str> {
-        self.toplevels
-            .values()
-            .find(|toplevel| toplevel.current.activated)
-            .map(|toplevel| toplevel.current.app_id.as_str())
     }
 }
 
 /// Write `text` to a paste target's pipe off the Wayland thread, so a reader
 /// that never drains it cannot stall the connection.
 fn serve_transfer(text: Arc<str>, fd: OwnedFd) {
-    let spawned = std::thread::Builder::new()
+    let spawned = thread::Builder::new()
         .name("earwig-clipboard".into())
         .spawn(move || {
             if let Err(err) = File::from(fd).write_all(text.as_bytes()) {
@@ -310,198 +297,11 @@ fn serve_transfer(text: Arc<str>, fd: OwnedFd) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Modifier {
-    /// evdev keycode.
-    key: u32,
-    /// Bit in the keymap's modifier mask.
-    mask: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ChordKeys {
-    ctrl: Modifier,
-    shift: Modifier,
-    /// evdev keycode of `v`.
-    v: u32,
-}
-
-struct Keyboard {
-    device: ZwpVirtualKeyboardV1,
-    keys: ChordKeys,
-}
-
-impl Keyboard {
-    fn new(
-        manager: &ZwpVirtualKeyboardManagerV1,
-        seat: &WlSeat,
-        qh: &QueueHandle<State>,
-    ) -> anyhow::Result<Self> {
-        let (keymap, keys) = compile_keymap()?;
-        let fd = rustix::fs::memfd_create("earwig-keymap", rustix::fs::MemfdFlags::CLOEXEC)
-            .context("memfd for the keymap")?;
-        let mut file = File::from(fd);
-        file.write_all(keymap.as_bytes())
-            .and_then(|()| file.write_all(b"\0"))
-            .context("writing the keymap")?;
-        let device = manager.create_virtual_keyboard(seat, qh, ());
-        // The size includes the NUL terminator, like wl_keyboard.keymap.
-        device.keymap(
-            KeymapFormat::XkbV1.into(),
-            file.as_fd(),
-            u32::try_from(keymap.len() + 1).context("keymap size")?,
-        );
-        Ok(Self { device, keys })
-    }
-
-    /// Press and release Ctrl(+Shift)+V. Modifiers are sent both as keys and
-    /// as the `modifiers` request: wlroots applies only the request, niri
-    /// tracks the keys.
-    fn paste_chord(&self, terminal: bool) {
-        let ChordKeys { ctrl, shift, v } = self.keys;
-        let held: &[Modifier] = if terminal { &[ctrl, shift] } else { &[ctrl] };
-        let time = now_ms();
-        let pressed = KeyState::Pressed.into();
-        let released = KeyState::Released.into();
-        let mut mods = 0;
-        for modifier in held {
-            self.device.key(time, modifier.key, pressed);
-            mods |= modifier.mask;
-            self.device.modifiers(mods, 0, 0, 0);
-        }
-        self.device.key(time, v, pressed);
-        self.device.key(time, v, released);
-        for modifier in held.iter().rev() {
-            self.device.key(time, modifier.key, released);
-            mods &= !modifier.mask;
-            self.device.modifiers(mods, 0, 0, 0);
-        }
-    }
-}
-
-/// Compile [`KEYMAP`] and find the chord keys in it: the text to upload
-/// (as compositors re-serialize it) and evdev codes plus modifier masks.
-fn compile_keymap() -> anyhow::Result<(String, ChordKeys)> {
-    let context =
-        xkb::Context::new(xkb::CONTEXT_NO_DEFAULT_INCLUDES | xkb::CONTEXT_NO_ENVIRONMENT_NAMES);
-    let keymap = xkb::Keymap::new_from_string(
-        &context,
-        KEYMAP.to_owned(),
-        xkb::KEYMAP_FORMAT_TEXT_V1,
-        xkb::KEYMAP_COMPILE_NO_FLAGS,
-    )
-    .context("compiling the paste keymap")?;
-    let key = |sym: xkb::Keysym| -> anyhow::Result<u32> {
-        (keymap.min_keycode().raw()..=keymap.max_keycode().raw())
-            .find(|&code| keymap.key_get_syms_by_level(xkb::Keycode::new(code), 0, 0) == [sym])
-            .map(|code| code - 8)
-            .with_context(|| format!("keysym {sym:?} missing from the paste keymap"))
-    };
-    let mask = |name: &str| -> anyhow::Result<u32> {
-        let index = keymap.mod_get_index(name);
-        anyhow::ensure!(index < 32, "modifier {name} missing from the paste keymap");
-        Ok(1 << index)
-    };
-    let keys = ChordKeys {
-        ctrl: Modifier {
-            key: key(xkb::Keysym::Control_L)?,
-            mask: mask(xkb::MOD_NAME_CTRL)?,
-        },
-        shift: Modifier {
-            key: key(xkb::Keysym::Shift_L)?,
-            mask: mask(xkb::MOD_NAME_SHIFT)?,
-        },
-        v: key(xkb::Keysym::v)?,
-    };
-    Ok((keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1), keys))
-}
-
-/// `CLOCK_MONOTONIC` in milliseconds, the clock of Wayland input timestamps.
-fn now_ms() -> u32 {
-    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    let ms = now
-        .tv_sec
-        .wrapping_mul(1000)
-        .wrapping_add(now.tv_nsec / 1_000_000);
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "Wayland timestamps are wrapping 32-bit milliseconds"
-    )]
-    let ms = ms as u32;
-    ms
-}
-
-#[derive(Clone, Debug, Default)]
-struct Toplevel {
-    app_id: String,
-    activated: bool,
-}
-
-/// wlr foreign-toplevel state is double-buffered: events fill `pending`,
-/// `done` applies it.
-#[derive(Debug, Default)]
-struct ToplevelState {
-    pending: Toplevel,
-    current: Toplevel,
-}
-
-impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        handle: &ZwlrForeignToplevelHandleV1,
-        event: zwlr_foreign_toplevel_handle_v1::Event,
-        (): &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        use zwlr_foreign_toplevel_handle_v1::Event;
-        if let Event::Closed = event {
-            state.toplevels.remove(&handle.id());
-            handle.destroy();
-            return;
-        }
-        let toplevel = state.toplevels.entry(handle.id()).or_default();
-        match event {
-            Event::AppId { app_id } => toplevel.pending.app_id = app_id,
-            Event::State { state } => {
-                let activated = u32::from(zwlr_foreign_toplevel_handle_v1::State::Activated);
-                toplevel.pending.activated = state
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .any(|raw| u32::from_ne_bytes(*raw) == activated);
-            }
-            Event::Done => toplevel.current = toplevel.pending.clone(),
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        _: &ZwlrForeignToplevelManagerV1,
-        event: zwlr_foreign_toplevel_manager_v1::Event,
-        (): &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let zwlr_foreign_toplevel_manager_v1::Event::Finished = event {
-            state.toplevels.clear();
-        }
-    }
-
-    wayland_client::event_created_child!(State, ZwlrForeignToplevelManagerV1, [
-        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ()),
-    ]);
-}
-
 /// Dispatch for one data-control flavour: serve our sources, release other
 /// clients' offers, and forget the device when it finishes.
 macro_rules! data_control_dispatch {
     ($variant:ident, $device_mod:ident, $Device:ty, $source_mod:ident, $Source:ty, $Offer:ty) => {
-        impl Dispatch<$Device, ()> for State {
+        impl Dispatch<$Device, ()> for DataControl {
             fn event(
                 state: &mut Self,
                 device: &$Device,
@@ -516,7 +316,7 @@ macro_rules! data_control_dispatch {
                     $device_mod::Event::Finished => {
                         log::warn!("the compositor withdrew the clipboard device");
                         device.destroy();
-                        if let Clipboard::$variant { device: slot, .. } = &mut state.clipboard {
+                        if let DataControl::$variant { device: slot, .. } = state {
                             *slot = None;
                         }
                     }
@@ -524,12 +324,12 @@ macro_rules! data_control_dispatch {
                 }
             }
 
-            wayland_client::event_created_child!(State, $Device, [
+            wayland_client::event_created_child!(DataControl, $Device, [
                 $device_mod::EVT_DATA_OFFER_OPCODE => ($Offer, ()),
             ]);
         }
 
-        impl Dispatch<$Source, Arc<str>> for State {
+        impl Dispatch<$Source, Arc<str>> for DataControl {
             fn event(
                 _: &mut Self,
                 source: &$Source,
@@ -547,7 +347,7 @@ macro_rules! data_control_dispatch {
             }
         }
 
-        wayland_client::delegate_noop!(State: ignore $Offer);
+        wayland_client::delegate_noop!(DataControl: ignore $Offer);
     };
 }
 
@@ -568,13 +368,11 @@ data_control_dispatch!(
     ZwlrDataControlOfferV1
 );
 
-wayland_client::delegate_noop!(State: ignore WlSeat);
-wayland_client::delegate_noop!(State: ExtDataControlManagerV1);
-wayland_client::delegate_noop!(State: ZwlrDataControlManagerV1);
-wayland_client::delegate_noop!(State: ZwpVirtualKeyboardManagerV1);
-wayland_client::delegate_noop!(State: ZwpVirtualKeyboardV1);
+wayland_client::delegate_noop!(DataControl: ignore WlSeat);
+wayland_client::delegate_noop!(DataControl: ExtDataControlManagerV1);
+wayland_client::delegate_noop!(DataControl: ZwlrDataControlManagerV1);
 
-impl Dispatch<WlRegistry, GlobalListContents> for State {
+impl Dispatch<WlRegistry, GlobalListContents> for DataControl {
     fn event(
         _: &mut Self,
         _: &WlRegistry,
@@ -586,26 +384,139 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
     }
 }
 
+/// evdev keycodes of [`KEYMAP`]'s keys, and Shift's bit in its modifier mask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Keys {
+    shift: u32,
+    shift_mask: u32,
+    insert: u32,
+}
+
+struct VirtualKeyboard {
+    device: ZwpVirtualKeyboardV1,
+    keys: Keys,
+}
+
+impl VirtualKeyboard {
+    fn new(globals: &GlobalList, qh: &QueueHandle<Self>) -> anyhow::Result<Self> {
+        let seat: WlSeat = globals.bind(qh, 1..=1, ()).context("no wl_seat")?;
+        let manager: ZwpVirtualKeyboardManagerV1 = globals
+            .bind(qh, 1..=1, ())
+            .context("the compositor does not offer zwp_virtual_keyboard_manager_v1")?;
+        let (keymap, keys) = compile_keymap()?;
+        let fd = rustix::fs::memfd_create("earwig-keymap", rustix::fs::MemfdFlags::CLOEXEC)
+            .context("memfd for the keymap")?;
+        let mut file = File::from(fd);
+        file.write_all(keymap.as_bytes())
+            .and_then(|()| file.write_all(b"\0"))
+            .context("writing the keymap")?;
+        let device = manager.create_virtual_keyboard(&seat, qh, ());
+        // The size includes the NUL terminator, like wl_keyboard.keymap.
+        device.keymap(
+            KeymapFormat::XkbV1.into(),
+            file.as_fd(),
+            u32::try_from(keymap.len() + 1).context("keymap size")?,
+        );
+        Ok(Self { device, keys })
+    }
+
+    /// Press and release Shift+Insert. Shift goes out both as a key and as the
+    /// `modifiers` request: wlroots applies only the request, niri tracks the
+    /// keys.
+    fn shift_insert(&mut self, queue: &mut EventQueue<Self>) -> anyhow::Result<()> {
+        let Keys {
+            shift,
+            shift_mask,
+            insert,
+        } = self.keys;
+        let time = now_ms();
+        let pressed = KeyState::Pressed.into();
+        let released = KeyState::Released.into();
+        self.device.key(time, shift, pressed);
+        self.device.modifiers(shift_mask, 0, 0, 0);
+        self.device.key(time, insert, pressed);
+        self.device.key(time, insert, released);
+        self.device.key(time, shift, released);
+        self.device.modifiers(0, 0, 0, 0);
+        queue.roundtrip(self).context("Shift+Insert roundtrip")?;
+        Ok(())
+    }
+}
+
+wayland_client::delegate_noop!(VirtualKeyboard: ignore WlSeat);
+wayland_client::delegate_noop!(VirtualKeyboard: ZwpVirtualKeyboardManagerV1);
+wayland_client::delegate_noop!(VirtualKeyboard: ZwpVirtualKeyboardV1);
+
+impl Dispatch<WlRegistry, GlobalListContents> for VirtualKeyboard {
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: <WlRegistry as wayland_client::Proxy>::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+/// Compile [`KEYMAP`] and find its keys: the text to upload (as compositors
+/// re-serialize it) and the keys' evdev codes.
+fn compile_keymap() -> anyhow::Result<(String, Keys)> {
+    let context =
+        xkb::Context::new(xkb::CONTEXT_NO_DEFAULT_INCLUDES | xkb::CONTEXT_NO_ENVIRONMENT_NAMES);
+    let keymap = xkb::Keymap::new_from_string(
+        &context,
+        KEYMAP.to_owned(),
+        xkb::KEYMAP_FORMAT_TEXT_V1,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .context("compiling the paste keymap")?;
+    let key = |sym: xkb::Keysym| -> anyhow::Result<u32> {
+        (keymap.min_keycode().raw()..=keymap.max_keycode().raw())
+            .find(|&code| keymap.key_get_syms_by_level(xkb::Keycode::new(code), 0, 0) == [sym])
+            .map(|code| code - 8)
+            .with_context(|| format!("keysym {sym:?} missing from the paste keymap"))
+    };
+    let shift = keymap.mod_get_index(xkb::MOD_NAME_SHIFT);
+    anyhow::ensure!(shift < 32, "Shift missing from the paste keymap");
+    let keys = Keys {
+        shift: key(xkb::Keysym::Shift_L)?,
+        shift_mask: 1 << shift,
+        insert: key(xkb::Keysym::Insert)?,
+    };
+    Ok((keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1), keys))
+}
+
+/// `CLOCK_MONOTONIC` in milliseconds, the clock of Wayland input timestamps.
+fn now_ms() -> u32 {
+    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    let ms = now
+        .tv_sec
+        .wrapping_mul(1000)
+        .wrapping_add(now.tv_nsec / 1_000_000);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Wayland timestamps are wrapping 32-bit milliseconds"
+    )]
+    let ms = ms as u32;
+    ms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn keymap_has_the_chord_keys_at_their_evdev_positions() {
+    fn keymap_has_shift_and_insert_at_their_evdev_positions() {
         let (text, keys) = compile_keymap().unwrap();
-        // KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V; Control and Shift real mods.
+        // KEY_LEFTSHIFT, KEY_INSERT; Shift the first real modifier.
         assert_eq!(
             keys,
-            ChordKeys {
-                ctrl: Modifier {
-                    key: 29,
-                    mask: 1 << 2
-                },
-                shift: Modifier {
-                    key: 42,
-                    mask: 1 << 0
-                },
-                v: 47,
+            Keys {
+                shift: 42,
+                shift_mask: 1 << 0,
+                insert: 110,
             }
         );
         // What a compositor receives must compile on its own, without XKB data.
@@ -617,22 +528,39 @@ mod tests {
             xkb::KEYMAP_COMPILE_NO_FLAGS,
         )
         .expect("serialized keymap compiles");
+        assert!(reparsed.max_keycode().raw() > keys.insert + 8);
         let mut state = xkb::State::new(&reparsed);
-        state.update_key(
-            xkb::Keycode::new(keys.ctrl.key + 8),
-            xkb::KeyDirection::Down,
-        );
-        state.update_key(
-            xkb::Keycode::new(keys.shift.key + 8),
-            xkb::KeyDirection::Down,
-        );
+        state.update_key(xkb::Keycode::new(keys.shift + 8), xkb::KeyDirection::Down);
         assert_eq!(
             state.serialize_mods(xkb::STATE_MODS_DEPRESSED),
-            keys.ctrl.mask | keys.shift.mask
+            keys.shift_mask
         );
         assert_eq!(
-            state.key_get_one_sym(xkb::Keycode::new(keys.v + 8)),
-            xkb::Keysym::V
+            state.key_get_one_sym(xkb::Keycode::new(keys.insert + 8)),
+            xkb::Keysym::Insert
         );
+    }
+
+    #[test]
+    fn x11_selections_only_on_gnome_under_wayland_with_xwayland() {
+        let gnome = DesktopCaps {
+            desktop: "ubuntu:GNOME".to_lowercase(),
+            wayland: true,
+            x11: true,
+            ..DesktopCaps::default()
+        };
+        assert!(mutter(&gnome));
+        assert!(!mutter(&DesktopCaps {
+            x11: false,
+            ..gnome.clone()
+        }));
+        assert!(!mutter(&DesktopCaps {
+            wayland: false,
+            ..gnome.clone()
+        }));
+        assert!(!mutter(&DesktopCaps {
+            desktop: "weston".into(),
+            ..gnome
+        }));
     }
 }

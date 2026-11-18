@@ -1,8 +1,9 @@
-# Dictation end to end on niri, driven through the CLI: virtual mic -> earwig -> focused foot.
-# niri's TTY backend skips software EGL, all QEMU offers here, so niri runs nested in cage
-# (pixman); everything earwig talks to is still niri's own. With a model that doesn't stream: live
-# text from re-decoding, the final text from one decode; and after a recording cancelled mid-clip
-# the model dictates again.
+# Dictation end to end on niri, driven through the CLI: virtual mic -> earwig -> foot through the
+# input method, then with `[insert] method = "paste"` into foot and Mousepad, pasted with
+# Shift+Insert from niri's virtual keyboard. niri's TTY backend skips software EGL, all QEMU
+# offers here, so niri runs nested in cage (pixman); everything earwig talks to is still niri's
+# own. With a model that doesn't stream: live text from re-decoding, the final text from one
+# decode; and after a recording cancelled mid-clip the model dictates again.
 { self }:
 let
   common = import ./common.nix { inherit self; };
@@ -25,6 +26,7 @@ in
       environment.systemPackages = [
         pkgs.cage
         pkgs.jq
+        pkgs.mousepad
       ];
 
       # Started from niri once it listens, standing in for niri.service
@@ -63,29 +65,34 @@ in
         return as_alice(f"env NIRI_SOCKET={niri_socket} niri msg {args}")
 
 
+    def wait_focused(app_id: str) -> None:
+        machine.wait_until_succeeds(
+            f"su - alice -c 'env NIRI_SOCKET={niri_socket} niri msg --json focused-window' | jq -e '.app_id == \"{app_id}\"'"
+        )
+
+
     print(niri_msg("version"))
 
     check_virtual_mic()
 
     start_target_terminal()
-    machine.wait_until_succeeds(
-        f"su - alice -c 'env NIRI_SOCKET={niri_socket} niri msg --json focused-window' | jq -e '.app_id == \"earwig-target\"'"
-    )
+    wait_focused("earwig-target")
     check_typing_reaches_target()
     machine.screenshot("target_terminal")
 
     ${common.dictation}
 
-    with machine.nested("EARWIG: a recording cancelled mid-clip leaves the model ready"):
+    assert inserted["method"] == "input-method", inserted
+
+    with machine.nested("EARWIG: with insert method paste, a recording cancelled mid-clip leaves the model ready"):
+        switch_insert_method("paste")
         cancel_mid_clip(lambda: as_alice("earwig press"))
         as_alice("earwig release")
-        machine.succeed("truncate --no-create -s 0 /tmp/out")
-        events = watch_events()
-        as_alice("earwig press")
-        play_clip()
-        machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
-        as_alice("earwig release")
-        print(wait_insertion(events))
-        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(minutes=4))
+
+    with machine.nested("EARWIG: pasted once into foot, whose app id is on no list"):
+        dictate_into_target("paste")
+
+    with machine.nested("EARWIG: pasted once into Mousepad"):
+        dictate_into_editor(wait_focused)
   '';
 }

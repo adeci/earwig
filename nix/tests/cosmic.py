@@ -100,15 +100,16 @@ with subtest("Dictate into the editor with the shortcut"):
 with subtest("A recording cancelled mid-clip leaves the streaming model ready for the next"):
     cancel_mid_clip(lambda: as_alice("earwig toggle"))
 
-with subtest("Dictate into a terminal with `earwig toggle`"):
+with subtest("With insert method paste, `earwig toggle` pastes into a terminal"):
     # The editor still shows the sentence, which would satisfy the OCR.
     machine.succeed("pkill -f 'cosmic-edit /tmp/edit.txt'")
+    # What Electron and XWayland apps get; foot would take the input method.
+    switch_insert_method("paste")
     start_target_terminal()
     check_typing_reaches_target()
     _, inserted = dictate_toggle("05-terminal-recording", lambda: as_alice("earwig toggle"))
-    assert inserted["method"] == "input-method", inserted
-    machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(seconds=30))
+    assert inserted["method"] == "paste", inserted
+    check_received("/tmp/out", inserted)
     machine.screenshot("06-terminal-inserted")
-    print(machine.succeed("cat /tmp/out"))
 
 print_latency()

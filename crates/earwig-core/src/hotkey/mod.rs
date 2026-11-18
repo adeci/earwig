@@ -168,6 +168,19 @@ fn portal_bound() -> bool {
     }
 }
 
+/// Whether earwig may make keyboards of its own, as Linux's keyboard access
+/// lets it.
+pub(crate) fn keyboard_access() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::keyboard_access()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 /// Record a new hotkey for the settings window: keys go to `sink` instead,
 /// until it reports done or cancelled, or [`stop_recording`].
 pub fn record(sink: impl FnMut(Recorded) + Send + 'static) {
