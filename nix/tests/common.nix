@@ -84,6 +84,70 @@
       documentation.enable = false;
     };
 
+  # GNOME on Wayland, alice logged in by GDM. The tests read the shell's windows and state
+  # through Shell.Eval, which is internal API; a drop-in applies to GNOME 49's unit and to 50's
+  # template alike.
+  gnome =
+    { pkgs, lib, ... }:
+    {
+      virtualisation.memorySize = lib.mkForce 6144;
+      services.getty.autologinUser = lib.mkForce null;
+      services.displayManager.gdm.enable = true;
+      services.displayManager.autoLogin = {
+        enable = true;
+        user = "alice";
+      };
+      services.desktopManager.gnome.enable = true;
+      services.gnome.gnome-initial-setup.enable = false;
+      environment.gnome.excludePackages = [ pkgs.gnome-tour ];
+      systemd.user.services."org.gnome.Shell@" = {
+        overrideStrategy = "asDropin";
+        # The shell keeps the session's PATH, where it finds the programs of desktop entries.
+        enableDefaultPath = false;
+        serviceConfig.ExecStart = [
+          ""
+          "${pkgs.gnome-shell}/bin/gnome-shell --unsafe-mode"
+        ];
+      };
+      programs.dconf.profiles.user.databases = [
+        {
+          settings = {
+            "org/gnome/desktop/session".idle-delay = lib.gvariant.mkUint32 0;
+            "org/gnome/desktop/screensaver".lock-enabled = false;
+            "org/gnome/desktop/notifications".show-banners = false;
+          };
+        }
+      ];
+    };
+
+  # Plasma 6, alice logged in by its login manager. Setup as in nixpkgs' plasma6 test.
+  plasma =
+    { pkgs, lib, ... }:
+    {
+      services.getty.autologinUser = lib.mkForce null;
+      services.xserver.enable = true;
+      services.displayManager.plasma-login-manager.enable = true;
+      services.desktopManager.plasma6.enable = true;
+      services.displayManager.autoLogin = {
+        enable = true;
+        user = "alice";
+      };
+      environment.plasma6.excludePackages = with pkgs.kdePackages; [
+        elisa
+        # The welcome wizard would take focus on first login.
+        plasma-welcome
+      ];
+      environment.systemPackages = [ pkgs.kdePackages.kate ];
+      environment.etc."xdg/kscreenlockerrc".text = lib.generators.toINI { } {
+        Daemon = {
+          Autolock = false;
+          LockOnResume = false;
+        };
+      };
+      systemd.user.services.earwig.environment.RUST_LOG =
+        "info,earwig=debug,earwig_core=debug,zbus=warn,tracing=warn";
+    };
+
   # Python helpers; the compositor-specific script comes after this.
   prelude = ''
     import json
@@ -242,8 +306,8 @@
         return path
 
 
-    def wait_insertion(events: str, timeout: float = 240) -> dict:
-        """Wait for the next dictation result in `events`; it must be `inserted`."""
+    def wait_result(events: str, timeout: float = 240) -> dict:
+        """Wait for the next dictation's result in `events`: `inserted` or `insert-failed`."""
         result = {}
 
         def done(_last_try: bool) -> bool:
@@ -256,9 +320,65 @@
             return False
 
         retry(done, timeout=td(seconds=timeout))
+        return result
+
+
+    def wait_insertion(events: str, timeout: float = 240) -> dict:
+        """Wait for the next dictation's result in `events`; it must be `inserted`."""
+        result = wait_result(events, timeout)
         assert result["event"] == "inserted", result
         return result
 
+
+    def check_received(path: str, inserted: dict) -> None:
+        """Wait until the target has written the inserted text to `path`, once and alone: in
+        `cat -v` a terminal shows Ctrl+V as ^V, a Shift+Insert it took for a key as ^[[2;2~."""
+        received = ""
+
+        def once(_last_try: bool) -> bool:
+            nonlocal received
+            received = machine.succeed(f"cat -v {path}")
+            return received.strip("\n") == inserted["text"]
+
+        try:
+            retry(once, timeout=td(seconds=30))
+        finally:
+            print(f"{path}: {received!r}")
+
+
+    def switch_insert_method(method: str) -> None:
+        """Restart earwig with `[insert] method` set in alice's own config; returns once that is
+        its only method and the model is ready."""
+        as_alice("mkdir -p .config/earwig")
+        machine.succeed(f"printf '[insert]\\nmethod = \"{method}\"\\n' > /home/alice/.config/earwig/config.toml")
+        machine.succeed("systemctl --user -M alice@ restart earwig.service")
+        wait_status(lambda s: s["insert_methods"] == [method] and s["model"]["state"] == "ready", method, timeout=300)
+
+
+    def dictate_into_target(method: str) -> None:
+        """Dictate into the focused foot from `start_target_terminal`, by `method`."""
+        machine.succeed("truncate --no-create -s 0 /tmp/out")
+        events = watch_events()
+        dictate()
+        inserted = wait_insertion(events)
+        assert inserted["method"] == method, inserted
+        check_received("/tmp/out", inserted)
+
+
+    def dictate_into_editor(wait_focused) -> None:
+        """Paste a dictation into Mousepad, a GTK 3 editor, once `wait_focused(app_id)` sees it
+        focused, and save it."""
+        as_alice("touch /tmp/editor.txt")
+        spawn("/run/current-system/sw/bin/mousepad /tmp/editor.txt")
+        wait_focused("org.xfce.mousepad")
+        events = watch_events()
+        dictate()
+        inserted = wait_insertion(events)
+        assert inserted["method"] == "paste", inserted
+        # The editor reads the clipboard after the keys arrive.
+        machine.sleep(1)
+        machine.send_key("ctrl-s")
+        check_received("/tmp/editor.txt", inserted)
 
     def cancel_mid_clip(start) -> None:
         """Start a recording with `start()` while the clip plays and cancel it once its live
@@ -304,6 +424,85 @@
         else:
             as_alice("earwig release")
         return text
+
+
+    def click_text(text: str, pick: int = 0, timeout: float = 60) -> tuple[int, int]:
+        """Left-click the middle of `text` (its words in a row, case-sensitive) where OCR finds it
+        on screen, the `pick`-th match from the top, through QEMU's tablet; waits up to `timeout`
+        seconds for it to show and returns the point clicked."""
+        import re
+        import time
+        from pathlib import Path
+        from typing import Any
+
+        words = text.split()
+        matches: list[tuple[int, int]] = []
+        screen = (0, 0)
+        lines: dict[tuple[str, ...], list[tuple[str, int, int, int, int]]] = {}
+
+        def located(_last_try: bool) -> bool:
+            nonlocal matches, screen, lines
+            large = Path(machine.out_dir) / "click-text.png"
+            with machine._managed_screenshot() as shot:
+                with open(shot, "rb") as raw:
+                    header = re.match(rb"P6\s+(\d+)\s+(\d+)\s", raw.read(64))
+                assert header, "the screenshot is not a binary PPM"
+                screen = (int(header[1]), int(header[2]))
+                # Twice as large: tesseract misses a window's small text.
+                subprocess.run(["magick", shot, "-filter", "Catrom", "-resize", "200%", large], check=True)
+            lines = {}
+            try:
+                # Sparse text finds most words, the automatic layout some more.
+                for layout in ("11", "3"):
+                    tsv = subprocess.run(
+                        ["tesseract", large, "-", "--psm", layout, "tsv"], capture_output=True, text=True, check=True
+                    ).stdout
+                    # Words by line, each with its box on screen.
+                    for row in tsv.splitlines()[1:]:
+                        cells = row.split("\t")
+                        if len(cells) == 12 and cells[11].strip():
+                            left, top, width, height = (int(cell) // 2 for cell in cells[6:10])
+                            line = lines.setdefault(tuple([layout, *cells[1:5]]), [])
+                            line.append((cells[11].strip(), left, top, width, height))
+            finally:
+                large.unlink()
+            matches = []
+            for line in lines.values():
+                for i in range(len(line) - len(words) + 1):
+                    run = line[i : i + len(words)]
+                    if [word[0] for word in run] == words:
+                        top = min(word[2] for word in run)
+                        bottom = max(word[2] + word[4] for word in run)
+                        right = run[-1][1] + run[-1][3]
+                        x, y = (run[0][1] + right) // 2, (top + bottom) // 2
+                        # Both layouts read most text: one match per place.
+                        if all(abs(x - mx) > 8 or abs(y - my) > 8 for mx, my in matches):
+                            matches.append((x, y))
+            matches.sort(key=lambda point: (point[1], point[0]))
+            return -len(matches) <= pick < len(matches)
+
+        try:
+            retry(located, timeout=td(seconds=timeout))
+        except Exception:
+            machine.screenshot("click-text-missing")
+            read = " / ".join(" ".join(word[0] for word in line) for line in lines.values())
+            raise Exception(f"no {text!r} (match {pick}) on screen; OCR read: {read}")
+        x, y = matches[pick]
+        width, height = screen
+
+        def send(*events: Any) -> None:
+            assert machine.qmp_client is not None
+            args: Any = {"events": list(events)}
+            machine.qmp_client.send("input-send-event", args)
+
+        send(
+            {"type": "abs", "data": {"axis": "x", "value": round(x * 0x7FFF / (width - 1))}},
+            {"type": "abs", "data": {"axis": "y", "value": round(y * 0x7FFF / (height - 1))}},
+        )
+        for down in (True, False):
+            time.sleep(0.2)
+            send({"type": "btn", "data": {"down": down, "button": "left"}})
+        return x, y
   '';
 
   # Everything that needs earwig itself (daemon, pipeline, overlay, an
@@ -322,10 +521,10 @@
     with machine.nested("EARWIG: overlay showed live text while recording"):
         assert any(w in overlay_text.lower() for w in ("quick", "brown", "fox")), overlay_text
 
-    with machine.nested("EARWIG: transcript inserted into the focused terminal"):
-        print(wait_insertion(events))
-        machine.wait_until_succeeds("grep -qi 'brown fox' /tmp/out", timeout=td(minutes=4))
-        print(machine.succeed("cat /tmp/out"))
+    with machine.nested("EARWIG: transcript inserted once into the focused terminal"):
+        inserted = wait_insertion(events)
+        print(inserted)
+        check_received("/tmp/out", inserted)
         machine.screenshot("inserted")
   '';
 }

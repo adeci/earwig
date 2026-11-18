@@ -29,9 +29,11 @@ in
       earwig watches its hotkey itself (see `keyboardAccess`); the desktop
       must provide the rest:
       - text is inserted through the input-method and virtual-keyboard
-        protocols of niri, sway or Hyprland, or on GNOME and KDE through the
-        RemoteDesktop portal (enable `xdg.portal` with the desktop's backend,
-        `xdg-desktop-portal-gnome` / `-kde`)
+        protocols of niri, sway or Hyprland, on GNOME and KDE by pasting
+        through earwig's own keyboard (with `keyboardAccess`; GNOME needs
+        Xwayland), otherwise through the RemoteDesktop portal (enable
+        `xdg.portal` with the desktop's backend, `xdg-desktop-portal-gnome` /
+        `-kde`)
       - an audio server (PipeWire) for the microphone'';
 
     keyboardAccess = lib.mkOption {
@@ -40,9 +42,10 @@ in
       description = ''
         Let the user at the seat read keyboards and make virtual ones (a udev
         `uaccess` rule), so earwig sees its hotkey on any desktop and keeps it
-        from other apps. Any program of that user can then read what is
-        typed. Without it, GNOME and KDE deliver the hotkey through the
-        GlobalShortcuts portal; elsewhere bind keys to `earwig press` /
+        from other apps, and pastes on GNOME and KDE without asking. Any
+        program of that user can then read what is typed. Without it, GNOME
+        and KDE deliver the hotkey through the GlobalShortcuts portal and ask
+        once to let earwig type; elsewhere bind keys to `earwig press` /
         `earwig release` (or `earwig toggle`) and `earwig cancel` in the
         compositor.
       '';
@@ -159,10 +162,6 @@ in
         ExecStart = "${config.systemd.package}/bin/udevadm trigger --action=change --subsystem-match=input --subsystem-match=misc";
       };
     };
-
-    # The portal inserter spots terminals by their AT-SPI role, which Qt only exports when asked;
-    # without this Konsole gets Ctrl+V (a literal ^V) instead of Ctrl+Shift+V.
-    environment.sessionVariables.QT_LINUX_ACCESSIBILITY_ALWAYS_ON = lib.mkDefault "1";
 
     systemd.user.services.earwig = {
       description = "earwig dictation daemon";

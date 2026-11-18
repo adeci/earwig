@@ -32,7 +32,6 @@ rustix.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
 async-io.workspace = true
-atspi-proxies.workspace = true
 futures-lite.workspace = true
 pulseaudio.workspace = true
 reis.workspace = true
@@ -40,6 +39,7 @@ wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-misc.workspace = true
 wayland-protocols-wlr.workspace = true
+x11rb.workspace = true
 xkbcommon.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

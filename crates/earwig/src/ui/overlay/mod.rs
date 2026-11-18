@@ -134,6 +134,8 @@ pub struct OverlayView {
     max_lines: u32,
     position: OverlayPosition,
     life: Lifecycle,
+    /// What the pill says while it shows a failure.
+    failure_line: &'static str,
     started_at_ms: u64,
     stopped_at_ms: Option<u64>,
     committed: String,
@@ -223,6 +225,7 @@ impl OverlayView {
             max_lines: config.max_lines.max(1),
             position: config.position,
             life: Lifecycle::default(),
+            failure_line: "",
             started_at_ms: now_ms(),
             stopped_at_ms: None,
             committed: String::new(),
@@ -268,7 +271,8 @@ impl OverlayView {
         self.life.finish(now, self.switch_off());
     }
 
-    pub fn failed(&mut self, on_clipboard: bool, now: Instant) {
+    pub fn failed(&mut self, on_clipboard: bool, not_allowed: bool, now: Instant) {
+        self.failure_line = failure_text(on_clipboard, not_allowed);
         self.life.failed(on_clipboard, now);
     }
 
@@ -371,11 +375,7 @@ impl OverlayView {
 
     fn body(&self, theme: &Theme) -> Div {
         match self.failure() {
-            Some(on_clipboard) => div().text_color(theme.foreground).child(if on_clipboard {
-                "Couldn't type into the app. The text is on the clipboard."
-            } else {
-                "Couldn't insert the text. It is saved in History."
-            }),
+            Some(_) => div().text_color(theme.foreground).child(self.failure_line),
             None if self.committed.is_empty() && self.tentative.is_empty() => {
                 div().text_color(theme.muted_foreground).child("Listening…")
             }
@@ -734,6 +734,21 @@ impl OverlayView {
             });
         })
         .detach();
+    }
+}
+
+/// What a failed dictation's pill says: what to do when the desktop has `not_allowed`
+/// earwig to type, and where the text went.
+fn failure_text(on_clipboard: bool, not_allowed: bool) -> &'static str {
+    match (not_allowed, on_clipboard) {
+        (true, true) => {
+            "Allow remote control in the desktop's dialog. The text is on the clipboard."
+        }
+        (true, false) => {
+            "Allow remote control in the desktop's dialog. The text is saved in History."
+        }
+        (false, true) => "Couldn't type into the app. The text is on the clipboard.",
+        (false, false) => "Couldn't insert the text. It is saved in History.",
     }
 }
 

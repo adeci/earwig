@@ -10,7 +10,8 @@ overlay and settings window, transcribe.cpp for speech. NixOS first.
   models, insertion, hotkeys, control socket, updates). No GPUI, so tests are
   fast.
 - `crates/earwig-keys`: the hotkey on its own: parse and check it, watch the
-  keyboard (evdev, an event tap, a keyboard hook) and record a new one.
+  keyboard (evdev, an event tap, a keyboard hook) and record a new one; and
+  earwig's paste keyboard (uinput) on Linux.
 - `crates/earwig-transcribe`: the transcribe.cpp `EngineFactory` (GGUF,
   CPU plus Vulkan, or Metal on macOS).
 - `crates/earwig`: the binary: CLI, daemon wiring, GPUI overlay, settings
@@ -54,7 +55,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 nix fmt
 nix flake check -L                                # package, clippy, tests, VM tests (KVM)
-nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome kde cosmic models cpus uinput
+nix build .#checks.x86_64-linux.vm-<name> -L      # one VM test: niri sway keyd gnome gnome-defaults kde kde-defaults cosmic models cpus uinput switch
 ```
 
 ## Rules

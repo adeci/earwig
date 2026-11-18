@@ -1,6 +1,7 @@
-# Dictation end to end on sway, earwig holding the keyboard: virtual mic -> earwig -> focused
-# foot, with a replacement the module declares. Software rendering via pixman, as in nixpkgs'
-# sway test.
+# Dictation end to end on sway, earwig holding the keyboard: virtual mic -> earwig -> foot through
+# the input method, with a replacement the module declares; then with `[insert] method = "paste"`
+# into foot and Mousepad, pasted with Shift+Insert from sway's virtual keyboard. Software
+# rendering via pixman, as in nixpkgs' sway test.
 { self }:
 let
   common = import ./common.nix { inherit self; };
@@ -27,7 +28,10 @@ in
           sway > /tmp/sway.log 2>&1
         fi
       '';
-      environment.systemPackages = [ pkgs.jq ];
+      environment.systemPackages = [
+        pkgs.jq
+        pkgs.mousepad
+      ];
     };
 
   testScript = ''
@@ -39,12 +43,17 @@ in
     machine.wait_for_file("/tmp/sway-ipc.sock")
     user_unit_active("sway-session.target")
 
+
+    def wait_focused(app_id: str) -> None:
+        machine.wait_until_succeeds(
+            f"su - alice -c 'swaymsg -t get_tree' | jq -e '.. | objects | select(.app_id? == \"{app_id}\" and .focused)'"
+        )
+
+
     check_virtual_mic()
 
     start_target_terminal()
-    machine.wait_until_succeeds(
-        "su - alice -c 'swaymsg -t get_tree' | jq -e '.. | objects | select(.app_id? == \"earwig-target\" and .focused)'"
-    )
+    wait_focused("earwig-target")
     check_typing_reaches_target()
     machine.screenshot("target_terminal")
 
@@ -63,13 +72,12 @@ in
 
     ${common.dictation}
 
-    with machine.nested("EARWIG: neither tap reached foot or sway"):
-        out = machine.succeed("cat /tmp/out")
-        # A leaked Space would be in the text; sway's Mod4+space would have
-        # taken focus from foot, and the text would have gone elsewhere.
-        assert out == wait_insertion(events)["text"], out
+    # The text came alone: neither tap reached foot (a Space) or sway (Mod4+space would have
+    # moved the focus).
+    assert inserted["method"] == "input-method", inserted
 
     with machine.nested("EARWIG: the module's replacement is written, and locked"):
+        out = inserted["text"]
         assert "sleepy cat" in out and "dog" not in out.lower(), out
         listed = as_alice("earwig replacements list")
         assert "* lazy dog  sleepy cat" in listed, listed
@@ -78,5 +86,13 @@ in
             + shlex.quote(f"XDG_RUNTIME_DIR={RUNTIME} earwig replacements remove 'lazy dog' 2>&1")
         )
         assert "system config" in refusal, refusal
+
+    with machine.nested("EARWIG: with insert method paste, pasted once into foot, whose app id is on no list"):
+        switch_insert_method("paste")
+        wait_status(lambda s: s["hotkey"]["blocking"], "the hotkey held back again")
+        dictate_into_target("paste")
+
+    with machine.nested("EARWIG: pasted once into Mousepad"):
+        dictate_into_editor(wait_focused)
   '';
 }

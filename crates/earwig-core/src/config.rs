@@ -141,8 +141,9 @@ pub enum InsertSetting {
 #[serde(default, deny_unknown_fields)]
 pub struct InsertConfig {
     pub method: InsertSetting,
-    /// Extra app ids treated as terminals (Ctrl+Shift+V) on top of the
-    /// built-in list.
+    /// Extra executables treated as terminals (Ctrl+Shift+V) on top of the
+    /// built-in list, on Windows; Linux pastes with Shift+Insert everywhere
+    /// and ignores them.
     pub terminals: Vec<String>,
 }
 

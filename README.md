@@ -16,8 +16,12 @@ services.earwig.enable = true;
 ```
 
 The module installs earwig with its default speech model and starts it with
-your session. On nix-darwin, macOS asks for Microphone and Accessibility on the
-first start.
+your session. Applying a configuration restarts earwig when its build or
+settings changed; on NixOS it also starts earwig if it is not running. On
+GNOME, which has no tray, it also installs the AppIndicator extension and
+switches it on from your next login, so earwig's icon sits in the top bar
+(`services.earwig.gnomeTray`). On nix-darwin, macOS asks for Microphone and
+Accessibility on the first start.
 
 ### Other Linux distributions
 
@@ -65,8 +69,8 @@ one, otherwise on the CPU.
 
 The settings window, opened from the icon or with `earwig settings`, changes
 the shortcut, the microphone and the speech model.
-[Configuration](docs/configuration.md) covers the config file, hooks and the
-event stream.
+[Configuration](docs/configuration.md) covers the config file, word
+replacements, hooks and the event stream.
 
 ## Updates
 

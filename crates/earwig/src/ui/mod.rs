@@ -269,8 +269,15 @@ fn apply(event: Event, cx: &mut App) {
             committed,
             tentative,
         } => update_overlay(cx, |o, _| o.set_text(committed, tentative)),
-        Event::InsertFailed { on_clipboard, .. } => {
-            update_overlay(cx, |o, _| o.failed(on_clipboard, Instant::now()));
+        Event::InsertFailed {
+            on_clipboard,
+            reason,
+            ..
+        } => {
+            let not_allowed = reason == earwig_core::insert::NOT_ALLOWED;
+            update_overlay(cx, |o, _| {
+                o.failed(on_clipboard, not_allowed, Instant::now());
+            });
         }
         Event::Model { model } => {
             cx.global_mut::<UiState>().status.model = model;

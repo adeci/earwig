@@ -21,8 +21,9 @@ pub(super) const SYN_DROPPED: u16 = 3;
 const MSC_SCAN: u16 = 4;
 const REL_X: u16 = 0;
 const ABS_X: u16 = 0;
+const BUS_VIRTUAL: u16 = 0x06;
 
-/// `phys` of earwig's own uinput clones, so it never reads them back.
+/// `phys` of earwig's own uinput devices, so it never reads them back.
 const OWN_PHYS: &str = "earwig-keys";
 
 /// `struct input_event` on 64-bit Linux (`timeval` is two i64s).
@@ -210,8 +211,7 @@ impl Device {
             ),
             Err(e) => return Err(e.into()),
         };
-        // Devices without one say ENOENT.
-        if read_string(&fd, 0x07).unwrap_or_default() == OWN_PHYS {
+        if is_own(&fd) {
             return Ok(None);
         }
         let events: Bits<4> = read_bits(&fd, 0)?;
@@ -283,7 +283,8 @@ impl Device {
     }
 }
 
-/// A uinput clone of a [`Device`] that carries its keys on while it's grabbed; destroyed on drop.
+/// A uinput device of earwig's own, destroyed on drop: a clone of a [`Device`] that carries its
+/// keys on while it's grabbed, or the paste keyboard.
 pub(super) struct Uinput {
     pub fd: OwnedFd,
 }
@@ -304,14 +305,13 @@ pub(super) struct SetUp {
 impl Uinput {
     /// Configure a clone of `device`; fails without access to `/dev/uinput`.
     pub(super) fn set_up(device: &Device) -> io::Result<SetUp> {
-        let flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC;
-        let fd = rustix::fs::open("/dev/uinput", flags, Mode::empty())?;
+        // Same name and ids, so compositor settings for the keyboard still apply.
+        let fd = configure(
+            &device.name,
+            device.id,
+            device.keys.iter().chain([codes::KEY_LEFTCTRL]),
+        )?;
         let ui = |number: u8, value: u16| set_int(&fd, b'U', number, usize::from(value));
-        // UI_SET_EVBIT, UI_SET_KEYBIT
-        ui(100, EV_KEY)?;
-        for code in device.keys.iter().chain([codes::KEY_LEFTCTRL]) {
-            ui(101, code)?;
-        }
         if device.scan_codes {
             ui(100, EV_MSC)?;
             ui(104, MSC_SCAN)?;
@@ -322,33 +322,19 @@ impl Uinput {
                 ui(105, led)?;
             }
         }
-        let phys = CString::new(OWN_PHYS).unwrap_or_default();
-        // SAFETY: UI_SET_PHYS copies the NUL-terminated string before it returns.
-        unsafe {
-            ioctl(
-                &fd,
-                opcode::write::<*const u8>(b'U', 108),
-                phys.as_ptr().cast_mut().cast(),
-            )?;
-        }
-        // Same name and ids, so compositor settings for the keyboard still apply.
-        let mut setup = UinputSetup {
-            id: device.id,
-            name: [0; 80],
-            ff_effects_max: 0,
-        };
-        let name = device.name.as_bytes();
-        let len = name.len().min(setup.name.len() - 1);
-        setup.name[..len].copy_from_slice(&name[..len]);
-        // SAFETY: UI_DEV_SETUP reads one `struct uinput_setup`.
-        unsafe {
-            ioctl(
-                &fd,
-                opcode::write::<UinputSetup>(b'U', 3),
-                (&raw mut setup).cast(),
-            )?;
-        }
         Ok(SetUp { fd })
+    }
+
+    /// A keyboard of earwig's own that can send `keys`.
+    pub(super) fn keyboard(name: &str, keys: impl IntoIterator<Item = u16>) -> io::Result<Self> {
+        let id = InputId {
+            bustype: BUS_VIRTUAL,
+            ..InputId::default()
+        };
+        SetUp {
+            fd: configure(name, id, keys)?,
+        }
+        .create()
     }
 
     pub(super) fn write(&self, events: &[InputEvent]) -> io::Result<()> {
@@ -375,6 +361,48 @@ impl Drop for Uinput {
         // SAFETY: UI_DEV_DESTROY takes no argument; the kernel releases keys still down.
         let _ = unsafe { ioctl(&self.fd, opcode::none(b'U', 2), std::ptr::null_mut()) };
     }
+}
+
+/// Whether `fd` is one of earwig's own uinput devices. Devices without a `phys` say ENOENT.
+fn is_own(fd: impl AsFd) -> bool {
+    read_string(fd, 0x07).is_ok_and(|phys| phys == OWN_PHYS)
+}
+
+/// Open `/dev/uinput` and set up a keyboard with `keys`, marked as earwig's own.
+fn configure(name: &str, id: InputId, keys: impl IntoIterator<Item = u16>) -> io::Result<OwnedFd> {
+    let flags = OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open("/dev/uinput", flags, Mode::empty())?;
+    // UI_SET_EVBIT, UI_SET_KEYBIT
+    set_int(&fd, b'U', 100, usize::from(EV_KEY))?;
+    for code in keys {
+        set_int(&fd, b'U', 101, usize::from(code))?;
+    }
+    let phys = CString::new(OWN_PHYS).unwrap_or_default();
+    // SAFETY: UI_SET_PHYS copies the NUL-terminated string before it returns.
+    unsafe {
+        ioctl(
+            &fd,
+            opcode::write::<*const u8>(b'U', 108),
+            phys.as_ptr().cast_mut().cast(),
+        )?;
+    }
+    let mut setup = UinputSetup {
+        id,
+        name: [0; 80],
+        ff_effects_max: 0,
+    };
+    let name = name.as_bytes();
+    let len = name.len().min(setup.name.len() - 1);
+    setup.name[..len].copy_from_slice(&name[..len]);
+    // SAFETY: UI_DEV_SETUP reads one `struct uinput_setup`.
+    unsafe {
+        ioctl(
+            &fd,
+            opcode::write::<UinputSetup>(b'U', 3),
+            (&raw mut setup).cast(),
+        )?;
+    }
+    Ok(fd)
 }
 
 fn read_events(fd: impl AsFd, events: &mut [InputEvent]) -> io::Result<usize> {

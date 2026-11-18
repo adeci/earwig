@@ -124,6 +124,7 @@
           vm-sway = vmTest ./nix/tests/sway.nix;
           vm-keyd = vmTest ./nix/tests/keyd.nix;
           vm-kde = vmTest ./nix/tests/kde.nix;
+          vm-kde-defaults = vmTest ./nix/tests/kde-defaults.nix;
           vm-cosmic = vmTest ./nix/tests/cosmic.nix;
           vm-models = vmTest ./nix/tests/models.nix;
           vm-gnome = vmTest ./nix/tests/gnome.nix;

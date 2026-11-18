@@ -1,6 +1,8 @@
 //! Linux backends, best first: `input_method` (Wayland commit_string; niri,
-//! sway, Hyprland), `paste` (data-control clipboard plus one chord on a virtual
-//! keyboard; Electron, XWayland) and `portal` (RemoteDesktop; GNOME, KDE).
+//! sway, Hyprland, COSMIC), `paste` (the clipboard and the primary selection
+//! set without focus, then Shift+Insert on the compositor's virtual keyboard
+//! or earwig's own; Electron, XWayland, GNOME and KDE with keyboard access) and
+//! `portal` (RemoteDesktop; GNOME and KDE without keyboard access).
 
 use anyhow::Context as _;
 
@@ -8,7 +10,7 @@ use super::{InsertError, Inserter};
 use crate::config::{InsertConfig, InsertSetting};
 use crate::desktop::DesktopCaps;
 use input_method::InputMethodInserter;
-use paste::PasteInserter;
+use paste::{PasteInserter, Selections};
 use portal::PortalInserter;
 
 pub mod input_method;
@@ -25,54 +27,49 @@ const MIME_TYPES: &[&str] = &[
     "STRING",
 ];
 
-/// `auto` uses the portal only where the Wayland paste path is missing (it
-/// asks for consent), and leaves out backends that fail to connect.
+/// `auto` uses the portal only where earwig can't press keys itself (it asks
+/// for consent), and leaves out backends that fail to connect.
 pub(super) fn backends(
     config: &InsertConfig,
     caps: &DesktopCaps,
 ) -> anyhow::Result<Vec<Box<dyn Inserter>>> {
     Ok(match config.method {
-        InsertSetting::Auto => auto_backends(config, caps),
+        InsertSetting::Auto => auto_backends(caps),
         InsertSetting::InputMethod => {
             let mut backends: Vec<Box<dyn Inserter>> = vec![Box::new(
                 InputMethodInserter::connect().context("input method")?,
             )];
             // Text that could not be inserted still lands on the clipboard.
-            if caps.data_control {
-                backends.extend(connected("clipboard", PasteInserter::clipboard_only()));
-            }
+            backends.extend(connected("clipboard", Selections::connect(caps)));
             backends
         }
-        InsertSetting::Paste => vec![Box::new(
-            PasteInserter::connect(&config.terminals).context("paste")?,
-        )],
-        InsertSetting::Portal => vec![Box::new(
-            PortalInserter::connect(&crate::paths::state_dir()).context("RemoteDesktop portal")?,
-        )],
+        InsertSetting::Paste => vec![Box::new(PasteInserter::connect(caps).context("paste")?)],
+        InsertSetting::Portal => vec![Box::new(portal(caps).context("RemoteDesktop portal")?)],
     })
 }
 
-fn auto_backends(config: &InsertConfig, caps: &DesktopCaps) -> Vec<Box<dyn Inserter>> {
+fn auto_backends(caps: &DesktopCaps) -> Vec<Box<dyn Inserter>> {
     let mut backends = Vec::new();
     if caps.input_method {
         backends.extend(connected("input method", InputMethodInserter::connect()));
     }
-    let mut paste_chord = false;
-    if caps.data_control && caps.virtual_keyboard {
-        if let Some(paste) = connected("paste", PasteInserter::connect(&config.terminals)) {
-            backends.push(paste);
-            paste_chord = true;
+    match PasteInserter::connect(caps) {
+        Ok(paste) => backends.push(Box::new(paste)),
+        Err(err) => {
+            log::warn!("paste insertion unavailable: {err:#}");
+            if caps.portal_remote_desktop {
+                backends.extend(connected("RemoteDesktop portal", portal(caps)));
+            } else {
+                // Text that could not be inserted still lands on the clipboard.
+                backends.extend(connected("clipboard", Selections::connect(caps)));
+            }
         }
-    } else if caps.data_control {
-        backends.extend(connected("clipboard", PasteInserter::clipboard_only()));
-    }
-    if caps.portal_remote_desktop && !paste_chord {
-        backends.extend(connected(
-            "RemoteDesktop portal",
-            PortalInserter::connect(&crate::paths::state_dir()),
-        ));
     }
     backends
+}
+
+fn portal(caps: &DesktopCaps) -> anyhow::Result<PortalInserter> {
+    PortalInserter::connect(&crate::paths::state_dir(), Selections::connect(caps)?)
 }
 
 fn connected<I: Inserter + 'static>(

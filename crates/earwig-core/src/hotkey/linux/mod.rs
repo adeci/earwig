@@ -17,6 +17,7 @@ use crate::desktop::DesktopCaps;
 /// NixOS module installs the same file.
 const UDEV_RULE: &str = include_str!("../../../../../assets/udev/70-earwig.rules");
 const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/70-earwig.rules";
+const UINPUT: &str = "/dev/uinput";
 
 /// The GlobalShortcuts portal, when enabled and advertised and earwig cannot
 /// watch a key itself; one that does not work ends quietly within seconds.
@@ -34,6 +35,11 @@ pub(super) fn sources(config: &HotkeyConfig, caps: &DesktopCaps) -> Vec<Box<dyn 
 /// The portal bound earwig's shortcut in this session.
 pub(super) fn portal_bound() -> bool {
     portal::BOUND.load(Ordering::Relaxed)
+}
+
+/// Whether earwig may make keyboards of its own, as keyboard access lets it.
+pub(crate) fn keyboard_access() -> bool {
+    rustix::fs::access(UINPUT, rustix::fs::Access::WRITE_OK).is_ok()
 }
 
 /// How keyboard access is given on this system.

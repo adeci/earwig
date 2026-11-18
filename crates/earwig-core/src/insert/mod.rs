@@ -40,6 +40,11 @@ pub enum InsertError {
     Failed(#[from] anyhow::Error),
 }
 
+/// Why insertion failed while the desktop has not let earwig type (Linux
+/// without keyboard access); the overlay says what to allow.
+pub const NOT_ALLOWED: &str =
+    "the desktop has not let earwig type: allow remote control in its dialog";
+
 /// The configured method, or for `auto` every usable backend best first. A
 /// configured method that cannot connect is an error.
 pub fn auto(config: &InsertConfig, caps: &DesktopCaps) -> anyhow::Result<Box<dyn Inserter>> {
@@ -111,7 +116,7 @@ fn reasons(skipped: &[String], none: &str) -> String {
 
 /// Whether `app` is one of `builtin` or `extra` (terminals pasting with
 /// Ctrl+Shift+V), ignoring ASCII case.
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(windows, test))]
 fn is_terminal(app: &str, builtin: &[&str], extra: &[String]) -> bool {
     builtin
         .iter()
@@ -254,7 +259,6 @@ mod tests {
         ));
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn terminals_match_case_insensitively_and_include_configured_ones() {
         let extra = ["my.Custom.Term".to_owned()];

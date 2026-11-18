@@ -1689,7 +1689,6 @@ dependencies = [
  "anyhow",
  "ashpd",
  "async-io",
- "atspi-proxies",
  "block2 0.6.2",
  "cpal",
  "dirs 7.0.0",
@@ -1719,6 +1718,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "windows-sys 0.61.2",
+ "x11rb",
  "xkbcommon 0.9.0",
 ]
 
