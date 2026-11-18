@@ -1,6 +1,7 @@
 //! earwig: hold or tap a hotkey, speak, and the text lands where you are typing.
 
 mod cli_models;
+mod cli_replacements;
 mod cli_update;
 mod daemon;
 mod ui;
@@ -49,6 +50,12 @@ enum Cmd {
         #[command(subcommand)]
         command: cli_models::ModelsCmd,
     },
+    /// List, add and remove replacements: what earwig writes instead of
+    /// what it heard.
+    Replacements {
+        #[command(subcommand)]
+        command: cli_replacements::ReplacementsCmd,
+    },
     /// Transcribe WAV files (any rate) with the configured model and print
     /// the text; timings go to stderr.
     Transcribe {
@@ -90,6 +97,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Status => daemon::status(),
         Cmd::Events => daemon::events(),
         Cmd::Models { command } => cli_models::run(command),
+        Cmd::Replacements { command } => cli_replacements::run(command),
         Cmd::Transcribe { wav, backend } => daemon::transcribe_files(&wav, backend.as_deref()),
         Cmd::Devices => daemon::devices(),
         Cmd::Update { check } => cli_update::run(check),

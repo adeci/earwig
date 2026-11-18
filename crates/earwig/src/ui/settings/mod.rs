@@ -1,9 +1,10 @@
-//! The settings window: General, Models, History.
+//! The settings window: General, Models, Replacements, History.
 
 mod general;
 mod history;
 mod models;
 mod pill_preview;
+mod replacements;
 mod shortcut;
 mod version;
 
@@ -27,6 +28,7 @@ use crate::ui::{UiState, config, theme};
 use history::HistoryPage;
 use models::ModelsPage;
 use pill_preview::PillPreview;
+use replacements::ReplacementsPage;
 use shortcut::ShortcutField;
 
 const LOCKED_HINT: &str = "Set by system configuration.";
@@ -82,6 +84,7 @@ fn follow_system(window: AnyWindowHandle, cx: &App) {
 
 struct SettingsView {
     models: Entity<ModelsPage>,
+    replacements: Entity<ReplacementsPage>,
     history: Entity<HistoryPage>,
     pill: Entity<PillPreview>,
     shortcut: Entity<ShortcutField>,
@@ -93,6 +96,7 @@ impl SettingsView {
         cx.observe(&shortcut, |_, _, cx| cx.notify()).detach();
         Self {
             models: cx.new(|cx| ModelsPage::new(window, cx)),
+            replacements: cx.new(|cx| ReplacementsPage::new(window, cx)),
             history: cx.new(|_| HistoryPage::default()),
             pill: cx.new(PillPreview::new),
             shortcut,
@@ -123,7 +127,8 @@ impl Render for SettingsView {
                             .pages([
                                 general::page(&self.pill, &self.shortcut, &settings, cx),
                                 models::page(&self.models, &settings, cx),
-                                history::page(&self.history, &settings, cx),
+                                replacements::page(&self.replacements),
+                                history::page(&self.history, &self.replacements, &settings, cx),
                             ]),
                     )
                     // The version, and a newer one, at the foot of the sidebar.
