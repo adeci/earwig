@@ -12,6 +12,7 @@ use gpui_kit::{
     Styled as _, Window, div,
 };
 
+use super::replacements::{self, ReplacementsPage};
 use super::{SIDEBAR_WIDTH, item, spaced};
 use crate::ui::{UiState, config, edit_config, now_ms};
 
@@ -23,8 +24,14 @@ pub struct HistoryPage {
     asking: bool,
 }
 
-pub fn page(view: &Entity<HistoryPage>, settings: &Config, cx: &App) -> SettingPage {
+pub fn page(
+    view: &Entity<HistoryPage>,
+    replacements: &Entity<ReplacementsPage>,
+    settings: &Config,
+    cx: &App,
+) -> SettingPage {
     let view = view.clone();
+    let replacements = replacements.clone();
     SettingPage::new("History")
         .icon(IconName::Inbox)
         .resettable(false)
@@ -57,7 +64,8 @@ pub fn page(view: &Entity<HistoryPage>, settings: &Config, cx: &App) -> SettingP
                 ),
             ]),
             SettingGroup::new().item(
-                SettingItem::render(|_, _, cx| entries(cx)).keywords(["history", "transcript"]),
+                SettingItem::render(move |_, _, cx| entries(&replacements, cx))
+                    .keywords(["history", "transcript"]),
             ),
         ]))
 }
@@ -155,7 +163,7 @@ fn limit_options(limit: usize) -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
-fn entries(cx: &App) -> impl IntoElement + use<> {
+fn entries(replacements: &Entity<ReplacementsPage>, cx: &App) -> impl IntoElement + use<> {
     let handle = UiState::handle(cx);
     let entries = handle.history().entries();
     let muted = cx.theme().muted_foreground;
@@ -175,11 +183,17 @@ fn entries(cx: &App) -> impl IntoElement + use<> {
             entries
                 .into_iter()
                 .enumerate()
-                .map(|(ix, entry)| row(ix, &entry, now, cx)),
+                .map(|(ix, entry)| row(ix, &entry, now, replacements, cx)),
         )
 }
 
-fn row(ix: usize, entry: &HistoryEntry, now: u64, cx: &App) -> impl IntoElement + use<> {
+fn row(
+    ix: usize,
+    entry: &HistoryEntry,
+    now: u64,
+    replacements: &Entity<ReplacementsPage>,
+    cx: &App,
+) -> impl IntoElement + use<> {
     let muted = cx.theme().muted_foreground;
     let status = if entry.method.is_some() {
         String::new()
@@ -205,14 +219,18 @@ fn row(ix: usize, entry: &HistoryEntry, now: u64, cx: &App) -> impl IntoElement 
                         .text_color(muted)
                         .child(format!("{}{status}", ago(now, entry.at_ms))),
                 )
-                .child(div().text_sm().child(entry.text.clone())),
+                .child(div().text_sm().child(entry.text.clone()))
+                .children(replacements::fix_row(replacements, entry.at_ms, cx)),
         )
         .child(
-            div().flex_shrink_0().child(
-                Clipboard::new(("copy-history", ix))
-                    .tooltip("Copy")
-                    .value(entry.text.clone()),
-            ),
+            h_flex()
+                .flex_shrink_0()
+                .child(replacements::fix_button(replacements, entry.at_ms, ix))
+                .child(
+                    Clipboard::new(("copy-history", ix))
+                        .tooltip("Copy")
+                        .value(entry.text.clone()),
+                ),
         )
 }
 

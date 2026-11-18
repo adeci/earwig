@@ -1,5 +1,6 @@
 # Dictation end to end on sway, earwig holding the keyboard: virtual mic -> earwig -> focused
-# foot. Software rendering via pixman, as in nixpkgs' sway test.
+# foot, with a replacement the module declares. Software rendering via pixman, as in nixpkgs'
+# sway test.
 { self }:
 let
   common = import ./common.nix { inherit self; };
@@ -12,6 +13,9 @@ in
     { pkgs, ... }:
     {
       imports = [ common.machine ];
+
+      # The clip ends "... over the lazy dog."
+      services.earwig.settings.replacements."lazy dog" = "sleepy cat";
 
       programs.sway.enable = true;
       environment.variables = {
@@ -64,5 +68,15 @@ in
         # A leaked Space would be in the text; sway's Mod4+space would have
         # taken focus from foot, and the text would have gone elsewhere.
         assert out == wait_insertion(events)["text"], out
+
+    with machine.nested("EARWIG: the module's replacement is written, and locked"):
+        assert "sleepy cat" in out and "dog" not in out.lower(), out
+        listed = as_alice("earwig replacements list")
+        assert "* lazy dog  sleepy cat" in listed, listed
+        refusal = machine.fail(
+            "su - alice -c "
+            + shlex.quote(f"XDG_RUNTIME_DIR={RUNTIME} earwig replacements remove 'lazy dog' 2>&1")
+        )
+        assert "system config" in refusal, refusal
   '';
 }

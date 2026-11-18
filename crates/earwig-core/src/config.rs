@@ -2,7 +2,7 @@
 //! by the settings window), then the system files (the NixOS module's), whose
 //! keys are locked and never written to the user file. See [`crate::paths`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::Backend;
 use crate::models::ModelSpec;
+use crate::replacements;
+
+const NO_PHRASE: &str = "[replacements] has an entry without a heard phrase";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -23,6 +26,10 @@ pub struct Config {
     pub appearance: AppearanceConfig,
     pub overlay: OverlayConfig,
     pub history: HistoryConfig,
+    /// What earwig writes (the value) wherever the final text says a phrase
+    /// (the key, as [`replacements::normalize`] spells it), before
+    /// `hooks.filter` gets it. See [`replacements::apply`].
+    pub replacements: BTreeMap<String, String>,
     pub hooks: HooksConfig,
     pub updates: UpdatesConfig,
 }
@@ -267,7 +274,7 @@ impl Default for HistoryConfig {
 }
 
 /// External commands, the extension point for anything earwig does not do
-/// itself (word replacements, LLM cleanup, logging, notifications).
+/// itself (LLM cleanup, logging, notifications).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HooksConfig {
@@ -307,8 +314,8 @@ pub struct ConfigPaths {
 pub struct ConfigStore {
     paths: ConfigPaths,
     config: Config,
-    /// Dotted leaf keys set by a system file.
-    locked: BTreeSet<String>,
+    /// The path to every leaf key set by a system file.
+    locked: BTreeSet<Vec<String>>,
     /// Why the user file was ignored, if it was.
     user_error: Option<String>,
 }
@@ -346,7 +353,7 @@ impl ConfigStore {
             let table = read_table(path)
                 .with_context(|| format!("reading {}", path.display()))?
                 .unwrap_or_default();
-            leaf_keys(&table, "", &mut locked);
+            leaf_keys(&table, &mut Vec::new(), &mut locked);
             merge(&mut merged, table);
         }
         let config = merged.try_into::<Config>().with_context(|| {
@@ -383,16 +390,22 @@ impl ConfigStore {
     /// Whether a dotted key such as `audio.keep_open` (or a parent of it) is
     /// set by a system file and therefore read-only here.
     pub fn is_locked(&self, key: &str) -> bool {
-        let mut prefix = key;
-        loop {
-            if self.locked.contains(prefix) {
-                return true;
-            }
-            match prefix.rsplit_once('.') {
-                Some((parent, _)) => prefix = parent,
-                None => return false,
-            }
-        }
+        self.locks(&key.split('.'))
+    }
+
+    /// Whether a system file sets the replacement for `heard`, a phrase as
+    /// [`replacements::normalize`] spells it.
+    pub fn is_replacement_locked(&self, heard: &str) -> bool {
+        self.locks(&["replacements", heard].into_iter())
+    }
+
+    /// Whether a locked key is at `path` or above it. A phrase is one step
+    /// of a path, dots and all.
+    fn locks<'a>(&self, path: &(impl Iterator<Item = &'a str> + Clone)) -> bool {
+        self.locked.iter().any(|leaf| {
+            let mut path = path.clone();
+            leaf.iter().all(|key| path.next() == Some(key.as_str()))
+        })
     }
 
     /// Apply `edit` and rewrite the user file with only the unlocked values
@@ -407,9 +420,18 @@ impl ConfigStore {
         }
         let mut next = self.config.clone();
         edit(&mut next);
+        // In the user file it would make that a broken one.
+        anyhow::ensure!(
+            next.replacements
+                .keys()
+                .all(|heard| !heard.trim().is_empty()),
+            NO_PHRASE
+        );
         let defaults = toml::Table::try_from(Config::default())?;
         let mut user = toml::Table::try_from(&next)?;
-        prune(&mut user, &defaults, "", &|key| self.is_locked(key));
+        prune(&mut user, &defaults, &mut Vec::new(), &|path| {
+            self.locks(&path.iter().map(String::as_str))
+        });
         crate::paths::write_atomic(&self.paths.user, toml::to_string_pretty(&user)?.as_bytes())?;
         *self = Self::load_from(self.paths.clone())?;
         Ok(())
@@ -418,10 +440,28 @@ impl ConfigStore {
 
 fn read_table(path: &Path) -> anyhow::Result<Option<toml::Table>> {
     match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text.parse()?)),
+        Ok(text) => {
+            let mut table: toml::Table = text.parse()?;
+            key_phrases(&mut table)?;
+            Ok(Some(table))
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Key `[replacements]` by [`replacements::normalize`], so a phrase is one
+/// entry whichever file sets it and however it is spelled there.
+fn key_phrases(table: &mut toml::Table) -> anyhow::Result<()> {
+    let Some(toml::Value::Table(entries)) = table.get_mut("replacements") else {
+        return Ok(());
+    };
+    for (heard, written) in std::mem::take(entries) {
+        let phrase = replacements::normalize(&heard);
+        anyhow::ensure!(!phrase.is_empty(), NO_PHRASE);
+        entries.insert(phrase, written);
+    }
+    Ok(())
 }
 
 /// Deep-merge `top` into `base`; tables merge, everything else replaces.
@@ -436,19 +476,16 @@ fn merge(base: &mut toml::Table, top: toml::Table) {
     }
 }
 
-fn leaf_keys(table: &toml::Table, prefix: &str, out: &mut BTreeSet<String>) {
+fn leaf_keys(table: &toml::Table, path: &mut Vec<String>, out: &mut BTreeSet<Vec<String>>) {
     for (key, value) in table {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
+        path.push(key.clone());
         match value {
-            toml::Value::Table(t) => leaf_keys(t, &path, out),
+            toml::Value::Table(t) => leaf_keys(t, path, out),
             _ => {
-                out.insert(path);
+                out.insert(path.clone());
             }
         }
+        path.pop();
     }
 }
 
@@ -456,26 +493,22 @@ fn leaf_keys(table: &toml::Table, prefix: &str, out: &mut BTreeSet<String>) {
 fn prune(
     table: &mut toml::Table,
     defaults: &toml::Table,
-    prefix: &str,
-    locked: &dyn Fn(&str) -> bool,
+    path: &mut Vec<String>,
+    locked: &dyn Fn(&[String]) -> bool,
 ) {
     table.retain(|key, value| {
-        let path = if prefix.is_empty() {
-            key.to_string()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        if locked(&path) {
-            return false;
-        }
-        match (value, defaults.get(key)) {
-            (toml::Value::Table(t), Some(toml::Value::Table(d))) => {
-                prune(t, d, &path, locked);
-                !t.is_empty()
-            }
-            (value, Some(default)) => value != default,
-            (_, None) => true,
-        }
+        path.push(key.to_owned());
+        let keep = !locked(path)
+            && match (value, defaults.get(key)) {
+                (toml::Value::Table(t), Some(toml::Value::Table(d))) => {
+                    prune(t, d, path, locked);
+                    !t.is_empty()
+                }
+                (value, Some(default)) => value != default,
+                (_, None) => true,
+            };
+        path.pop();
+        keep
     });
 }
 
@@ -590,5 +623,95 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert!(unreadable.border().abs() < f32::EPSILON);
+    }
+
+    fn table(store: &ConfigStore) -> Vec<(&str, &str)> {
+        store
+            .config()
+            .replacements
+            .iter()
+            .map(|(heard, written)| (heard.as_str(), written.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_system_replacement_is_locked_beside_the_users_own() {
+        let (_dir, mut store) = store(
+            "[replacements]\n'get hub' = 'GitHub'\n",
+            "[replacements]\n'nix os' = 'NixOS'\n",
+        );
+        assert_eq!(table(&store), [("get hub", "GitHub"), ("nix os", "NixOS")]);
+        assert!(store.is_replacement_locked("nix os"));
+        assert!(!store.is_replacement_locked("get hub"));
+
+        // The user's come and go; the system's stays, and out of the user file.
+        store
+            .update(|c| {
+                c.replacements.insert("jujitsu".into(), "jujutsu".into());
+                c.replacements.remove("get hub");
+                c.replacements.remove("nix os");
+            })
+            .unwrap();
+        assert_eq!(table(&store), [("jujitsu", "jujutsu"), ("nix os", "NixOS")]);
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[replacements]\njujitsu = \"jujutsu\"");
+    }
+
+    #[test]
+    fn the_system_file_wins_a_phrase_both_files_spell_differently() {
+        let (_dir, mut store) = store(
+            "[replacements]\n'Nix  OS' = 'nix-os'\n'get hub' = 'GitHub'\n",
+            "[replacements]\n'nix os' = 'NixOS'\n",
+        );
+        assert_eq!(table(&store), [("get hub", "GitHub"), ("nix os", "NixOS")]);
+        assert!(store.is_replacement_locked("nix os"));
+
+        // The next save drops the user's entry for it.
+        store.update(|c| c.history.limit = 10).unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert!(written.contains("\"get hub\" = \"GitHub\""), "{written}");
+        assert!(!written.to_lowercase().contains("nix"), "{written}");
+    }
+
+    #[test]
+    fn a_phrase_with_a_dot_is_not_locked_by_a_shorter_one() {
+        let (_dir, mut store) = store(
+            "[replacements]\n'node.js' = 'Node.js'\n",
+            "[replacements]\nnode = 'Node'\n",
+        );
+        assert!(store.is_replacement_locked("node"));
+        assert!(!store.is_replacement_locked("node.js"));
+
+        store.update(|c| c.history.limit = 10).unwrap();
+        assert_eq!(table(&store), [("node", "Node"), ("node.js", "Node.js")]);
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert!(written.contains("\"node.js\" = \"Node.js\""), "{written}");
+    }
+
+    #[test]
+    fn a_replacement_without_a_heard_phrase_is_refused() {
+        let phraseless = "[replacements]\n' ' = 'x'\n";
+        let (dir, store) = store(phraseless, "");
+        let error = store.user_error().unwrap_or_default();
+        assert!(error.contains("heard phrase"), "{error}");
+        assert_eq!(store.config(), &Config::default());
+
+        let system = dir.path().join("system.toml");
+        fs::write(&system, phraseless).unwrap();
+        let error = ConfigStore::load_from(ConfigPaths {
+            user: dir.path().join("none.toml"),
+            system: vec![system],
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("heard phrase"), "{error:#}");
+
+        let (_dir, mut store) = self::store("", "");
+        let error = store
+            .update(|c| {
+                c.replacements.insert(" ".into(), "x".into());
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("heard phrase"), "{error}");
+        assert!(!store.paths().user.exists());
     }
 }

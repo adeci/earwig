@@ -1,8 +1,9 @@
 //! The daemon's heart: one thread owns the dictation state and never blocks,
 //! so Release and Cancel land at once; everything else holds a [`Handle`].
 //! Workers: `earwig-engine` owns the [`Model`], `earwig-output` the
-//! [`Inserter`] (filter hook, insert, history, `on_insert`), `earwig-audio`
-//! the [`Capture`]. Results of an older (cancelled) recording are dropped.
+//! [`Inserter`] (replacements, filter hook, insert, history, `on_insert`),
+//! `earwig-audio` the [`Capture`]. Results of an older (cancelled) recording
+//! are dropped.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +21,7 @@ use crate::history::{History, HistoryEntry};
 use crate::hooks;
 use crate::insert::Inserter;
 use crate::models::{ModelError, ModelManager, ModelSpec};
+use crate::replacements;
 use crate::session::{Action, Input, Phase, Session};
 use crate::spectrum::Feed;
 use crate::update::{self, Updates};
@@ -532,9 +534,10 @@ fn output_thread(
     }
 }
 
-/// Filter, insert, record, announce.
+/// Replace, filter, insert, record, announce.
 fn deliver(inserter: &mut dyn Inserter, shared: &Shared, job: &Delivery) {
-    let text = hooks::filter(&job.config.hooks, &job.text);
+    let text = replacements::apply(&job.config.replacements, &job.text);
+    let text = hooks::filter(&job.config.hooks, &text);
     if text.trim().is_empty() || job.cancel.load(Ordering::Relaxed) {
         return;
     }
@@ -1361,6 +1364,61 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].text, TEXT);
         assert_eq!(history[0].method, None);
+    }
+
+    /// Dictate the clip; returns what was inserted.
+    fn dictate(d: &Daemon) -> String {
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        thread::sleep(Duration::from_millis(100));
+        d.handle.send(Command::Toggle);
+        match d.wait_for(|e| matches!(e, Event::Inserted { .. })) {
+            Event::Inserted { text, .. } => text,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn a_replacement_made_while_running_reaches_the_insertion_and_history() {
+        let d = Daemon::start(false);
+        // As `earwig replacements add` does it, from its own process.
+        let paths = d.handle.config().read().unwrap().paths().clone();
+        ConfigStore::load_from(paths)
+            .unwrap()
+            .update(|c| {
+                c.replacements
+                    .insert("fake engine".into(), "real one".into());
+            })
+            .unwrap();
+        d.handle.send(Command::ReloadConfig);
+        assert_eq!(dictate(&d), "hello from the real one");
+        assert_eq!(
+            d.calls.lock().unwrap().inserted,
+            ["hello from the real one"]
+        );
+        assert_eq!(
+            d.handle.history().entries()[0].text,
+            "hello from the real one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_filter_hook_gets_the_replaced_text() {
+        let d = Daemon::start(false);
+        let shout = ["sh", "-c", "tr a-z A-Z"].map(String::from).to_vec();
+        d.handle
+            .config()
+            .write()
+            .unwrap()
+            .update(|c| {
+                c.replacements
+                    .insert("fake engine".into(), "real one".into());
+                c.hooks.filter = shout;
+            })
+            .unwrap();
+        // Replaced after the filter, it would end in "real one".
+        assert_eq!(dictate(&d), "HELLO FROM THE REAL ONE");
     }
 
     #[test]

@@ -11,6 +11,39 @@ Models come from the settings window or `earwig models` (`list`, `search`,
 `download`, `use`, `remove`). The accuracy and speed dots are
 [Handy](https://github.com/cjpais/Handy)'s measurements.
 
+## Replacements
+
+A table of what earwig heard and what it writes instead, for the names it
+keeps getting wrong:
+
+```toml
+[replacements]
+"get hub" = "GitHub"
+"nix os" = "NixOS"
+```
+
+Add to it in the settings window, under **Replacements** or from a transcript
+in **History**, or with `earwig replacements` (`list`,
+`add <heard> <written>`, `remove <heard>`). A running earwig uses the change
+from its next dictation.
+
+The heard phrase matches whole words only, in any capitals and with any
+spaces between them, and the punctuation around it stays: `Get hub,` becomes
+`GitHub,` and `Get hub's` becomes `GitHub's`, but a contraction is one word,
+so `it` is not heard in `it's` nor `can` in `can't`. Chinese, Thai, kanji and
+hiragana, written without spaces, match anywhere; a run of katakana is one
+word. What is written goes in exactly as entered. Where two phrases overlap
+the longer one wins, and what a replacement wrote is not replaced again. The
+live text shows what was heard; the final text is replaced before the
+`filter` hook gets it.
+
+Entries of the system file are locked one by one, and yours apply beside
+them:
+
+```nix
+services.earwig.settings.replacements."nix os" = "NixOS";
+```
+
 ## Hooks
 
 `filter` gets each transcript on stdin, and what it prints is inserted

@@ -21,6 +21,7 @@ mod macos;
 pub mod models;
 pub mod paths;
 pub mod permissions;
+pub mod replacements;
 pub mod session;
 pub mod spectrum;
 #[cfg(test)]
