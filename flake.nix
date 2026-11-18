@@ -129,6 +129,7 @@
           vm-gnome = vmTest ./nix/tests/gnome.nix;
           vm-cpus = vmTest ./nix/tests/cpus.nix;
           vm-uinput = vmTest ./nix/tests/uinput.nix;
+          vm-switch = vmTest ./nix/tests/switch.nix;
         }
       );
 

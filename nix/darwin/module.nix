@@ -77,7 +77,8 @@ in
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
-    system.activationScripts.postActivation.text = ''
+    # Before nix-darwin reloads a changed agent, whose new daemon reads the settings at start.
+    system.activationScripts.extraActivation.text = ''
       mkdir -p '${systemDir}'
       ln -sfn ${models} '${systemDir}/models'
       ${
@@ -88,17 +89,21 @@ in
       }
     '';
 
-    launchd.user.agents.earwig.serviceConfig = {
-      ProgramArguments = [
-        "${cfg.package}/Applications/earwig.app/Contents/MacOS/earwig"
-        "daemon"
-      ];
-      RunAtLoad = true;
-      # Restart after a crash, not after `earwig quit` or the menu's Quit.
-      KeepAlive.SuccessfulExit = false;
-      ThrottleInterval = 10;
-      ProcessType = "Interactive";
-      LimitLoadToSessionType = "Aqua";
+    launchd.user.agents.earwig = {
+      # Changes the agent with the settings: nix-darwin reloads an agent whose plist changed.
+      environment.EARWIG_STARTED_FROM = "${configFile}";
+      serviceConfig = {
+        ProgramArguments = [
+          "${cfg.package}/Applications/earwig.app/Contents/MacOS/earwig"
+          "daemon"
+        ];
+        RunAtLoad = true;
+        # Restart after a crash, not after `earwig quit` or the menu's Quit.
+        KeepAlive.SuccessfulExit = false;
+        ThrottleInterval = 10;
+        ProcessType = "Interactive";
+        LimitLoadToSessionType = "Aqua";
+      };
     };
   };
 }
