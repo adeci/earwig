@@ -127,6 +127,7 @@
           vm-cosmic = vmTest ./nix/tests/cosmic.nix;
           vm-models = vmTest ./nix/tests/models.nix;
           vm-gnome = vmTest ./nix/tests/gnome.nix;
+          vm-gnome-defaults = vmTest ./nix/tests/gnome-defaults.nix;
           vm-cpus = vmTest ./nix/tests/cpus.nix;
           vm-uinput = vmTest ./nix/tests/uinput.nix;
           vm-switch = vmTest ./nix/tests/switch.nix;

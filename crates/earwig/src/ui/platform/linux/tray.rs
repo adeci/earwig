@@ -2,6 +2,7 @@
 
 use earwig_core::controller::Handle;
 use earwig_core::events::{Command, DictationState, UpdateState};
+use ksni::OfflineReason;
 use ksni::blocking::TrayMethods as _;
 use ksni::menu::{MenuItem, StandardItem};
 
@@ -19,14 +20,15 @@ impl TrayHandle {
     pub fn set_update(&self, _update: Option<&UpdateState>) {}
 }
 
-/// `None` (logged) without a tray host.
+/// `None` (logged) without a session bus. Without a tray host the icon waits for one: GNOME's is
+/// an extension that starts after us or is switched on later.
 pub fn spawn(handle: Handle, local: flume::Sender<Local>) -> Option<TrayHandle> {
     let tray = Tray {
         handle,
         local,
         state: DictationState::Idle,
     };
-    match tray.spawn() {
+    match tray.assume_sni_available(true).spawn() {
         Ok(handle) => Some(TrayHandle(handle)),
         Err(e) => {
             log::info!("no tray icon: {e}");
@@ -58,6 +60,19 @@ impl ksni::Tray for Tray {
 
     fn title(&self) -> String {
         "earwig".into()
+    }
+
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        if let OfflineReason::Error(e) = reason {
+            log::info!("no tray icon until a tray starts: {e}");
+        } else {
+            log::debug!("the tray went away; the icon returns with it");
+        }
+        true
+    }
+
+    fn watcher_online(&self) {
+        log::debug!("a tray started: the icon is in it");
     }
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
