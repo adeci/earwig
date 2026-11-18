@@ -48,6 +48,21 @@ in
       '';
     };
 
+    gnomeTray = lib.mkOption {
+      type = lib.types.bool;
+      default = config.services.desktopManager.gnome.enable;
+      defaultText = lib.literalExpression "config.services.desktopManager.gnome.enable";
+      description = ''
+        Show earwig's icon in GNOME's top bar, which has no tray of its own:
+        install the AppIndicator and KStatusNotifierItem Support extension and
+        switch it on by default, from the next login. Whoever has their own
+        list of enabled extensions keeps it and switches the extension on in
+        the Extensions app, or adds
+        `pkgs.gnomeExtensions.appindicator.extensionUuid` where the list is
+        declared.
+      '';
+    };
+
     package = lib.mkOption {
       type = lib.types.package;
       default = self.packages.${system}.default;
@@ -101,10 +116,23 @@ in
           path = m;
         }) cfg.models
       ))
-    ];
+    ]
+    ++ lib.optional cfg.gnomeTray pkgs.gnomeExtensions.appindicator;
     # earwig looks for pre-installed models in $XDG_DATA_DIRS/earwig/models;
     # /run/current-system/sw/share only carries the subtrees listed here.
     environment.pathsToLink = [ "/share/earwig" ];
+
+    # A default under each user's own settings and after other system databases, so whoever
+    # lists their extensions keeps their list.
+    programs.dconf.profiles.user.databases = lib.mkIf cfg.gnomeTray (
+      lib.mkAfter [
+        {
+          settings."org/gnome/shell".enabled-extensions = [
+            pkgs.gnomeExtensions.appindicator.extensionUuid
+          ];
+        }
+      ]
+    );
 
     environment.etc."xdg/earwig/config.toml" = lib.mkIf (cfg.settings != { }) {
       source = configFile;
