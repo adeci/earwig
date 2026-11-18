@@ -1650,7 +1650,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "earwig"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "earwig-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "earwig-keys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "log",
  "rustix",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "earwig-transcribe"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "earwig-core",
@@ -1745,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "earwigw"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 7.0.0",
  "embed-resource",
