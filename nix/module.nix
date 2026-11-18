@@ -10,6 +10,10 @@ let
   format = pkgs.formats.toml { };
   configFile = format.generate "earwig-config.toml" cfg.settings;
   inherit (pkgs.stdenv.hostPlatform) system;
+  # What a daemon is started from. It reads its settings once, at start; models it looks up on
+  # disk whenever it needs one.
+  startedFrom = "${lib.getExe cfg.package}:${configFile}";
+  systemctl = "${config.systemd.package}/bin/systemctl --user";
 in
 {
   options.services.earwig = {
@@ -17,8 +21,13 @@ in
       earwig, local dictation for the graphical session.
 
       This installs the `earwig` command and a systemd user service that
-      starts with `graphical-session.target`. earwig watches its hotkey itself
-      (see `keyboardAccess`); the desktop must provide the rest:
+      starts with `graphical-session.target`. Applying a configuration while
+      that session runs restarts earwig if its package or `settings` changed,
+      and starts it if it is not running: also after it was quit or had
+      failed, as NixOS does with system services.
+
+      earwig watches its hotkey itself (see `keyboardAccess`); the desktop
+      must provide the rest:
       - text is inserted through the input-method and virtual-keyboard
         protocols of niri, sway or Hyprland, or on GNOME and KDE through the
         RemoteDesktop portal (enable `xdg.portal` with the desktop's backend,
@@ -109,6 +118,19 @@ in
       ))
     ];
     boot.kernelModules = lib.mkIf cfg.keyboardAccess [ "uinput" ];
+    # A switch loads the rule but replays no device events: keyboards plugged in before it would
+    # stay out of reach until replugged or rebooted.
+    systemd.services.earwig-keyboard-access = lib.mkIf cfg.keyboardAccess {
+      description = "Apply earwig's udev rule to plugged-in keyboards";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "systemd-udevd.service" ];
+      restartTriggers = [ "${../assets/udev/70-earwig.rules}" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${config.systemd.package}/bin/udevadm trigger --action=change --subsystem-match=input --subsystem-match=misc";
+      };
+    };
 
     # The portal inserter spots terminals by their AT-SPI role, which Qt only exports when asked;
     # without this Konsole gets Ctrl+V (a literal ^V) instead of Ctrl+Shift+V.
@@ -125,16 +147,41 @@ in
       ];
       wants = [ "xdg-desktop-portal.service" ];
       wantedBy = [ "graphical-session.target" ];
-      # Restarting picks up a new model or settings after a rebuild.
-      restartTriggers = [ configFile ];
-      # Give up on a daemon that keeps failing (no model, broken config) instead of looping.
+      # Changes with the build and the settings, and the unit with it: NixOS 26.05 and newer
+      # restart a changed user unit on a switch, the activation script below does on older ones.
+      environment.EARWIG_STARTED_FROM = startedFrom;
+      # Give up on a daemon that keeps crashing instead of looping.
       startLimitBurst = 5;
       startLimitIntervalSec = 60;
       serviceConfig = {
+        # Active only once the daemon itself runs, carrying the environment above.
+        Type = "exec";
         ExecStart = "${lib.getExe cfg.package} daemon";
         Restart = "on-failure";
         RestartSec = 2;
       };
     };
+
+    # No switch starts what graphical-session.target wants, as the target refuses manual starts,
+    # and before NixOS 26.05 none restarts a user unit. This runs in every running user manager.
+    system.userActivationScripts.earwig.text = ''
+      if ${systemctl} --quiet is-active graphical-session.target; then
+        # As the switch does for system units: a start limit hit earlier is forgotten.
+        ${systemctl} reset-failed earwig.service || true
+        stale=0
+        if ${systemctl} --quiet is-active earwig.service; then
+          pid=$(${systemctl} show --property MainPID --value earwig.service)
+          grep --quiet --null-data --line-regexp --fixed-strings \
+            ${lib.escapeShellArg "EARWIG_STARTED_FROM=${startedFrom}"} "/proc/$pid/environ" || stale=$?
+        fi
+        # 1 from grep: the daemon's environment was read and names another build or other settings.
+        # A unit kept from restarts on a change is only started, as the switch does.
+        if [ "$stale" = 1 ] && ${lib.boolToString config.systemd.user.services.earwig.restartIfChanged}; then
+          ${systemctl} restart --no-block earwig.service || true
+        else
+          ${systemctl} start --no-block earwig.service || true
+        fi
+      fi
+    '';
   };
 }
