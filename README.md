@@ -73,3 +73,13 @@ event stream.
 On Windows and macOS, earwig checks GitHub for a new release once a day and
 offers **Update to …** in the tray menu and the settings window. Installations
 from Nix or from source don't check so just update them with those tools.
+
+## Acknowledgements
+
+Speech recognition is
+[transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) from the
+[Handy](https://github.com/cjpais/Handy) project. The speech models are
+NVIDIA's and others', each under its own licence; earwig downloads Handy's
+conversions of them and shows Handy's measurements in its model list.
+
+earwig was built with the assistance of large language models.
