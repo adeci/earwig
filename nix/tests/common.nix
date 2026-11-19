@@ -61,6 +61,9 @@
             }
           ];
         };
+        # PipeWire 1.6.9's X11 bell crashes it when Xwayland exits (fixed in 1.6.10), as it does
+        # 10 s after earwig's first window, whose GPU probe asks X in a VM (Mesa's device-select).
+        extraConfig.pipewire."90-no-x11-bell"."context.properties"."module.x11.bell" = false;
       };
 
       environment.systemPackages = [
