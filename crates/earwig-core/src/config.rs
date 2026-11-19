@@ -215,6 +215,9 @@ pub struct OverlayConfig {
     #[serde(serialize_with = "short_float")]
     pub border: f32,
     pub animation: OverlayAnimation,
+    /// Open where the pill was last dragged, kept in the state directory, not
+    /// at `position`.
+    pub remember_position: bool,
 }
 
 /// TOML floats are `f64`; widening through the shortest decimal writes 0.7
@@ -257,6 +260,7 @@ impl Default for OverlayConfig {
             opacity: Self::DEFAULT_OPACITY,
             border: 0.,
             animation: OverlayAnimation::default(),
+            remember_position: false,
         }
     }
 }
@@ -660,6 +664,20 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert!(unreadable.border().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn remembering_the_overlays_position_is_off_until_switched_on_and_lockable() {
+        let (_dir, mut store) = store("", "");
+        assert!(!store.config().overlay.remember_position);
+        store
+            .update(|c| c.overlay.remember_position = true)
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[overlay]\nremember_position = true");
+        let (_dir, locked) = self::store(&written, "[overlay]\nremember_position = false\n");
+        assert!(!locked.config().overlay.remember_position);
+        assert!(locked.is_locked("overlay.remember_position"));
     }
 
     fn table(store: &ConfigStore) -> Vec<(&str, &str)> {

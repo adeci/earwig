@@ -312,7 +312,8 @@ fn set_state(state: DictationState, cx: &mut App) {
     }
     match state {
         DictationState::Recording { started_at_ms, .. } => {
-            // Reuse a pill still on screen, unless it was dragged: new dictations start at home.
+            // Reuse a pill still on screen, unless it was dragged: new dictations start at home,
+            // or where the last one was left.
             if let Some(view) = cx.global::<UiState>().overlay.clone()
                 && view.read(cx).moved_before(started_at_ms)
             {
@@ -389,7 +390,19 @@ fn close_overlay(cx: &mut App) {
     if let Some(view) = cx.global_mut::<UiState>().overlay.take()
         && let Some(window) = view.read(cx).window()
     {
-        let _ = window.update(cx, |_, window, _| window.remove_window());
+        let remember = UiState::handle(cx)
+            .config()
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .config()
+            .overlay
+            .remember_position;
+        let _ = window.update(cx, |_, window, cx| {
+            if remember {
+                view.read(cx).remember(window, cx);
+            }
+            window.remove_window();
+        });
     }
 }
 

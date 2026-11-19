@@ -1,5 +1,5 @@
-//! Where the pill's window goes on the screen, and the pill in it: home, or where it was dragged,
-//! always on screen.
+//! Where the pill's window goes on the screen, and the pill in it: home, or where it was dragged
+//! or left last time, always on screen.
 
 use earwig_core::config::OverlayPosition;
 use gpui_kit::{Bounds, Pixels, Point, Size, point, px, size};
@@ -69,6 +69,15 @@ pub(super) fn clamp_spot(
         OverlayPosition::Top => fit(spot.y, area.top() + gap, area.bottom() - gap - pill.height),
     };
     point(x, y)
+}
+
+/// The spot `left` from an area's top-left on `area`, kept on it like a dragged pill's.
+pub(super) fn remembered_spot(
+    left: Point<Pixels>,
+    area: Bounds<Pixels>,
+    position: OverlayPosition,
+) -> Point<Pixels> {
+    clamp_spot(area.origin + left, size(px(WIDTH), px(0.)), area, position)
 }
 
 /// Top-left of the window showing the pill at `spot`.
@@ -239,6 +248,33 @@ mod tests {
         assert_eq!(
             bottom,
             point(px(2920. - EDGE_GAP - WIDTH), px(1080. - EDGE_GAP))
+        );
+    }
+
+    #[test]
+    fn a_remembered_spot_comes_back_on_any_screen_kept_on_it() {
+        let screen = screen();
+        let small = Bounds::new(Point::default(), size(px(800.), px(600.)));
+        let pill = size(px(WIDTH), px(124.));
+        for position in POSITIONS {
+            let dragged = home_spot(screen, position) + point(px(-500.), px(-300.));
+            let spot = clamp_spot(dragged, pill, screen, position);
+            let left = spot - screen.origin;
+            // Where it was left; on another screen as large, the same place there.
+            assert_eq!(remembered_spot(left, screen, position), spot);
+            let other = Bounds::new(point(px(-1920.), px(200.)), screen.size);
+            assert_eq!(remembered_spot(left, other, position), other.origin + left);
+            // A smaller screen (or a larger scale) keeps the pill on it.
+            for left in drags() {
+                let spot = remembered_spot(left, small, position);
+                let at = pill_at(clamp_spot(spot, pill, small, position), 124., position);
+                assert!(inside(at, small, EDGE_GAP), "{position:?} {left:?}: {at:?}");
+            }
+        }
+        let bottom_right = point(px(1300.), px(1000.));
+        assert_eq!(
+            remembered_spot(bottom_right, small, OverlayPosition::Bottom),
+            point(px(800. - EDGE_GAP - WIDTH), px(600. - EDGE_GAP))
         );
     }
 
