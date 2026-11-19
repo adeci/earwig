@@ -1,6 +1,8 @@
 //! Turns key edges into [`Event`]s and says which edges to swallow, the same on every OS.
 //! A key with modifiers fires when it goes down with exactly those held, and is swallowed;
 //! modifiers alone pass through, and another key while they're held makes an [`Event::Chord`].
+//! The discard shortcut is matched the same way, but only while a dictation is in progress; a
+//! modifier added to the held hotkey (Shift to `Super+Space`) can make it too.
 
 use crate::Event;
 use crate::hotkey::Hotkey;
@@ -37,6 +39,8 @@ pub(crate) enum Mask {
 #[derive(Debug)]
 pub(crate) struct Matcher {
     hotkey: Hotkey,
+    /// The discard shortcut's own matcher, which gets the edges the hotkey leaves.
+    discard: Option<Box<Self>>,
     /// The trigger is down and [`Event::Pressed`] went out.
     active: bool,
     /// Another key went down while the lone modifiers were held.
@@ -44,24 +48,58 @@ pub(crate) struct Matcher {
 }
 
 impl Matcher {
-    pub(crate) fn new(hotkey: Hotkey) -> Self {
+    pub(crate) fn new(hotkey: Hotkey, discard: Option<Hotkey>) -> Self {
         Self {
             hotkey,
+            discard: discard.map(|discard| Box::new(Self::new(discard, None))),
             active: false,
             chorded: false,
         }
     }
 
-    pub(crate) fn hotkey(&self) -> &Hotkey {
-        &self.hotkey
+    /// The hotkey and the discard shortcut.
+    pub(crate) fn hotkeys(&self) -> (&Hotkey, Option<&Hotkey>) {
+        let discard = self.discard.as_ref().map(|discard| &discard.hotkey);
+        (&self.hotkey, discard)
     }
 
-    /// `key` is `None` for keys earwig can't name; `held` is the other modifiers down.
-    pub(crate) fn edge(&mut self, key: Option<Key>, edge: Edge, held: Held) -> Action {
-        if self.hotkey.is_modifier_only() {
+    /// `key` is `None` for keys earwig can't name; `held` is the other modifiers down. The discard
+    /// shortcut counts while `dictating`.
+    pub(crate) fn edge(
+        &mut self,
+        key: Option<Key>,
+        edge: Edge,
+        held: Held,
+        dictating: bool,
+    ) -> Action {
+        let action = if self.hotkey.is_modifier_only() {
             self.modifiers_alone(key, edge, held)
         } else {
             self.with_key(key, edge, held)
+        };
+        let Some(discard) = self
+            .discard
+            .as_mut()
+            .filter(|_| action == Action::default())
+        else {
+            return action;
+        };
+        let added = key.filter(|key| key.modifier().is_some() && edge == Edge::Down);
+        if let Some(added) = added
+            && self.active
+            && !self.hotkey.is_modifier_only()
+            && discard.hotkey.trigger() == self.hotkey.trigger()
+            && discard.hotkey.modifiers_match(held.with(added))
+        {
+            return event(Event::Discard);
+        }
+        if !dictating && !discard.active {
+            return action;
+        }
+        let action = discard.edge(key, edge, held, false);
+        Action {
+            event: (action.event == Some(Event::Pressed)).then_some(Event::Discard),
+            ..action
         }
     }
 
@@ -151,19 +189,28 @@ mod tests {
     struct Keyboard {
         matcher: Matcher,
         held: Held,
+        dictating: bool,
     }
 
     impl Keyboard {
         fn new(hotkey: &str) -> Self {
             Self {
-                matcher: Matcher::new(hotkey.parse().unwrap()),
+                matcher: Matcher::new(hotkey.parse().unwrap(), None),
                 held: Held::default(),
+                dictating: false,
+            }
+        }
+
+        fn discarding(hotkey: &str, discard: &str) -> Self {
+            Self {
+                matcher: Matcher::new(hotkey.parse().unwrap(), Some(discard.parse().unwrap())),
+                ..Self::new(hotkey)
             }
         }
 
         fn edge(&mut self, key: Key, edge: Edge) -> Action {
             let held = self.held.without(key);
-            let action = self.matcher.edge(Some(key), edge, held);
+            let action = self.matcher.edge(Some(key), edge, held, self.dictating);
             self.held = if edge == Edge::Up {
                 held
             } else {
@@ -235,7 +282,7 @@ mod tests {
         assert_eq!(
             keyboard
                 .matcher
-                .edge(None, Down, Held::default().with(RIGHT_CTRL))
+                .edge(None, Down, Held::default().with(RIGHT_CTRL), false)
                 .event,
             Some(Event::Chord)
         );
@@ -340,5 +387,113 @@ mod tests {
         keyboard.down(LEFT_SUPER);
         assert_eq!(keyboard.down(Key::Letter('E')), Action::default());
         assert_eq!(keyboard.up(LEFT_SUPER), Action::default());
+    }
+
+    const SWALLOW: Action = Action {
+        event: None,
+        swallow: true,
+        mask: Mask::None,
+    };
+
+    #[test]
+    fn shift_added_to_the_held_hotkey_discards_and_its_release_ends_the_hold() {
+        for shift_first in [true, false] {
+            let mut keyboard = Keyboard::discarding("Super+Space", "Super+Shift+Space");
+            let hold = [(LEFT_SUPER, Down), (Key::Space, Down)];
+            assert_eq!(keyboard.events(&hold), [Event::Pressed]);
+            assert_eq!(
+                keyboard.down(LEFT_SHIFT),
+                event(Event::Discard),
+                "Shift reaches apps"
+            );
+            if shift_first {
+                assert_eq!(keyboard.up(LEFT_SHIFT), Action::default());
+            }
+            let release = keyboard.up(Key::Space);
+            assert_eq!(
+                (release.event, release.swallow),
+                (Some(Event::Released), true)
+            );
+            if !shift_first {
+                assert_eq!(keyboard.up(LEFT_SHIFT), Action::default());
+            }
+            assert_eq!(keyboard.up(LEFT_SUPER), Action::default());
+        }
+    }
+
+    #[test]
+    fn the_discard_shortcut_while_dictating_is_kept_from_apps_until_its_release() {
+        let mut keyboard = Keyboard::discarding("Super+Space", "Super+Shift+Space");
+        let tap = [(LEFT_SUPER, Down), (Key::Space, Down), (Key::Space, Up)];
+        assert_eq!(keyboard.events(&tap), [Event::Pressed, Event::Released]);
+        keyboard.dictating = true;
+        keyboard.down(LEFT_SHIFT);
+        let discard = keyboard.down(Key::Space);
+        assert_eq!(
+            discard,
+            Action {
+                event: Some(Event::Discard),
+                swallow: true,
+                mask: Mask::After
+            }
+        );
+        // The dictation is gone; its modifiers go up first.
+        keyboard.dictating = false;
+        assert_eq!(keyboard.edge(Key::Space, Repeat), SWALLOW);
+        assert_eq!(keyboard.events(&[(LEFT_SUPER, Up), (LEFT_SHIFT, Up)]), []);
+        assert_eq!(keyboard.up(Key::Space), SWALLOW);
+        let again = [(LEFT_SUPER, Down), (Key::Space, Down)];
+        assert_eq!(keyboard.events(&again), [Event::Pressed]);
+    }
+
+    #[test]
+    fn the_discard_shortcut_reaches_apps_while_no_dictation_is_in_progress() {
+        let mut keyboard = Keyboard::discarding("Super+Space", "Super+Shift+Space");
+        assert_eq!(
+            keyboard.events(&[(LEFT_SUPER, Down), (LEFT_SHIFT, Down)]),
+            []
+        );
+        assert_eq!(keyboard.down(Key::Space), Action::default());
+        assert_eq!(keyboard.edge(Key::Space, Repeat), Action::default());
+        assert_eq!(keyboard.up(Key::Space), Action::default());
+    }
+
+    #[test]
+    fn a_hotkey_with_shift_works_as_ever_beside_its_discard_shortcut() {
+        let mut keyboard = Keyboard::discarding("Ctrl+Shift+Space", "Ctrl+Space");
+        let hold = [
+            (LEFT_CTRL, Down),
+            (LEFT_SHIFT, Down),
+            (Key::Space, Down),
+            (LEFT_SHIFT, Up),
+            (Key::Space, Up),
+        ];
+        assert_eq!(keyboard.events(&hold), [Event::Pressed, Event::Released]);
+        keyboard.dictating = true;
+        let discard = [(Key::Space, Down), (Key::Space, Up)];
+        assert_eq!(keyboard.events(&discard), [Event::Discard]);
+    }
+
+    #[test]
+    fn modifiers_alone_discard_with_shift_first_and_make_a_chord_with_shift_after() {
+        let mut keyboard = Keyboard::discarding("RightCtrl", "Shift+RightCtrl");
+        keyboard.dictating = true;
+        let shift_first = [
+            (LEFT_SHIFT, Down),
+            (RIGHT_CTRL, Down),
+            (RIGHT_CTRL, Up),
+            (LEFT_SHIFT, Up),
+        ];
+        assert_eq!(keyboard.events(&shift_first), [Event::Discard]);
+        let shift_after = [
+            (RIGHT_CTRL, Down),
+            (LEFT_SHIFT, Down),
+            (LEFT_SHIFT, Up),
+            (RIGHT_CTRL, Up),
+        ];
+        assert_eq!(
+            keyboard.events(&shift_after),
+            [Event::Pressed, Event::Chord]
+        );
     }
 }

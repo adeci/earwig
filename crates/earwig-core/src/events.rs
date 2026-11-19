@@ -194,6 +194,10 @@ pub struct HotkeyStatus {
     pub source: String,
     /// The key earwig watches, as `[hotkey] key` writes it; empty for none.
     pub key: String,
+    /// The shortcut that throws a dictation away, as `[hotkey] discard`
+    /// writes it; empty for none.
+    #[serde(default)]
+    pub discard: String,
     pub keyboard: KeyboardState,
     /// Other apps do not get the key.
     pub blocking: bool,

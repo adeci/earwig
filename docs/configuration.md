@@ -11,6 +11,16 @@ Models come from the settings window or `earwig models` (`list`, `search`,
 `download`, `use`, `remove`). The accuracy and speed dots are
 [Handy](https://github.com/cjpais/Handy)'s measurements.
 
+## Discard
+
+The shortcut with Shift added throws the dictation in progress away: add
+Shift while you hold the shortcut, or press both after a tap. While nothing is
+being dictated, other apps get those keys as usual. Set another shortcut, or
+none, under **Discard** in the settings window or as `[hotkey] discard` (`""`
+for none); a shortcut with Shift in it has none until you set one.
+`earwig cancel` does the same, as does the cancel shortcut GNOME and KDE ask
+for without keyboard access.
+
 ## Replacements
 
 A table of what earwig heard and what it writes instead, for the names it

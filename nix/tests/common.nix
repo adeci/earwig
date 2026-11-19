@@ -236,6 +236,18 @@
         machine.wait_until_succeeds(f"systemctl --user -M alice@ is-active {unit}", timeout=td(minutes=2))
 
 
+    def key(name: str, down: bool) -> None:
+        """Put a key of QEMU's keyboard down or up. (sendkey only taps keys,
+        and queues the next ones behind a key it holds.)"""
+        from typing import Any
+
+        assert machine.qmp_client is not None
+        args: Any = {
+            "events": [{"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": name}}}]
+        }
+        machine.qmp_client.send("input-send-event", args)
+
+
     def check_virtual_mic() -> None:
         """Record the virtual mic while the clip plays into it; it must not be silent."""
         with machine.nested("virtual microphone produces audio"):
@@ -380,9 +392,10 @@
         machine.send_key("ctrl-s")
         check_received("/tmp/editor.txt", inserted)
 
-    def cancel_mid_clip(start) -> None:
-        """Start a recording with `start()` while the clip plays and cancel it once its live
-        transcript has words, the engine mid-recording; then wait for idle and the clip's end."""
+    def cancel_mid_clip(start, cancel=lambda: as_alice("earwig cancel")) -> str:
+        """Start a recording with `start()` while the clip plays and `cancel()` it once its live
+        transcript has words, the engine mid-recording; then wait for idle and the clip's end.
+        Returns the file of `watch_events`."""
         events = watch_events()
         start()
         play_clip()
@@ -394,9 +407,10 @@
             )
 
         retry(heard, timeout=td(minutes=2))
-        as_alice("earwig cancel")
+        cancel()
         wait_status(lambda s: s["state"]["state"] == "idle", "idle after the cancel")
         machine.wait_until_fails("pgrep -x pw-play", timeout=td(seconds=30))
+        return events
 
 
     def print_latency() -> None:

@@ -79,6 +79,8 @@ pub(crate) struct Shared {
 
 struct State {
     matcher: Option<Matcher>,
+    /// A dictation is in progress, so the discard shortcut counts.
+    dictating: bool,
     options: Options,
     recording: Option<Recording>,
     /// Bumped on each recording start/stop, so one that ended while its sink ran isn't put back.
@@ -97,11 +99,18 @@ struct Recording {
 /// What a backend needs to know about the configuration.
 #[derive(Clone, Debug)]
 pub(crate) struct Snapshot {
-    pub hotkey: Option<Hotkey>,
+    hotkeys: [Option<Hotkey>; 2],
     /// Only Linux can fail to keep the hotkey from apps, or choose not to.
     #[cfg(target_os = "linux")]
     pub options: Options,
     pub stop: bool,
+}
+
+impl Snapshot {
+    /// The hotkey, then the discard shortcut.
+    pub(crate) fn hotkeys(&self) -> impl Iterator<Item = &Hotkey> {
+        self.hotkeys.iter().flatten()
+    }
 }
 
 impl Listener {
@@ -110,6 +119,7 @@ impl Listener {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
                     matcher: None,
+                    dictating: false,
                     options,
                     recording: None,
                     generation: 0,
@@ -122,15 +132,22 @@ impl Listener {
         }
     }
 
-    /// `None` watches for nothing (a recording still works).
-    pub fn set_hotkey(&self, hotkey: Option<Hotkey>) {
+    /// `None` watches for nothing (a recording still works); `discard` goes with a hotkey.
+    pub fn set_hotkey(&self, hotkey: Option<Hotkey>, discard: Option<Hotkey>) {
+        let matcher = hotkey.map(|hotkey| Matcher::new(hotkey, discard));
         let mut state = self.shared.lock();
-        if state.matcher.as_ref().map(Matcher::hotkey) == hotkey.as_ref() {
+        if state.matcher.as_ref().map(Matcher::hotkeys) == matcher.as_ref().map(Matcher::hotkeys) {
             return;
         }
-        state.matcher = hotkey.map(Matcher::new);
+        state.matcher = matcher;
         drop(state);
         self.shared.waker.wake();
+    }
+
+    /// While a dictation is in progress the discard shortcut makes [`Event::Discard`] and is kept
+    /// from other apps; otherwise it reaches them.
+    pub fn set_dictating(&self, dictating: bool) {
+        self.shared.lock().dictating = dictating;
     }
 
     pub fn set_options(&self, options: Options) {
@@ -189,8 +206,9 @@ impl Shared {
 
     pub(crate) fn snapshot(&self) -> Snapshot {
         let state = self.lock();
+        let (hotkey, discard) = state.matcher.as_ref().map(Matcher::hotkeys).unzip();
         Snapshot {
-            hotkey: state.matcher.as_ref().map(|m| m.hotkey().clone()),
+            hotkeys: [hotkey.cloned(), discard.flatten().cloned()],
             #[cfg(target_os = "linux")]
             options: state.options,
             stop: state.stop,
@@ -218,11 +236,12 @@ impl Shared {
             }
             return swallow;
         }
+        let dictating = state.dictating;
         let Some(recording) = &mut state.recording else {
             return state
                 .matcher
                 .as_mut()
-                .map(|matcher| matcher.edge(key, edge, held))
+                .map(|matcher| matcher.edge(key, edge, held, dictating))
                 .unwrap_or_default();
         };
         let Some(step) = recording.recorder.edge(key, edge, held) else {
@@ -269,7 +288,7 @@ mod tests {
     #[test]
     fn a_recording_takes_the_keys_from_the_hotkey_until_it_is_done() {
         let listener = Listener::new(Options::default());
-        listener.set_hotkey(Some("Super+Space".parse().unwrap()));
+        listener.set_hotkey(Some("Super+Space".parse().unwrap()), None);
         let (tx, rx) = mpsc::channel();
         listener.record(move |step| tx.send(step).unwrap());
         let shared = &listener.shared;

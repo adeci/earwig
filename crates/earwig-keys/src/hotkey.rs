@@ -53,6 +53,13 @@ impl Hotkey {
         self.trigger.modifier().is_some()
     }
 
+    /// With Shift added, as the discard shortcut is by default; the same if Shift is in it.
+    #[must_use]
+    pub fn with_shift(&self) -> Self {
+        let shift = (Modifier::Shift, Side::Either);
+        Self::new(self.modifiers.iter().copied().chain([shift]), self.trigger)
+    }
+
     /// As windows show it: `Right Ctrl`, `Ctrl+Space`; on a Mac `Right ⌘`, `⌥ Space`.
     pub fn label(&self) -> String {
         self.label_on(Os::CURRENT)
@@ -321,5 +328,15 @@ mod tests {
         assert!(right_ctrl.modifiers_match(held.with(left_ctrl)));
         assert!(!right_ctrl.modifiers_match(held.with(left_shift)));
         assert!(right_ctrl.modifiers_match(held.with(Key::Modifier(Modifier::Fn, Side::Either))));
+    }
+
+    #[test]
+    fn shift_is_added_once() {
+        let shifted = |text: &str| parse(text).unwrap().with_shift();
+        assert_eq!(shifted("Super+Space"), parse("Super+Shift+Space").unwrap());
+        assert_eq!(shifted("RightCtrl"), parse("Shift+RightCtrl").unwrap());
+        for text in ["Ctrl+LeftShift+F9", "RightShift"] {
+            assert_eq!(shifted(text), parse(text).unwrap(), "{text}");
+        }
     }
 }

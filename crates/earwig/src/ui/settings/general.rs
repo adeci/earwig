@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::pill_preview::PillPreview;
-use super::shortcut::{self, ShortcutField};
+use super::shortcut::{self, ShortcutField, Target};
 use super::{hinted, is_locked, item, section, spaced};
 use crate::ui::{UiState, apply_appearance, config, edit_config};
 
@@ -105,7 +105,12 @@ fn hotkey(settings: &Config, shortcut: &Entity<ShortcutField>, cx: &App) -> Sett
             |c, v| c.hotkey.mode = v,
         ),
     );
-    let rows = [shortcut::item(shortcut, &settings.hotkey.key, cx), mode].into_iter();
+    let rows = [
+        shortcut::item(shortcut, Target::Dictate, &settings.hotkey, cx),
+        shortcut::item(shortcut, Target::Discard, &settings.hotkey, cx),
+        mode,
+    ]
+    .into_iter();
     #[cfg(target_os = "linux")]
     let rows = rows.chain(linux_rows(&status, shortcut, cx));
     section(

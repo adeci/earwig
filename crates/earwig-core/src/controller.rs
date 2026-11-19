@@ -726,6 +726,7 @@ impl Controller {
     }
 
     fn set_state(&self, state: DictationState) {
+        crate::hotkey::set_dictating(state != DictationState::Idle);
         self.update_status(|s| s.state = state);
         self.publish(&Event::State { state });
     }

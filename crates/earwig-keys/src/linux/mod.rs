@@ -151,6 +151,15 @@ fn trigger_codes(hotkey: &Hotkey) -> Vec<u16> {
         .collect()
 }
 
+/// The keys of the hotkey and the discard shortcut that are swallowed.
+fn swallowed_codes(snapshot: &Snapshot) -> Vec<u16> {
+    snapshot
+        .hotkeys()
+        .filter(|hotkey| swallows(hotkey))
+        .flat_map(trigger_codes)
+        .collect()
+}
+
 #[derive(Default)]
 struct Keyboards {
     keyboards: Vec<Keyboard>,
@@ -188,14 +197,13 @@ impl Keyboards {
         }
     }
 
-    /// Grab the keyboards the hotkey wants and let go of the rest, each once no key is down on it.
+    /// Grab the keyboards the hotkeys want and let go of the rest, each once no key is down on it.
     fn settle(&mut self, snapshot: &Snapshot) {
-        let codes = snapshot
-            .hotkey
-            .as_ref()
-            .filter(|hotkey| snapshot.options.block && swallows(hotkey))
-            .map(trigger_codes)
-            .unwrap_or_default();
+        let codes = if snapshot.options.block {
+            swallowed_codes(snapshot)
+        } else {
+            Vec::new()
+        };
         for keyboard in &mut self.keyboards {
             let device = &keyboard.device;
             let wanted = !device.is_virtual
@@ -221,13 +229,13 @@ impl Keyboards {
                 Status::NoAccess
             };
         }
-        let Some(hotkey) = snapshot.hotkey.as_ref().filter(|hotkey| swallows(hotkey)) else {
+        let codes = swallowed_codes(snapshot);
+        if codes.is_empty() {
             return Status::Watching(Blocking::PassThrough);
-        };
+        }
         if !snapshot.options.block {
             return Status::Watching(Blocking::No("swallowing it is off".into()));
         }
-        let codes = trigger_codes(hotkey);
         let refused = self
             .keyboards
             .iter()
