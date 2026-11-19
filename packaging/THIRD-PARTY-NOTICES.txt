@@ -11262,9 +11262,9 @@ Apache License
 Apache License 2.0 (Apache-2.0)
 
 Used by:
+- gpui-component 0.9.0 <https://github.com/longbridge/gpui-kit>
 - gpui-base 0.9.0 <https://github.com/longbridge/gpui-kit>
 - gpui-component-macros 0.9.0 <https://crates.io/crates/gpui-component-macros>
-- gpui-component 0.9.0 <https://github.com/longbridge/gpui-kit>
 
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
 

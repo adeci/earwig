@@ -1,6 +1,7 @@
 # Dictation end to end on sway, earwig holding the keyboard: virtual mic -> earwig -> foot through
 # the input method, with a replacement the module declares; then with `[insert] method = "paste"`
-# into foot and Mousepad, pasted with Shift+Insert from sway's virtual keyboard. First the discard
+# into foot and Mousepad, pasted with Shift+Insert from sway's virtual keyboard. First a
+# replacement typed into the settings window, its Heard field clicked at the edge; then the discard
 # shortcut, Super+Shift+Space: it reaches sway while nothing is dictated, and throws a dictation
 # away when Shift joins the held hotkey or after a tap. Software rendering via pixman, as in
 # nixpkgs' sway test.
@@ -53,6 +54,22 @@ in
 
 
     check_virtual_mic()
+
+    with machine.nested("EARWIG: a click on the edge of a settings field types into it"):
+        wait_status(lambda _: True, "the daemon")
+        spawn("/run/current-system/sw/bin/earwig settings")
+        wait_focused("io.github.adeci.earwig")
+        click_text("Replacements")
+        # In the field's padding, left of its placeholder.
+        click_text("Heard,", left_of=6)
+        machine.send_chars("teh")
+        click_text("Written,")
+        machine.send_chars("the\n")
+        retry(
+            lambda _last_try: ["teh", "the"] in [row.split() for row in as_alice("earwig replacements list").splitlines()],
+            timeout=td(seconds=30),
+        )
+        machine.succeed("su - alice -c " + shlex.quote("""swaymsg '[app_id="io.github.adeci.earwig"] kill'"""))
 
     start_target_terminal()
     wait_focused("earwig-target")
