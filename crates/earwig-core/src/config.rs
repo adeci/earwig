@@ -55,6 +55,9 @@ pub struct HotkeyConfig {
     /// The key earwig watches itself (`Super+Space`, or modifiers alone such
     /// as `RightCtrl`); empty for none (compositor binds or the portal only).
     pub key: String,
+    /// Throws the dictation in progress away. Unset, `key` with Shift added
+    /// (none when Shift is in `key`); empty for none.
+    pub discard: Option<String>,
     /// Linux: keep the key from other apps and the compositor by grabbing the
     /// keyboards that have it. macOS and Windows always do.
     pub block: bool,
@@ -84,6 +87,7 @@ impl Default for HotkeyConfig {
             mode: ActivationMode::HoldOrToggle,
             hold_threshold_ms: 300,
             key: Self::DEFAULT_KEY.into(),
+            discard: None,
             block: true,
             portal: true,
             portal_trigger: "CTRL+space".into(),
@@ -571,6 +575,38 @@ mod tests {
         let written = fs::read_to_string(&store.paths().user).unwrap();
         assert_eq!(written.trim(), "");
         assert_eq!(store.config().hotkey.key, HotkeyConfig::DEFAULT_KEY);
+    }
+
+    #[test]
+    fn the_discard_shortcut_is_unset_set_or_none() {
+        let (_dir, mut store) = store("", "");
+        assert_eq!(store.config().hotkey.discard, None);
+        store
+            .update(|c| c.hotkey.discard = Some("Ctrl+F9".into()))
+            .unwrap();
+        assert_eq!(store.config().hotkey.discard.as_deref(), Some("Ctrl+F9"));
+        store
+            .update(|c| c.hotkey.discard = Some(String::new()))
+            .unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "[hotkey]\ndiscard = \"\"");
+        assert_eq!(store.config().hotkey.discard.as_deref(), Some(""));
+        store.update(|c| c.hotkey.discard = None).unwrap();
+        let written = fs::read_to_string(&store.paths().user).unwrap();
+        assert_eq!(written.trim(), "");
+    }
+
+    #[test]
+    fn a_system_file_locks_the_discard_shortcut() {
+        let (_dir, mut store) = store(
+            "[hotkey]\ndiscard = 'Ctrl+F9'\n",
+            "[hotkey]\ndiscard = ''\n",
+        );
+        assert!(store.is_locked("hotkey.discard"));
+        assert!(!store.is_locked("hotkey.key"));
+        assert_eq!(store.config().hotkey.discard.as_deref(), Some(""));
+        store.update(|c| c.hotkey.discard = None).unwrap();
+        assert_eq!(store.config().hotkey.discard.as_deref(), Some(""));
     }
 
     #[test]

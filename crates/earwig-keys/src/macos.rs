@@ -126,10 +126,7 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
         if snapshot.stop {
             return Ok(());
         }
-        let filters = snapshot
-            .hotkey
-            .as_ref()
-            .is_some_and(|h| !h.is_modifier_only());
+        let filters = snapshot.hotkeys().any(|h| !h.is_modifier_only());
         // Without Accessibility a tap would make macOS ask for Input Monitoring too; ask for one.
         if !can_see_keys() {
             shared.set_status(Status::NoAccess);
@@ -173,7 +170,7 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
             shared.waker.set(Some(RunLoop(run_loop)));
             // A change before the run loop was known.
             let now = shared.snapshot();
-            if now.stop || now.hotkey.as_ref().is_some_and(|h| !h.is_modifier_only()) != filters {
+            if now.stop || now.hotkeys().any(|h| !h.is_modifier_only()) != filters {
                 CFRunLoopStop(run_loop);
             }
             CGEventTapEnable(port, true);
@@ -378,14 +375,16 @@ mod tests {
     const C: u16 = 8;
     const SPACE: u16 = 49;
 
-    /// Runs tap events through `edge`, `held` and a matcher, like the callback.
+    /// Runs tap events through `edge`, `held` and a matcher, like the callback, with the hotkey's
+    /// Shift variant to discard.
     fn events(hotkey: &str, taps: &[(u32, u16, u64)]) -> Vec<Event> {
-        let mut matcher = Matcher::new(hotkey.parse::<Hotkey>().unwrap());
+        let hotkey = hotkey.parse::<Hotkey>().unwrap();
+        let mut matcher = Matcher::new(hotkey.clone(), Some(hotkey.with_shift()));
         taps.iter()
             .filter_map(|&(kind, code, flags)| {
                 let (key, edge) = edge(kind, code, flags, false)?;
                 let held = held(flags).besides(key);
-                matcher.edge(key, edge, held).event
+                matcher.edge(key, edge, held, false).event
             })
             .collect()
     }
@@ -442,6 +441,22 @@ mod tests {
         );
         let ctrl = [(FLAGS_CHANGED, LEFT_CTRL, 0x4_0000 | 0x1)];
         assert_eq!(events("LeftCtrl", &ctrl), [Event::Pressed]);
+    }
+
+    #[test]
+    fn shift_added_to_option_space_discards() {
+        let option = 0x8_0000 | 0x20;
+        let shift = 0x2_0000 | 0x2;
+        let taps = [
+            (KEY_DOWN, SPACE, option),
+            (FLAGS_CHANGED, LEFT_SHIFT, option | shift),
+            (FLAGS_CHANGED, LEFT_SHIFT, option),
+            (KEY_UP, SPACE, option),
+        ];
+        assert_eq!(
+            events("Option+Space", &taps),
+            [Event::Pressed, Event::Discard, Event::Released]
+        );
     }
 
     #[test]

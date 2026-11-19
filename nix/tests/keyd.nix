@@ -35,17 +35,6 @@ in
     ${common.prelude}
 
     import time
-    from typing import Any
-
-
-    def key(name: str, down: bool) -> None:
-        """Put a key of QEMU's keyboard down or up. (sendkey only taps keys,
-        and queues the next ones behind a key it holds.)"""
-        assert machine.qmp_client is not None
-        args: Any = {
-            "events": [{"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": name}}}]
-        }
-        machine.qmp_client.send("input-send-event", args)
 
 
     start_all()

@@ -1,6 +1,7 @@
-//! The Shortcut row (record a key, or reset to the default) and, on Linux, keyboard access.
+//! The Shortcut and Discard rows (record a key, or reset to the default) and, on Linux,
+//! keyboard access.
 
-use earwig_core::config::HotkeyConfig;
+use earwig_core::config::{Config, HotkeyConfig};
 use earwig_core::events::{HotkeyStatus, KeyboardState};
 use earwig_core::hotkey::{self, Check, Hotkey, Recorded};
 use gpui_kit::assets::IconName;
@@ -15,15 +16,22 @@ use gpui_kit::{
 };
 
 use super::{LOCKED_HINT, hinted, is_locked};
-use crate::ui::edit_config;
+use crate::ui::{UiState, config, edit_config};
+
+/// Which shortcut a row sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Target {
+    Dictate,
+    Discard,
+}
 
 /// A recording in progress, and what the last one left to say.
 #[derive(Default)]
 pub struct ShortcutField {
-    recording: bool,
+    recording: Option<Target>,
     /// Modifiers held so far, as the keycap shows them.
     holding: Option<SharedString>,
-    note: Option<Note>,
+    note: Option<(Target, Note)>,
     /// Linux: the keyboard access helper.
     #[cfg(target_os = "linux")]
     allowing: Allowing,
@@ -48,12 +56,12 @@ enum Allowing {
 }
 
 impl ShortcutField {
-    fn record(&mut self, cx: &mut Context<Self>) {
+    fn record(&mut self, target: Target, cx: &mut Context<Self>) {
         let (tx, rx) = flume::unbounded();
         hotkey::record(move |step| {
             let _ = tx.send(step);
         });
-        self.recording = true;
+        self.recording = Some(target);
         self.holding = None;
         self.note = None;
         cx.spawn(async move |this, cx| {
@@ -70,24 +78,26 @@ impl ShortcutField {
 
     fn cancel(&mut self, cx: &mut Context<Self>) {
         hotkey::stop_recording();
-        self.recording = false;
+        self.recording = None;
         cx.notify();
     }
 
-    /// Back to the default key, which drops `[hotkey] key` from the user's file.
-    fn reset(&mut self, cx: &mut Context<Self>) {
-        if self.recording {
+    /// Set `target` to `key`; `None`, its default, drops it from the user's file.
+    fn save(&mut self, target: Target, key: Option<String>, cx: &mut Context<Self>) {
+        if self.recording.take().is_some() {
             hotkey::stop_recording();
-            self.recording = false;
             self.holding = None;
         }
         self.note = None;
-        edit_config(cx, |c| c.hotkey.key = HotkeyConfig::DEFAULT_KEY.into());
+        edit_config(cx, |c| set(c, target, key));
         cx.notify();
     }
 
     /// One step of the recording; true once it is over.
     fn step(&mut self, step: Recorded, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.recording else {
+            return true;
+        };
         match step {
             Recorded::Holding(label) => {
                 self.holding = Some(label.into());
@@ -96,20 +106,30 @@ impl ShortcutField {
             }
             Recorded::Cancelled => {}
             Recorded::Done(hotkey) => {
-                self.note = match hotkey.check(&hotkey::desktop()) {
+                let key = hotkey.to_string();
+                let check = match target {
+                    Target::Dictate => hotkey.check(&hotkey::desktop()),
+                    Target::Discard => {
+                        let mut settings = config(UiState::handle(cx)).hotkey;
+                        settings.discard = Some(key.clone());
+                        hotkey::discard(&settings)
+                            .map_or_else(|e| Check::Reject(e.to_string()), |_| Check::Fine)
+                    }
+                };
+                let note = match check {
                     Check::Reject(reason) => Some(Note::Refused(reason.into())),
                     check => {
-                        let key = hotkey.to_string();
-                        edit_config(cx, |c| c.hotkey.key = key);
+                        edit_config(cx, |c| set(c, target, Some(key)));
                         match check {
                             Check::Warn(reason) => Some(Note::Warning(reason.into())),
                             _ => None,
                         }
                     }
                 };
+                self.note = note.map(|note| (target, note));
             }
         }
-        self.recording = false;
+        self.recording = None;
         self.holding = None;
         cx.notify();
         true
@@ -148,9 +168,19 @@ impl ShortcutField {
 
 impl Drop for ShortcutField {
     fn drop(&mut self) {
-        if self.recording {
+        if self.recording.is_some() {
             hotkey::stop_recording();
         }
+    }
+}
+
+/// Set `target` to `key`; `None` is its default.
+fn set(config: &mut Config, target: Target, key: Option<String>) {
+    match target {
+        Target::Dictate => {
+            config.hotkey.key = key.unwrap_or_else(|| HotkeyConfig::DEFAULT_KEY.into());
+        }
+        Target::Discard => config.hotkey.discard = key,
     }
 }
 
@@ -186,23 +216,99 @@ fn is_default(key: &str) -> bool {
     key.parse::<Hotkey>().ok() == HotkeyConfig::DEFAULT_KEY.parse().ok()
 }
 
-pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) -> SettingItem {
-    let locked = is_locked(cx, "hotkey.key");
-    let resettable = !locked && !is_default(configured);
-    let reset_tip = SharedString::from(format!("Reset to {}", label(HotkeyConfig::DEFAULT_KEY)));
-    let label = label(configured);
-    let configured = configured.to_owned();
+/// The discard shortcut as the row shows it, or as written if it is not taken.
+fn discard_label(settings: &HotkeyConfig, discard: &Result<Option<Hotkey>, String>) -> String {
+    match discard {
+        Ok(discard) => discard
+            .as_ref()
+            .map_or_else(|| "None".into(), Hotkey::label),
+        Err(_) => label(settings.discard.as_deref().unwrap_or_default()),
+    }
+}
+
+/// The row's title, its config key, its shortcut as it shows, the default's, and whether it is
+/// set apart from the default.
+fn parts(
+    target: Target,
+    settings: &HotkeyConfig,
+    discard: &Result<Option<Hotkey>, String>,
+) -> (&'static str, &'static str, String, String, bool) {
+    match target {
+        Target::Dictate => (
+            "Shortcut",
+            "hotkey.key",
+            label(&settings.key),
+            label(HotkeyConfig::DEFAULT_KEY),
+            !is_default(&settings.key),
+        ),
+        Target::Discard => {
+            let unset = HotkeyConfig {
+                discard: None,
+                ..settings.clone()
+            };
+            let default = hotkey::discard(&unset).map_err(|e| e.to_string());
+            (
+                "Discard",
+                "hotkey.discard",
+                discard_label(settings, discard),
+                discard_label(&unset, &default),
+                settings.discard.is_some(),
+            )
+        }
+    }
+}
+
+/// An icon button that sets `target` to `key` (`None`: its default).
+fn save_button(
+    field: &Entity<ShortcutField>,
+    target: Target,
+    icon: IconName,
+    tip: SharedString,
+    key: Option<String>,
+) -> Button {
+    let field = field.clone();
+    Button::new(SharedString::from(format!("{tip}-{target:?}")))
+        .icon(icon)
+        .ghost()
+        .small()
+        .tooltip(tip)
+        .on_click(move |_, _, cx| {
+            field.update(cx, |field, cx| field.save(target, key.clone(), cx));
+        })
+}
+
+pub(super) fn item(
+    field: &Entity<ShortcutField>,
+    target: Target,
+    settings: &HotkeyConfig,
+    cx: &App,
+) -> SettingItem {
+    let discard = hotkey::discard(settings).map_err(|e| e.to_string());
+    let (title, config_key, label, default, changed) = parts(target, settings, &discard);
+    let locked = is_locked(cx, config_key);
+    let resettable = !locked && changed;
+    let clearable = !locked && target == Target::Discard && !matches!(discard, Ok(None));
+    let reset_tip = SharedString::from(format!("Reset to {default}"));
+    let key = settings.key.clone();
     let field = field.clone();
     SettingItem::render(move |options, _, cx| {
         let status = hotkey::status();
         let state = field.read(cx);
+        let recording = state.recording == Some(target);
+        let line = if recording {
+            Some(("Press the keys you want.".to_owned(), Tone::Muted))
+        } else if target == Target::Dictate {
+            line(&status, &key, &label)
+        } else {
+            Some(discard_line(&discard, &label))
+        };
         // A locked row with nothing else to say says it's locked.
-        let line = line(state, &status, &configured, &label)
+        let line = line
             .map(|(line, tone)| (hinted(&line, locked), tone))
             .or_else(|| locked.then(|| (LOCKED_HINT.to_owned(), Tone::Muted)));
-        let note = note(state);
+        let note = note(state, target);
         let can_record = status.keyboard == KeyboardState::Watching && !locked;
-        let shown: SharedString = if state.recording {
+        let shown: SharedString = if recording {
             state
                 .holding
                 .clone()
@@ -210,8 +316,8 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
         } else {
             label.clone().into()
         };
-        let button = if state.recording {
-            Button::new("cancel-shortcut")
+        let button = if recording {
+            Button::new(SharedString::from(format!("cancel-{title}")))
                 .label("Cancel")
                 .ghost()
                 .small()
@@ -220,26 +326,26 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
                     move |_, _, cx| field.update(cx, ShortcutField::cancel)
                 })
         } else {
-            Button::new("record-shortcut")
+            Button::new(SharedString::from(format!("record-{title}")))
                 .label("Record")
                 .outline()
                 .small()
                 .disabled(!can_record)
                 .on_click({
                     let field = field.clone();
-                    move |_, _, cx| field.update(cx, ShortcutField::record)
+                    move |_, _, cx| field.update(cx, |field, cx| field.record(target, cx))
                 })
         };
-        let reset = resettable.then(|| {
-            Button::new("reset-shortcut")
-                .icon(IconName::RotateCcw)
-                .ghost()
-                .small()
-                .tooltip(reset_tip.clone())
-                .on_click({
-                    let field = field.clone();
-                    move |_, _, cx| field.update(cx, ShortcutField::reset)
-                })
+        let reset = resettable
+            .then(|| save_button(&field, target, IconName::RotateCcw, reset_tip.clone(), None));
+        let clear = clearable.then(|| {
+            save_button(
+                &field,
+                target,
+                IconName::Close,
+                "Clear".into(),
+                Some(String::new()),
+            )
         });
         let keycap = div()
             .px_2()
@@ -247,13 +353,13 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
             .min_w(px(96.))
             .rounded(cx.theme().radius)
             .border_1()
-            .border_color(if state.recording {
+            .border_color(if recording {
                 cx.theme().primary
             } else {
                 cx.theme().border
             })
             .text_sm()
-            .when(state.recording, |this| {
+            .when(recording, |this| {
                 this.text_color(cx.theme().muted_foreground)
             })
             .child(shown);
@@ -263,9 +369,10 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
             .flex_shrink_0()
             .child(keycap)
             .children(reset)
+            .children(clear)
             .child(button);
         row(
-            "Shortcut",
+            title,
             line.map(|(line, tone)| (line.into(), tone)),
             control.into_any_element(),
             note.map(|(note, tone)| (note.into(), tone)),
@@ -276,15 +383,7 @@ pub(super) fn item(field: &Entity<ShortcutField>, configured: &str, cx: &App) ->
     .disabled(locked)
 }
 
-fn line(
-    state: &ShortcutField,
-    status: &HotkeyStatus,
-    configured: &str,
-    label: &str,
-) -> Option<(String, Tone)> {
-    if state.recording {
-        return Some(("Press the keys you want.".into(), Tone::Muted));
-    }
+fn line(status: &HotkeyStatus, configured: &str, label: &str) -> Option<(String, Tone)> {
     if configured.trim().is_empty() {
         return Some(("earwig watches no key.".into(), Tone::Muted));
     }
@@ -307,11 +406,19 @@ fn line(
     Some((line.into(), Tone::Muted))
 }
 
+/// What the Discard row does, or why its shortcut is not taken.
+fn discard_line(discard: &Result<Option<Hotkey>, String>, label: &str) -> (String, Tone) {
+    match discard {
+        Ok(_) => ("Throws away the dictation in progress.".into(), Tone::Muted),
+        Err(reason) => (format!("{label} is not watched: {reason}"), Tone::Danger),
+    }
+}
+
 /// Under the whole row: a reason needs more room than the line beside the controls.
-fn note(state: &ShortcutField) -> Option<(String, Tone)> {
-    match state.note.as_ref()? {
-        Note::Refused(reason) => Some((format!("Not taken: {reason}"), Tone::Danger)),
-        Note::Warning(reason) => Some((reason.to_string(), Tone::Warning)),
+fn note(state: &ShortcutField, target: Target) -> Option<(String, Tone)> {
+    match state.note.as_ref().filter(|(row, _)| *row == target)? {
+        (_, Note::Refused(reason)) => Some((format!("Not taken: {reason}"), Tone::Danger)),
+        (_, Note::Warning(reason)) => Some((reason.to_string(), Tone::Warning)),
     }
 }
 
@@ -433,6 +540,7 @@ mod tests {
         HotkeyStatus {
             source: "keyboard".into(),
             key: key.into(),
+            discard: String::new(),
             keyboard: KeyboardState::Watching,
             blocking,
             reason: reason.map(Into::into),
@@ -474,5 +582,26 @@ mod tests {
         assert_eq!(label(""), "None");
         assert_eq!(label("Ctrl+Hyper"), "Ctrl+Hyper");
         assert_eq!(label("pageup"), "Page Up");
+    }
+
+    #[test]
+    fn the_discard_row_shows_none_or_a_shortcut_not_taken_as_written() {
+        let row = |discard: Option<&str>| {
+            let settings = HotkeyConfig {
+                key: "Ctrl+Shift+F9".into(),
+                discard: discard.map(Into::into),
+                ..HotkeyConfig::default()
+            };
+            let discard = hotkey::discard(&settings).map_err(|e| e.to_string());
+            let label = discard_label(&settings, &discard);
+            let (_, tone) = discard_line(&discard, &label);
+            (label, tone)
+        };
+        assert_eq!(
+            row(None),
+            ("None".into(), Tone::Muted),
+            "Shift is in the key"
+        );
+        assert_eq!(row(Some("Ctrl+Hyper")), ("Ctrl+Hyper".into(), Tone::Danger));
     }
 }

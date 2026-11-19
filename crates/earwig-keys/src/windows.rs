@@ -101,17 +101,11 @@ pub(crate) fn run(shared: &Shared, events: &mut dyn FnMut(Event) -> bool) -> io:
 }
 
 fn status(snapshot: &Snapshot) -> Status {
-    Status::Watching(
-        if snapshot
-            .hotkey
-            .as_ref()
-            .is_some_and(|h| !h.is_modifier_only())
-        {
-            Blocking::Yes
-        } else {
-            Blocking::PassThrough
-        },
-    )
+    Status::Watching(if snapshot.hotkeys().any(|h| !h.is_modifier_only()) {
+        Blocking::Yes
+    } else {
+        Blocking::PassThrough
+    })
 }
 
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {

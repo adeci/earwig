@@ -165,12 +165,32 @@ fn nothing<T: std::fmt::Debug>(rx: &Receiver<T>) {
     assert!(got.is_err(), "unexpected {got:?}");
 }
 
+/// Shift added to the held hotkey discards; the discard shortcut counts while dictating.
+fn discard(listener: &Listener, keyboard: &Keyboard, events: &Receiver<Event>) {
+    let hotkey = "Super+Space".parse().ok();
+    listener.set_hotkey(hotkey, "Super+Shift+Space".parse().ok());
+    keyboard.press(&[KEY_LEFTMETA, KEY_SPACE, KEY_LEFTSHIFT]);
+    assert_eq!(next(events), Some(Event::Pressed));
+    assert_eq!(next(events), Some(Event::Discard));
+    keyboard.release(&[KEY_LEFTMETA, KEY_SPACE, KEY_LEFTSHIFT]);
+    assert_eq!(next(events), Some(Event::Released));
+    let chord = [KEY_LEFTMETA, KEY_LEFTSHIFT, KEY_SPACE];
+    listener.set_dictating(true);
+    keyboard.press(&chord);
+    assert_eq!(next(events), Some(Event::Discard));
+    keyboard.release(&chord);
+    listener.set_dictating(false);
+    keyboard.press(&chord);
+    keyboard.release(&chord);
+    nothing(events);
+}
+
 #[test]
 #[ignore = "needs write access to /dev/uinput"]
 fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
     let keyd = std::env::var_os("EARWIG_KEYS_KEYD").is_some();
     let listener = Listener::new(Options::default());
-    listener.set_hotkey(Some("Super+Space".parse().unwrap()));
+    listener.set_hotkey(Some("Super+Space".parse().unwrap()), None);
     let (tx, events) = mpsc::channel();
     let runner = {
         let listener = listener.clone();
@@ -198,9 +218,10 @@ fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
             listener.status()
         );
     }
+    discard(&listener, &keyboard, &events);
 
     // A modifier alone, held, and part of a shortcut.
-    listener.set_hotkey(Some("RightCtrl".parse().unwrap()));
+    listener.set_hotkey(Some("RightCtrl".parse().unwrap()), None);
     keyboard.press(&[KEY_RIGHTCTRL]);
     assert_eq!(next(&events), Some(Event::Pressed));
     keyboard.release(&[KEY_RIGHTCTRL]);
@@ -215,7 +236,7 @@ fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
     nothing(&events);
 
     // earwig's own paste keyboard is never read, and a held Ctrl holds up its chord.
-    listener.set_hotkey(Some("Shift+Insert".parse().unwrap()));
+    listener.set_hotkey(Some("Shift+Insert".parse().unwrap()), None);
     let paste = earwig_keys::PasteKeyboard::new().unwrap();
     thread::sleep(Duration::from_millis(500));
     paste.shift_insert().unwrap();
@@ -228,7 +249,7 @@ fn a_uinput_keyboard_drives_the_hotkey_and_the_recorder() {
     thread::sleep(Duration::from_millis(100));
     assert!(!earwig_keys::modifier_held());
     drop(paste);
-    listener.set_hotkey(Some("RightCtrl".parse().unwrap()));
+    listener.set_hotkey(Some("RightCtrl".parse().unwrap()), None);
 
     // Recording takes the keys instead of the hotkey.
     let (tx, recorded) = mpsc::channel();

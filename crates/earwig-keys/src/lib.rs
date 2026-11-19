@@ -1,4 +1,5 @@
-//! One global hotkey: parse and check it, watch the keyboard for it, record a new one.
+//! A global hotkey and its discard shortcut: parse and check them, watch the keyboard for them,
+//! record a new one.
 //! A key with modifiers (`Super+Space`) is swallowed; modifiers alone (`RightCtrl`) pass through.
 //! Linux reads evdev directly, macOS uses an event tap, Windows a low-level keyboard hook.
 //! On Linux it also makes earwig's paste keyboard (uinput), which its own listener never reads.
@@ -39,6 +40,8 @@ pub enum Event {
     Released,
     /// Modifiers alone turned out to be part of a shortcut: take the press back (no release).
     Chord,
+    /// The discard shortcut, or Shift added to the held hotkey when that makes it.
+    Discard,
 }
 
 /// `kCGEventSourceUserData` of key events the program posts itself.
