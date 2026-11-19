@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use earwig_core::config::{OverlayAnimation, OverlayConfig, OverlayPosition};
+use earwig_core::paths;
 use earwig_core::spectrum::Feed;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Theme};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -26,10 +27,11 @@ use crate::ui::{OverlaySurface, accent, crt, font, now_ms};
 #[cfg(target_os = "linux")]
 mod layer_shell;
 mod place;
+pub(crate) mod remembered;
 
 use place::{
-    clamp_spot, home_spot, hug, layer_home_origin, placement, popup_origin, window_origin,
-    window_size,
+    clamp_spot, home_spot, hug, layer_home_origin, placement, popup_origin, remembered_spot,
+    window_origin, window_size,
 };
 
 pub(crate) const WIDTH: f32 = 560.;
@@ -62,13 +64,14 @@ pub fn open(
     cx: &mut App,
 ) -> anyhow::Result<Entity<OverlayView>> {
     let display = crate::ui::platform::home_display(cx);
-    let options = home_window_options(surface, config, display.as_deref());
+    let left = remembered::load(&paths::state_dir(), config);
+    let (options, spot) = window_options(surface, config, display.as_deref(), left);
     // No gpui-kit Root: it paints an opaque background, and we have no inputs or popovers.
     let mut view = None;
     let handle = cx.open_window(options, |window, cx| {
         // Click-through until the pill is painted.
         window.set_input_region(Some(&[]));
-        let root = cx.new(|cx| OverlayView::new(config, surface, voice, window, cx));
+        let root = cx.new(|cx| OverlayView::new(config, surface, voice, spot, window, cx));
         view = Some(root.clone());
         root
     })?;
@@ -77,7 +80,8 @@ pub fn open(
     Ok(view)
 }
 
-/// A layer surface, or a borderless popup centred on the platform's display.
+/// A layer surface, or a borderless popup on the platform's display; and the spot the pill starts
+/// at, if it was `left` somewhere last time.
 #[cfg_attr(
     not(target_os = "linux"),
     expect(
@@ -85,24 +89,35 @@ pub fn open(
         reason = "only Linux has a surface besides the popup"
     )
 )]
-fn home_window_options(
+fn window_options(
     surface: OverlaySurface,
     config: &OverlayConfig,
     display: Option<&dyn PlatformDisplay>,
-) -> WindowOptions {
+    left: Option<Point<Pixels>>,
+) -> (WindowOptions, Option<Point<Pixels>>) {
     let window_size = window_size(config.max_lines);
     #[cfg(target_os = "linux")]
     if surface == OverlaySurface::LayerShell {
-        return layer_shell::home_window_options(config.position, window_size);
+        // At home: the view moves it once it knows the area, from 0, 0.
+        return (
+            layer_shell::home_window_options(config.position, window_size),
+            left,
+        );
     }
-    let origin = display.map_or(point(px(0.), px(0.)), |display| {
-        popup_origin(
-            home_spot(display.visible_bounds(), config.position),
+    let area = display.map(PlatformDisplay::visible_bounds);
+    let spot = left
+        .zip(area)
+        .map(|(left, area)| remembered_spot(left, area, config.position));
+    let origin = match (area, spot) {
+        (Some(area), Some(spot)) => window_origin(spot, window_size, area, config.position),
+        (Some(area), None) => popup_origin(
+            home_spot(area, config.position),
             window_size,
             config.position,
-        )
-    });
-    WindowOptions {
+        ),
+        (None, _) => point(px(0.), px(0.)),
+    };
+    let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
             origin,
             size: window_size,
@@ -110,7 +125,8 @@ fn home_window_options(
         kind: WindowKind::PopUp,
         display_id: display.map(PlatformDisplay::id),
         ..base_options()
-    }
+    };
+    (options, spot)
 }
 
 fn base_options() -> WindowOptions {
@@ -160,8 +176,10 @@ pub struct OverlayView {
     window: Option<AnyWindowHandle>,
     /// Where the window sits on the area; `None` where it opened.
     origin: Option<Point<Pixels>>,
-    /// Where the pill was dragged this dictation; `None` is home.
+    /// Where the pill was dragged, this dictation or last time (`start`); `None` is home.
     spot: Option<Point<Pixels>>,
+    /// Where it opened, if not home: only a drag away from there is remembered.
+    start: Option<Point<Pixels>>,
     drag: Option<Grab>,
     painted: Painted,
 }
@@ -188,6 +206,7 @@ impl OverlayView {
         config: &OverlayConfig,
         surface: OverlaySurface,
         voice: Feed,
+        spot: Option<Point<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -212,11 +231,20 @@ impl OverlayView {
                 match area {
                     #[allow(clippy::cast_precision_loss)]
                     Ok((width, height)) => {
-                        let _ = this.update(cx, |view, _| {
+                        let _ = this.update(cx, |view, cx| {
                             view.usable = Some(size(px(width as f32), px(height as f32)));
+                            // A pill left elsewhere waits for it.
+                            cx.notify();
                         });
                     }
-                    Err(e) => log::warn!("the overlay cannot be dragged: {e:#}"),
+                    Err(e) => {
+                        log::warn!("the overlay cannot be dragged: {e:#}");
+                        // Nor kept on the area where it was left: home.
+                        let _ = this.update(cx, |view, cx| {
+                            view.spot = None;
+                            cx.notify();
+                        });
+                    }
                 }
             })
             .detach();
@@ -246,7 +274,8 @@ impl OverlayView {
             usable: None,
             window: None,
             origin: None,
-            spot: None,
+            spot,
+            start: spot,
             drag: None,
             painted: Rc::default(),
         }
@@ -353,9 +382,21 @@ impl OverlayView {
         }
     }
 
-    /// Dragged, and `started_at_ms` is a new dictation, which starts at home in a fresh window.
+    /// Dragged, and `started_at_ms` is a new dictation, which starts in a fresh window: at home, or
+    /// where this one was left.
     pub fn moved_before(&self, started_at_ms: u64) -> bool {
-        self.spot.is_some() && (started_at_ms != self.started_at_ms || !self.is_recording())
+        self.spot != self.start && (started_at_ms != self.started_at_ms || !self.is_recording())
+    }
+
+    /// Keeps where the pill was dragged to, for the next one to open there.
+    pub fn remember(&self, window: &Window, cx: &App) {
+        if self.spot == self.start {
+            return;
+        }
+        if let Some(area) = self.area(window, cx) {
+            let spot = self.current_spot(area, self.origin(area)) - area.origin;
+            remembered::save(&paths::state_dir(), self.position, spot);
+        }
     }
 
     pub fn window(&self) -> Option<AnyWindowHandle> {
@@ -760,6 +801,18 @@ impl Render for OverlayView {
                 set_pointer_region(window, None);
             }
             return div();
+        }
+        // A layer surface opens at home: once the area is known, off to where the pill was left.
+        #[cfg(target_os = "linux")]
+        if self.layer_shell
+            && self.origin.is_none()
+            && self.start.is_some()
+            && self.spot == self.start
+        {
+            match self.area(window, cx) {
+                Some(area) => self.move_layer(area, window),
+                None => return div(),
+            }
         }
         self.tick(window, cx);
         // Relative motion can arrive after the position: catch up before drawing.

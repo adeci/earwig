@@ -1674,6 +1674,7 @@ dependencies = [
  "resvg 0.46.0",
  "serde",
  "serde_json",
+ "tempfile",
  "tray-icon",
  "ttf-parser",
  "wayland-client",

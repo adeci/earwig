@@ -1,7 +1,8 @@
 # GNOME with the module as it comes: earwig reads Super+Space from the keyboard and keeps it
 # from the shell, its icon sits in the top bar through the extension the module switches on, and
 # a dictation is pasted into Text Editor and into foot, a terminal, without anything asking
-# first.
+# first. A dragged overlay opens at its edge again, or where it was left once it remembers its
+# position, after a restart too.
 { self }:
 let
   common = import ./common.nix { inherit self; };

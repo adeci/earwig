@@ -8,6 +8,9 @@ WATCHER = "org.kde.StatusNotifierWatcher"
 # The tray icon's blue, and its red while dictating (crates/earwig/src/ui/icon.rs).
 IDLE = (0x35, 0x84, 0xE4)
 DICTATING = (0xE5, 0x48, 0x4D)
+# Where earwig keeps the spot the overlay was left at, and how far the test drags it.
+SPOT = "/home/alice/.local/state/earwig/overlay.json"
+DRAG = (-200, -250)
 
 
 def box(actor: str) -> dict[str, float]:
@@ -24,16 +27,34 @@ def qmp_input(*events: Any) -> None:
     machine.qmp_client.send("input-send-event", args)
 
 
-def click(x: float, y: float) -> None:
-    """A left click at a point of the screen, through QEMU's tablet."""
+def point_at(x: float, y: float) -> None:
+    """Move the pointer to a point of the screen, through QEMU's tablet."""
     width, height = shell_js("[global.stage.width, global.stage.height]")
     qmp_input(
         {"type": "abs", "data": {"axis": "x", "value": round(x * 0x7FFF / (width - 1))}},
         {"type": "abs", "data": {"axis": "y", "value": round(y * 0x7FFF / (height - 1))}},
     )
+
+
+def press(down: bool) -> None:
+    time.sleep(0.2)
+    qmp_input({"type": "btn", "data": {"down": down, "button": "left"}})
+
+
+def click(x: float, y: float) -> None:
+    """A left click at a point of the screen."""
+    point_at(x, y)
     for down in (True, False):
-        time.sleep(0.2)
-        qmp_input({"type": "btn", "data": {"down": down, "button": "left"}})
+        press(down)
+
+
+def drag(x: float, y: float, by: tuple[float, float]) -> None:
+    """Hold the left button from a point of the screen while the pointer moves `by`."""
+    point_at(x, y)
+    press(True)
+    for step in range(1, 11):
+        point_at(x + by[0] * step / 10, y + by[1] * step / 10)
+    press(False)
 
 
 def click_actor(actor: str) -> None:
@@ -104,6 +125,62 @@ def gnome_untouched(tap: str) -> None:
         " source: Main.panel.statusArea.keyboard._inputSourceManager.currentSource.id})"
     )
     assert st == {"overview": False, "source": "us"}, f"{tap} reached GNOME: {st}"
+
+
+def overlay_frame() -> dict[str, int] | None:
+    """Where the overlay's window is on screen, while there is one."""
+    frames = shell_js(
+        "global.get_window_actors().map(a => a.meta_window).filter(w => w.get_wm_class() === 'earwig-overlay')"
+        ".map(w => w.get_frame_rect()).map(r => ({x: r.x, y: r.y, w: r.width, h: r.height}))"
+    )
+    return frames[0] if frames else None
+
+
+def near(frame: dict[str, int], x: int, y: int) -> bool:
+    """Whether a window is at `x`, `y`, give or take the tablet's rounding."""
+    return abs(frame["x"] - x) <= 2 and abs(frame["y"] - y) <= 2
+
+
+def show_overlay() -> dict[str, int]:
+    """Start a dictation from the command line; returns where its overlay is once it is drawn."""
+    as_alice("earwig toggle")
+    wait_for("the overlay", overlay_frame)
+    machine.sleep(td(seconds=2))
+    frame: dict[str, int] = wait_for("the overlay", overlay_frame)
+    print(f"overlay: {frame}")
+    return frame
+
+
+def cancel_overlay() -> None:
+    as_alice("earwig cancel")
+    wait_for("the overlay to close", lambda: overlay_frame() is None)
+
+
+def drag_overlay(frame: dict[str, int]) -> dict[str, int]:
+    """Drag the overlay's pill by `DRAG`; returns where its window went."""
+    x, y = frame["x"] + DRAG[0], frame["y"] + DRAG[1]
+    # The pill hugs the bottom of its window 40 px in, one line tall while it listens.
+    drag(frame["x"] + frame["w"] / 2, frame["y"] + frame["h"] - 80, DRAG)
+
+    def followed() -> dict[str, int] | None:
+        moved = overlay_frame()
+        return moved if moved and near(moved, x, y) else None
+
+    return wait_for("the overlay to follow the drag", followed, timeout=10)
+
+
+def restart_earwig() -> None:
+    user("systemctl --user restart earwig.service")
+    wait_status(lambda s: s["model"]["state"] == "ready", "the model", timeout=300)
+
+
+def remember_position(on: bool) -> None:
+    """Restart earwig with `[overlay] remember_position` set in alice's own config."""
+    as_alice("mkdir -p .config/earwig")
+    machine.succeed(
+        f"printf '[overlay]\\nremember_position = {str(on).lower()}\\n' > /home/alice/.config/earwig/config.toml"
+    )
+    restart_earwig()
 
 
 start_all()
@@ -202,6 +279,36 @@ with subtest("EARWIG: the icon appears when the tray starts after earwig"):
     user(f"gnome-extensions enable {EXTENSION}")
     icon = wait_for("earwig's icon in the tray that started later", tray_icon)
     machine.screenshot("top-bar-tray-started-later")
+    assert not (seen := asked()), seen
+
+with subtest("EARWIG: a dragged overlay opens at its edge again next time"):
+    wait_status(lambda s: s["model"]["state"] == "ready", "the model", timeout=300)
+    home = show_overlay()
+    drag_overlay(home)
+    machine.screenshot("overlay-dragged")
+    cancel_overlay()
+    assert near(again := show_overlay(), home["x"], home["y"]), again
+    cancel_overlay()
+    machine.fail(f"test -e {SPOT}")
+
+with subtest("EARWIG: remembering its position, the overlay opens where it was dragged, after a restart too"):
+    remember_position(True)
+    assert near(first := show_overlay(), home["x"], home["y"]), first
+    dragged = drag_overlay(first)
+    cancel_overlay()
+    machine.succeed(f"test -s {SPOT}")
+    assert near(again := show_overlay(), dragged["x"], dragged["y"]), again
+    machine.screenshot("overlay-remembered")
+    cancel_overlay()
+    restart_earwig()
+    assert near(again := show_overlay(), dragged["x"], dragged["y"]), again
+    cancel_overlay()
+
+with subtest("EARWIG: switched off, it forgets where it was left and opens at its edge"):
+    remember_position(False)
+    assert near(again := show_overlay(), home["x"], home["y"]), again
+    cancel_overlay()
+    machine.fail(f"test -e {SPOT}")
     assert not (seen := asked()), seen
 
 with subtest("EARWIG: once it quits, Super+Space is GNOME's again"):

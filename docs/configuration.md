@@ -54,6 +54,15 @@ them:
 services.earwig.settings.replacements."nix os" = "NixOS";
 ```
 
+## Overlay position
+
+The overlay opens at the screen edge `[overlay] position` names; drag it away
+and the next dictation still starts at that edge. Turn on **Remember
+position** (`remember_position = true`) and it opens where you last left it,
+after a restart too, moved just enough to stay on the screen if that one is
+smaller. The spot is kept in `overlay.json` in earwig's state directory, not
+in your settings; turning the setting off forgets it.
+
 ## Hooks
 
 `filter` gets each transcript on stdin, and what it prints is inserted

@@ -26,7 +26,7 @@ use serde::de::DeserializeOwned;
 use super::pill_preview::PillPreview;
 use super::shortcut::{self, ShortcutField, Target};
 use super::{hinted, is_locked, item, section, spaced};
-use crate::ui::{UiState, apply_appearance, config, edit_config};
+use crate::ui::{OverlaySurface, UiState, apply_appearance, config, edit_config, overlay};
 
 /// Search words the Hotkey rows' titles don't contain.
 const HOTKEY_KEYWORDS: [&str; 6] = ["hotkey", "shortcut", "key", "bind", "record", "keyboard"];
@@ -261,6 +261,7 @@ fn device_dropdown(settings: &Config, cx: &App) -> SettingField<SharedString> {
 }
 
 fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
+    let floats = cx.global::<UiState>().surface != OverlaySurface::None;
     section(
         "Appearance",
         Some("Overlay changes show from the next dictation."),
@@ -303,6 +304,26 @@ fn appearance(pill: &Entity<PillPreview>, cx: &App) -> SettingGroup {
                     |c, v| c.overlay.position = v,
                 ),
             ),
+            item(
+                cx,
+                "overlay.remember_position",
+                "Remember position",
+                if floats {
+                    "Open the overlay where you last dragged it."
+                } else {
+                    "Not available on this desktop."
+                },
+                SettingField::switch(
+                    |cx: &App| config(UiState::handle(cx)).overlay.remember_position,
+                    |v, cx: &mut App| {
+                        edit_config(cx, |c| c.overlay.remember_position = v);
+                        if !v {
+                            overlay::remembered::forget(&earwig_core::paths::state_dir());
+                        }
+                    },
+                ),
+            )
+            .disabled(!floats || is_locked(cx, "overlay.remember_position")),
             item(
                 cx,
                 "overlay.max_lines",
