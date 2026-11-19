@@ -21,6 +21,9 @@ pub(crate) struct TrayHandle {
     /// "Update to …", at the top of the menu while there is one.
     update: MenuItem,
     update_shown: Cell<bool>,
+    /// What to do about the speech model, at the top of the menu while dictation can't start.
+    model: MenuItem,
+    model_shown: Cell<bool>,
     idle: Icon,
     busy: Icon,
 }
@@ -86,6 +89,25 @@ impl TrayHandle {
             }
         }
     }
+
+    /// `text` opens the settings; `None` takes the item away.
+    pub(crate) fn set_model(&self, text: Option<&str>) {
+        match text {
+            Some(text) => {
+                self.model.set_text(text);
+                if !self.model_shown.replace(true)
+                    && let Err(e) = self.menu.insert(&self.model, 0)
+                {
+                    log::warn!("adding the speech model to the tray menu: {e}");
+                }
+            }
+            None => {
+                if self.model_shown.replace(false) {
+                    let _ = self.menu.remove(&self.model);
+                }
+            }
+        }
+    }
 }
 
 /// `None` (logged) if the OS has no tray. Call inside the GPUI app, on the main thread.
@@ -106,18 +128,20 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
     let toggle = MenuItem::new("Start dictation", true, None);
     let quit = MenuItem::new("Quit", true, None);
     let update = MenuItem::new("", true, None);
+    let model = MenuItem::new("", true, None);
     let menu = Menu::new();
     menu.append_items(&[&settings, &toggle, &PredefinedMenuItem::separator(), &quit])?;
-    let ids: [MenuId; 4] = [
+    let ids: [MenuId; 5] = [
         settings.id().clone(),
         toggle.id().clone(),
         quit.id().clone(),
         update.id().clone(),
+        model.id().clone(),
     ];
     #[cfg(windows)]
     let left_click = local.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == ids[0] {
+        if event.id == ids[0] || event.id == ids[4] {
             let _ = local.send(Local::ShowSettings);
         } else if event.id == ids[1] {
             handle.send(Command::Toggle);
@@ -165,6 +189,8 @@ fn build(handle: Handle, local: flume::Sender<Local>) -> anyhow::Result<TrayHand
         toggle,
         update,
         update_shown: Cell::new(false),
+        model,
+        model_shown: Cell::new(false),
         idle,
         busy,
     })

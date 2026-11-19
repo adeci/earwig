@@ -11,6 +11,14 @@ Models come from the settings window or `earwig models` (`list`, `search`,
 `download`, `use`, `remove`). The accuracy and speed dots are
 [Handy](https://github.com/cjpais/Handy)'s measurements.
 
+While the model in use is not on disk, earwig opens the settings window on
+**Models** each time it starts, and its shortcut shows the overlay saying so
+instead of listening. Nothing is downloaded until you click **Download** (or
+run `earwig models download`); dictation works once it is in. `earwig status`
+says the model is `missing`, and `earwig daemon --headless` opens nothing. A
+`[model] model` path to a file that isn't there is said to be missing too, but
+the settings window doesn't open for it and nothing is downloaded in its place.
+
 ## Discard
 
 The shortcut with Shift added throws the dictation in progress away: add

@@ -803,18 +803,19 @@ impl Controller {
             // It may have been downloaded since.
             self.ensure_model(true);
         }
-        match self.model_status() {
-            ModelStatus::Missing { model } => {
-                self.session.reset();
-                self.error(format!("speech model {model} is not downloaded"));
-                return;
-            }
+        let model = self.model_status();
+        let why = match &model {
+            ModelStatus::Missing { model } => Some(format!("{model} is not downloaded")),
             ModelStatus::Failed { model, message } => {
-                self.session.reset();
-                self.error(format!("speech model {model} failed to load: {message}"));
-                return;
+                Some(format!("{model} failed to load: {message}"))
             }
-            ModelStatus::Loading { .. } | ModelStatus::Ready { .. } => {}
+            ModelStatus::Loading { .. } | ModelStatus::Ready { .. } => None,
+        };
+        if let Some(why) = why {
+            self.session.reset();
+            log::warn!("no dictation: speech model {why}");
+            self.publish(&Event::ModelNotReady { model });
+            return;
         }
         self.recording += 1;
         let id = self.recording;
@@ -987,7 +988,8 @@ impl Controller {
         if self.loaded.as_ref() == Some(&request) && settled {
             return;
         }
-        if self.session.phase() != Phase::Idle {
+        // A dictation keeps its model till it is done; one starting without a model has none.
+        if self.session.phase() != Phase::Idle && self.loaded.is_some() {
             self.reload_when_idle = true;
             return;
         }
@@ -1233,6 +1235,18 @@ mod tests {
             fail_insert: bool,
             updates: Option<Updates>,
         ) -> Self {
+            let daemon = Self::launch(dir, system, fail_insert, updates);
+            daemon.wait_for(|e| matches!(e, Event::Model { model: ModelStatus::Ready { .. } }) || matches!(e, Event::Status { status } if matches!(status.model, ModelStatus::Ready { .. })));
+            daemon
+        }
+
+        /// Start with `user.toml` in `dir` and the given system files.
+        fn launch(
+            dir: tempfile::TempDir,
+            system: Vec<PathBuf>,
+            fail_insert: bool,
+            updates: Option<Updates>,
+        ) -> Self {
             let config = ConfigStore::load_from(ConfigPaths {
                 user: dir.path().join("user.toml"),
                 system,
@@ -1266,15 +1280,13 @@ mod tests {
             let clip: Arc<[f32]> = vec![0.25; 1_600].into();
             let handle = spawn_with_source(parts, Source::Clip(clip)).unwrap();
             let events = handle.subscribe();
-            let daemon = Self {
+            Self {
                 handle,
                 events,
                 calls,
                 live_models,
                 _dir: dir,
-            };
-            daemon.wait_for(|e| matches!(e, Event::Model { model: ModelStatus::Ready { .. } }) || matches!(e, Event::Status { status } if matches!(status.model, ModelStatus::Ready { .. })));
-            daemon
+            }
         }
 
         fn wait_for(&self, want: impl Fn(&Event) -> bool) -> Event {
@@ -1495,6 +1507,53 @@ mod tests {
             assert!(Instant::now() < deadline, "the old model is still loaded");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn without_its_model_the_hotkey_says_so_until_the_file_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join("fake.gguf");
+        let user = format!("[model]\nmodel = '{}'\n", model.display());
+        fs::write(dir.path().join("user.toml"), user).unwrap();
+        let d = Daemon::launch(dir, Vec::new(), false, None);
+        let missing = ModelStatus::Missing {
+            model: ModelSpec::Path {
+                path: model.clone(),
+            },
+        };
+        assert_eq!(d.handle.status().model, missing);
+        d.handle.send(Command::Press);
+        let said = d.wait_for(|e| matches!(e, Event::ModelNotReady { .. }));
+        assert_eq!(said, Event::ModelNotReady { model: missing });
+        d.handle.send(Command::Release);
+        let after = d.quiet(300);
+        assert!(
+            !after.iter().any(|e| matches!(e, Event::State { .. })),
+            "{after:?}"
+        );
+        // Downloaded meanwhile: the next dictation loads it, no restart.
+        fs::write(&model, b"").unwrap();
+        assert_eq!(dictate(&d), TEXT);
+    }
+
+    #[test]
+    fn a_model_that_cannot_load_is_said_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = "[model]\nmodel = 'no-such-model'\n";
+        fs::write(dir.path().join("user.toml"), user).unwrap();
+        let d = Daemon::launch(dir, Vec::new(), false, None);
+        d.handle.send(Command::Toggle);
+        let said = d.wait_for(|e| matches!(e, Event::ModelNotReady { .. }));
+        assert!(
+            matches!(
+                said,
+                Event::ModelNotReady {
+                    model: ModelStatus::Failed { .. }
+                }
+            ),
+            "{said:?}"
+        );
+        assert_eq!(d.handle.status().state, DictationState::Idle);
     }
 
     fn default_model(d: &Daemon) -> ModelSpec {

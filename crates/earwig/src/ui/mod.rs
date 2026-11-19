@@ -23,7 +23,8 @@ use earwig_core::audio::{InputDevice, InputDevices};
 use earwig_core::config::{AppearanceConfig, Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
-use earwig_core::events::{Command, DictationState, Event, Status, UpdateState};
+use earwig_core::events::{Command, DictationState, Event, ModelStatus, Status, UpdateState};
+use earwig_core::models::ModelSpec;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{AnyWindowHandle, App, Context, Entity, Global, QuitMode};
 
@@ -96,8 +97,10 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool, socket: PathB
                 overlay_wake: None,
                 input_devices: InputDevices::default(),
                 mic_error: None,
+                models_page: None,
             });
             apply_appearance(cx);
+            show_model_in_tray(cx);
 
             cx.spawn(async move |cx| {
                 while let Ok(event) = events.recv_async().await {
@@ -136,7 +139,8 @@ pub fn run(handle: Handle, caps: DesktopCaps, open_settings: bool, socket: PathB
             })
             .detach();
 
-            if open_settings {
+            // Without a model earwig is no use: the window to download one opens with it.
+            if open_settings || no_model(cx) == Some(NoModel::Missing) {
                 show_settings(cx);
             }
         });
@@ -164,6 +168,8 @@ pub(crate) struct UiState {
     input_devices: InputDevices,
     /// Last mic failure, cleared once audio flows again.
     mic_error: Option<String>,
+    /// The Models page, kept while the settings window closes so its downloads go on.
+    models_page: Option<Entity<settings::ModelsPage>>,
 }
 
 impl Global for UiState {}
@@ -250,6 +256,7 @@ fn apply(event: Event, cx: &mut App) {
             if changed {
                 set_state(state, cx);
             }
+            show_model_in_tray(cx);
             cx.refresh_windows();
         }
         Event::State { state } => {
@@ -281,7 +288,12 @@ fn apply(event: Event, cx: &mut App) {
         }
         Event::Model { model } => {
             cx.global_mut::<UiState>().status.model = model;
+            show_model_in_tray(cx);
             cx.refresh_windows();
+        }
+        Event::ModelNotReady { model } => {
+            cx.global_mut::<UiState>().status.model = model;
+            not_started(cx);
         }
         Event::Error { message } => {
             log::warn!("daemon: {message}");
@@ -304,6 +316,93 @@ fn set_update(update: Option<&UpdateState>, cx: &App) {
     if let Some(tray) = &cx.global::<UiState>().tray {
         tray.set_update(update);
     }
+}
+
+/// Why a dictation can't start now, as the overlay, the settings and the tray say it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoModel {
+    /// Not on disk, and earwig can download it.
+    Missing,
+    /// Being downloaded: bytes so far and in all, 0 while unknown.
+    Downloading(u64, u64),
+    /// A local file that isn't there, which earwig can't download.
+    NoFile,
+    /// On disk, but it doesn't load.
+    Failed,
+}
+
+impl NoModel {
+    /// `downloading` says how far a running download of a model is.
+    fn of(
+        status: &ModelStatus,
+        downloading: impl FnOnce(&ModelSpec) -> Option<(u64, u64)>,
+    ) -> Option<Self> {
+        match status {
+            ModelStatus::Missing {
+                model: ModelSpec::Path { .. },
+            } => Some(Self::NoFile),
+            ModelStatus::Missing { model } => Some(match downloading(model) {
+                Some((done, total)) => Self::Downloading(done, total),
+                None => Self::Missing,
+            }),
+            ModelStatus::Failed { .. } => Some(Self::Failed),
+            ModelStatus::Loading { .. } | ModelStatus::Ready { .. } => None,
+        }
+    }
+
+    /// What to tell the user, sending them to the Models page `there`.
+    pub(crate) fn sentence(self, there: &str) -> String {
+        match self {
+            Self::Missing => format!("There's no speech model yet. Download one {there}."),
+            Self::Downloading(done, total) if total > 0 => format!(
+                "The speech model is still downloading: {}.",
+                crate::human_size_of(done, total)
+            ),
+            Self::Downloading(..) => "The speech model is still downloading.".into(),
+            Self::NoFile => format!("The speech model's file is missing. Choose a model {there}."),
+            Self::Failed => format!("The speech model could not load. See why {there}."),
+        }
+    }
+
+    /// The tray's item, which opens the settings.
+    fn tray_item(self) -> &'static str {
+        match self {
+            Self::Missing => "Download a speech model…",
+            Self::Downloading(..) => "Downloading the speech model…",
+            Self::NoFile | Self::Failed => "Choose a speech model…",
+        }
+    }
+}
+
+/// Why dictation can't start now, if it can't.
+pub(crate) fn no_model(cx: &App) -> Option<NoModel> {
+    let state = cx.global::<UiState>();
+    NoModel::of(&state.status.model, |spec| {
+        state.models_page.as_ref()?.read(cx).downloading(spec, cx)
+    })
+}
+
+/// The tray's model item, there while dictation can't start.
+pub(crate) fn show_model_in_tray(cx: &App) {
+    if let Some(tray) = &cx.global::<UiState>().tray {
+        tray.set_model(no_model(cx).map(NoModel::tray_item));
+    }
+}
+
+/// A dictation didn't start for want of a model: the pill says why, or the settings where it can't.
+fn not_started(cx: &mut App) {
+    let Some(no_model) = no_model(cx) else {
+        return;
+    };
+    if cx.global::<UiState>().overlay.is_none() {
+        open_overlay(cx);
+    }
+    if cx.global::<UiState>().overlay.is_none() {
+        show_settings(cx);
+        return;
+    }
+    let line = no_model.sentence("in Settings, under Models");
+    update_overlay(cx, |o, _| o.not_started(line, Instant::now()));
 }
 
 fn set_state(state: DictationState, cx: &mut App) {
@@ -452,4 +551,74 @@ fn refresh_input_devices(cx: &mut App) {
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_model_earwig_can_download_opens_the_settings_by_itself() {
+        let model = ModelSpec::Curated {
+            id: "parakeet-unified-en-0.6b".into(),
+        };
+        let missing = ModelStatus::Missing {
+            model: model.clone(),
+        };
+        let idle = |_: &ModelSpec| None;
+        assert_eq!(NoModel::of(&missing, idle), Some(NoModel::Missing));
+        let running = |spec: &ModelSpec| (*spec == model).then_some((312_400_000, 731_357_568));
+        assert_eq!(
+            NoModel::of(&missing, running),
+            Some(NoModel::Downloading(312_400_000, 731_357_568))
+        );
+        // A local file can only be missing: nothing is downloaded in its place.
+        let file = ModelStatus::Missing {
+            model: ModelSpec::Path {
+                path: "/models/mine.gguf".into(),
+            },
+        };
+        assert_eq!(
+            NoModel::of(&file, |_| unreachable!()),
+            Some(NoModel::NoFile)
+        );
+        let failed = ModelStatus::Failed {
+            model: model.clone(),
+            message: "this CPU lacks AVX2".into(),
+        };
+        assert_eq!(NoModel::of(&failed, idle), Some(NoModel::Failed));
+        // On disk, the system's models too: nothing to say.
+        let loading = ModelStatus::Loading {
+            model: model.clone(),
+        };
+        assert_eq!(NoModel::of(&loading, idle), None);
+        let ready = ModelStatus::Ready {
+            model,
+            architecture: "parakeet".into(),
+            streaming: true,
+            backend: "cpu".into(),
+        };
+        assert_eq!(NoModel::of(&ready, idle), None);
+    }
+
+    #[test]
+    fn a_dictation_that_did_not_start_says_what_to_do() {
+        let there = "in Settings, under Models";
+        assert_eq!(
+            NoModel::Missing.sentence(there),
+            "There's no speech model yet. Download one in Settings, under Models."
+        );
+        assert_eq!(
+            NoModel::Downloading(312_400_000, 731_357_568).sentence(there),
+            "The speech model is still downloading: 312 of 731 MB."
+        );
+        assert_eq!(
+            NoModel::Downloading(0, 0).sentence(there),
+            "The speech model is still downloading."
+        );
+        assert_eq!(
+            NoModel::NoFile.sentence("under Models"),
+            "The speech model's file is missing. Choose a model under Models."
+        );
+    }
 }

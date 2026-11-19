@@ -36,8 +36,8 @@ Requires an Apple silicon Mac with macOS 14 or later.
    [latest release](https://github.com/adeci/earwig/releases/latest).
 2. Open it and drag earwig to Applications.
 3. Start earwig and allow Microphone and Accessibility when macOS asks.
-4. Open **Settings** from the menu bar icon and download a model under
-   **Models**.
+4. In the settings window that opens on **Models**, click **Download** under
+   the recommended model.
 
 ### Windows
 
@@ -47,7 +47,8 @@ AMD processor with AVX2 (Intel Core 4th generation, AMD Ryzen, or newer).
 1. Download `earwig-<version>-windows-x64-setup.exe` from the
    [latest release](https://github.com/adeci/earwig/releases/latest).
 2. Run it. It installs for the current user and needs no administrator rights.
-3. In the settings window that opens, download a model under **Models**.
+3. In the settings window that opens on **Models**, click **Download** under
+   the recommended model.
 
 The installer and the programs it installs are signed. Windows may still warn
 about a new release until enough people have downloaded it: choose

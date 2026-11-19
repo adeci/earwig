@@ -13,7 +13,7 @@ use std::sync::PoisonError;
 
 use gpui_kit::component::label::Label;
 use gpui_kit::component::setting::{
-    AnySettingField, SettingField, SettingGroup, SettingItem, Settings,
+    AnySettingField, SelectIndex, SettingField, SettingGroup, SettingItem, Settings,
 };
 use gpui_kit::component::text::Text;
 use gpui_kit::component::{ActiveTheme as _, TitleBar, v_flex};
@@ -24,9 +24,9 @@ use gpui_kit::{
     WindowBounds, WindowOptions, div, px, relative, size,
 };
 
-use crate::ui::{UiState, config, theme};
+use crate::ui::{UiState, config, no_model, theme};
 use history::HistoryPage;
-use models::ModelsPage;
+pub(crate) use models::ModelsPage;
 use pill_preview::PillPreview;
 use replacements::ReplacementsPage;
 use shortcut::ShortcutField;
@@ -36,6 +36,8 @@ const LOCKED_HINT: &str = "Set by system configuration.";
 const SIDEBAR_WIDTH: Pixels = px(152.);
 /// Smallest size at which every page still lays out as it does at the default size.
 const MIN_SIZE: Size<Pixels> = size(px(760.), px(540.));
+/// The Models page's place in the sidebar.
+const MODELS_PAGE: usize = 1;
 
 pub fn open(cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
     let bounds = Bounds::centered(None, size(px(900.), px(680.)), cx);
@@ -88,18 +90,33 @@ struct SettingsView {
     history: Entity<HistoryPage>,
     pill: Entity<PillPreview>,
     shortcut: Entity<ShortcutField>,
+    /// Models while dictation can't start, where that is put right; else General.
+    first_page: SelectIndex,
 }
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let shortcut = cx.new(|_| ShortcutField::default());
         cx.observe(&shortcut, |_, _, cx| cx.notify()).detach();
+        let models = if let Some(page) = cx.global::<UiState>().models_page.clone() {
+            page.update(cx, |page, cx| page.reopen(window, cx));
+            page
+        } else {
+            let page = cx.new(|cx| ModelsPage::new(window, cx));
+            cx.global_mut::<UiState>().models_page = Some(page.clone());
+            page
+        };
+        let first_page = SelectIndex {
+            page_ix: no_model(cx).map_or(0, |_| MODELS_PAGE),
+            group_ix: None,
+        };
         Self {
-            models: cx.new(|cx| ModelsPage::new(window, cx)),
+            models,
             replacements: cx.new(|cx| ReplacementsPage::new(window, cx)),
             history: cx.new(|_| HistoryPage::default()),
             pill: cx.new(PillPreview::new),
             shortcut,
+            first_page,
         }
     }
 }
@@ -124,6 +141,7 @@ impl Render for SettingsView {
                             .sidebar_width(SIDEBAR_WIDTH)
                             // A wider window widens the page, not the sidebar.
                             .sidebar_size_range(SIDEBAR_WIDTH..SIDEBAR_WIDTH)
+                            .default_selected_index(self.first_page)
                             .pages([
                                 general::page(&self.pill, &self.shortcut, &settings, cx),
                                 models::page(&self.models, &settings, cx),

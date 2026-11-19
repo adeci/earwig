@@ -379,12 +379,21 @@ fn element_id(kind: &str, spec: &ModelSpec) -> SharedString {
 
 fn render_row(frame: &Frame, row: &Row, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let in_use = row.place != Place::Remote && row.spec == *frame.active;
+    let active = row.spec == *frame.active;
+    let in_use = active && row.place != Place::Remote;
     let asking = frame.page.deleting.as_ref() == Some(&row.spec);
     let download = frame.page.downloads.get(&row.spec);
     let (line, line_color) = row_line(frame, row, asking, cx);
     let language = (in_use && row.language_hint && row.multilingual())
         .then(|| language_picker(&row.languages, frame.language, frame.locks.language));
+    // The next step while the model in use is not on disk, unless it is a local file.
+    let fetch = (active
+        && row.place == Place::Remote
+        && matches!(frame.status, ModelStatus::Missing { .. })
+        && !matches!(row.spec, ModelSpec::Path { .. })
+        && download.is_none()
+        && !asking)
+        .then(|| download_button(frame, row));
     let hover = theme.list_hover;
     h_flex()
         .id(element_id("row", &row.spec))
@@ -394,7 +403,7 @@ fn render_row(frame: &Frame, row: &Row, cx: &App) -> AnyElement {
         .px_2()
         .py_1p5()
         .rounded(theme.radius)
-        .when(in_use, |this| this.bg(theme.list_active))
+        .when(active, |this| this.bg(theme.list_active))
         .when(!in_use && !asking, |this| {
             this.cursor_pointer().hover(move |style| style.bg(hover))
         })
@@ -434,7 +443,8 @@ fn render_row(frame: &Frame, row: &Row, cx: &App) -> AnyElement {
                             this.font_features(font::TABULAR.clone())
                         }),
                 )
-                .children(language),
+                .children(language)
+                .children(fetch),
         )
         .child(if asking {
             delete_question(frame.view, &row.spec)
@@ -458,7 +468,7 @@ fn row_line(frame: &Frame, row: &Row, asking: bool, cx: &App) -> (String, Hsla) 
         return (error.clone(), theme.danger);
     }
     if let Some(download) = page.downloads.get(&row.spec) {
-        let then = if page.picks.is_target(&row.spec) {
+        let then = if page.picks.is_target(&row.spec) && row.spec != *frame.active {
             ", then switching to it"
         } else {
             ""
@@ -469,6 +479,9 @@ fn row_line(frame: &Frame, row: &Row, asking: bool, cx: &App) -> (String, Hsla) 
         match frame.status {
             ModelStatus::Ready { .. } => {}
             ModelStatus::Loading { .. } => return ("Loading…".into(), theme.muted_foreground),
+            ModelStatus::Missing {
+                model: ModelSpec::Path { .. },
+            } => return ("In use, but its file is missing.".into(), theme.warning),
             ModelStatus::Missing { .. } => {
                 return ("In use, but not downloaded yet.".into(), theme.warning);
             }
@@ -478,6 +491,25 @@ fn row_line(frame: &Frame, row: &Row, asking: bool, cx: &App) -> (String, Hsla) 
         }
     }
     (row.summary.clone(), theme.muted_foreground)
+}
+
+/// The next step for the model in use while it is not on disk.
+fn download_button(frame: &Frame, row: &Row) -> AnyElement {
+    let spec = row.spec.clone();
+    let (row, active, locked) = (row.clone(), frame.active.clone(), frame.locks.model);
+    h_flex()
+        .pt_1()
+        .child(
+            Button::new(element_id("download", &spec))
+                .icon(IconName::ArrowDown)
+                .label("Download")
+                .primary()
+                .small()
+                .on_click(row_action(frame.view, &spec, move |page, _, cx| {
+                    page.click(&row, &active, locked, cx);
+                })),
+        )
+        .into_any_element()
 }
 
 fn status_model(status: &ModelStatus) -> &ModelSpec {

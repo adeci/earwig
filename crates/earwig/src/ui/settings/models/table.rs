@@ -174,13 +174,14 @@ fn catalog_index(catalog: &[CatalogEntry], spec: &ModelSpec) -> Option<usize> {
     }
 }
 
-/// A row for the model in use when nothing else lists it (a local file, remote or unknown id).
+/// A row in Yours for the model in use when the store doesn't have it: a local file, a model to
+/// download, or an unknown id.
 pub(super) fn active_row(
     active: &ModelSpec,
     catalog: &[CatalogEntry],
     installed: &[InstalledModel],
 ) -> Option<Row> {
-    if installed.iter().any(|m| m.spec == *active) || catalog_index(catalog, active).is_some() {
+    if installed.iter().any(|m| m.spec == *active) {
         return None;
     }
     Some(match active {
@@ -190,12 +191,15 @@ pub(super) fn active_row(
             file,
             revision,
         } => Row::hub(repo, file, revision, 0),
-        ModelSpec::Curated { id } => Row::other(
-            active.clone(),
-            id.clone(),
-            "Not in this release's catalog".into(),
-            0,
-        ),
+        ModelSpec::Curated { id } => match catalog.iter().find(|e| e.id == *id) {
+            Some(entry) => Row::curated(entry),
+            None => Row::other(
+                active.clone(),
+                id.clone(),
+                "Not in this release's catalog".into(),
+                0,
+            ),
+        },
     })
 }
 
@@ -413,8 +417,20 @@ mod tests {
         let on_disk = [installed(&catalog[0])];
         let table = table(&catalog, &on_disk, &local, Some(extra), "", Vec::new());
         assert_eq!(table.yours[0].spec, local);
-        // Curated models are listed anyway.
-        assert_eq!(active_row(&curated(&catalog[2]), &catalog, &[]), None);
+
+        // A curated model in use but not downloaded heads Yours, not Available, to be downloaded.
+        let wanted = curated(&catalog[2]);
+        let extra = active_row(&wanted, &catalog, &[]);
+        let listed = super::table(&catalog, &on_disk, &wanted, extra, "", Vec::new());
+        assert_eq!(
+            (&listed.yours[0].spec, listed.yours[0].place),
+            (&wanted, Place::Remote)
+        );
+        assert!(!listed.available.iter().any(|row| row.spec == wanted));
+        assert_eq!(
+            active_row(&wanted, &catalog, &[installed(&catalog[2])]),
+            None
+        );
     }
 
     #[test]
