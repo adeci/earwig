@@ -15,6 +15,11 @@ impl TrayHandle {
         self.0.update(|tray| tray.state = state);
     }
 
+    /// `text` opens the settings; `None` takes the item away.
+    pub fn set_model(&self, text: Option<&'static str>) {
+        self.0.update(|tray| tray.model = text);
+    }
+
     /// Linux builds never update themselves: their tray says nothing of it.
     #[expect(clippy::unused_self, reason = "the same signature on every OS")]
     pub fn set_update(&self, _update: Option<&UpdateState>) {}
@@ -27,6 +32,7 @@ pub fn spawn(handle: Handle, local: flume::Sender<Local>) -> Option<TrayHandle> 
         handle,
         local,
         state: DictationState::Idle,
+        model: None,
     };
     match tray.assume_sni_available(true).spawn() {
         Ok(handle) => Some(TrayHandle(handle)),
@@ -41,6 +47,8 @@ pub struct Tray {
     handle: Handle,
     local: flume::Sender<Local>,
     state: DictationState,
+    /// What to do about the speech model, at the top of the menu while dictation can't start.
+    model: Option<&'static str>,
 }
 
 impl Tray {
@@ -102,29 +110,36 @@ impl ksni::Tray for Tray {
         } else {
             "Stop dictation"
         };
-        vec![
+        let settings = |label: &str| -> MenuItem<Self> {
             StandardItem {
-                label: "Settings".into(),
+                label: label.into(),
                 activate: Box::new(|tray: &mut Self| {
                     let _ = tray.local.send(Local::ShowSettings);
                 }),
                 ..StandardItem::default()
             }
-            .into(),
-            StandardItem {
-                label: toggle.into(),
-                activate: Box::new(|tray: &mut Self| tray.handle.send(Command::Toggle)),
-                ..StandardItem::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Quit".into(),
-                activate: Box::new(|tray: &mut Self| tray.handle.send(Command::Quit)),
-                ..StandardItem::default()
-            }
-            .into(),
-        ]
+            .into()
+        };
+        self.model
+            .map(settings)
+            .into_iter()
+            .chain([
+                settings("Settings"),
+                StandardItem {
+                    label: toggle.into(),
+                    activate: Box::new(|tray: &mut Self| tray.handle.send(Command::Toggle)),
+                    ..StandardItem::default()
+                }
+                .into(),
+                MenuItem::Separator,
+                StandardItem {
+                    label: "Quit".into(),
+                    activate: Box::new(|tray: &mut Self| tray.handle.send(Command::Quit)),
+                    ..StandardItem::default()
+                }
+                .into(),
+            ])
+            .collect()
     }
 }
 

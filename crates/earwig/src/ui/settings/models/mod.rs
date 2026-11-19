@@ -7,13 +7,14 @@ mod view;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use earwig_core::events::Command;
 use earwig_core::models::{CancelToken, DownloadProgress, InstalledModel, ModelError, ModelSpec};
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{App, AppContext as _, Context, Entity, Subscription, Window};
 
-use crate::ui::{UiState, edit_config};
+use crate::ui::{UiState, edit_config, show_model_in_tray};
 use crate::{human_size, human_size_of};
-use table::{Place, Row, found_rows};
+use table::{Place, Row, canonical, found_rows};
 
 pub use view::page;
 
@@ -104,22 +105,7 @@ enum DownloadMsg {
 
 impl ModelsPage {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Search models")
-                .clean_on_escape()
-        });
-        let subscriptions = vec![cx.subscribe(
-            &search_input,
-            |this, input, event: &InputEvent, cx| match event {
-                InputEvent::Change => {
-                    let query = input.read(cx).value().trim().to_owned();
-                    this.set_query(query, cx);
-                }
-                InputEvent::PressEnter { .. } => this.search_hub(cx),
-                InputEvent::Focus | InputEvent::Blur => {}
-            },
-        )];
+        let (search_input, subscription) = search_box(window, cx);
         Self {
             installed: UiState::handle(cx).models().installed(),
             downloads: HashMap::new(),
@@ -129,8 +115,23 @@ impl ModelsPage {
             search_input,
             query: String::new(),
             hub: HubSearch::default(),
-            _subscriptions: subscriptions,
+            _subscriptions: vec![subscription],
         }
+    }
+
+    /// For a new settings window: the page afresh, but its downloads go on, with the model to
+    /// switch to and why others failed.
+    pub fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let old = std::mem::replace(self, Self::new(window, cx));
+        self.downloads = old.downloads;
+        self.picks = old.picks;
+        self.errors = old.errors;
+    }
+
+    /// How far a running download of `spec` is: bytes so far and in all, 0 while unknown.
+    pub fn downloading(&self, spec: &ModelSpec, cx: &App) -> Option<(u64, u64)> {
+        let spec = canonical(spec.clone(), UiState::handle(cx).models().catalog());
+        self.downloads.get(&spec).map(|d| (d.downloaded, d.total))
     }
 
     fn refresh_installed(&mut self, cx: &App) {
@@ -194,6 +195,7 @@ impl ModelsPage {
                 .insert(spec, format!("Could not start the download: {e}"));
             return;
         }
+        cx.defer(|cx| show_model_in_tray(cx));
         cx.spawn(async move |this, cx| {
             while let Ok(msg) = rx.recv_async().await {
                 if this
@@ -206,6 +208,7 @@ impl ModelsPage {
             // The channel closed without `Done`: the download thread panicked.
             let _ = this.update(cx, |this, cx| {
                 if this.downloads.remove(&spec).is_some() {
+                    cx.defer(|cx| show_model_in_tray(cx));
                     this.picks.dropped(&spec);
                     this.errors
                         .insert(spec, "The download stopped unexpectedly.".into());
@@ -227,10 +230,14 @@ impl ModelsPage {
             DownloadMsg::Done(spec, result) => {
                 self.downloads.remove(&spec);
                 self.refresh_installed(cx);
+                cx.defer(|cx| show_model_in_tray(cx));
                 match result {
                     Ok(()) => {
                         if self.picks.finished(&spec) {
                             use_model(spec, cx);
+                        } else {
+                            // The model in use, if it was the one missing, loads now.
+                            UiState::handle(cx).send(Command::ReloadConfig);
                         }
                     }
                     Err(ModelError::Cancelled) => self.picks.dropped(&spec),
@@ -361,6 +368,27 @@ impl HubSearch {
 /// Two characters or more.
 fn searchable(query: &str) -> bool {
     query.chars().nth(1).is_some()
+}
+
+/// The search box of a settings window, filtering as it is typed in.
+fn search_box(
+    window: &mut Window,
+    cx: &mut Context<ModelsPage>,
+) -> (Entity<InputState>, Subscription) {
+    let input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("Search models")
+            .clean_on_escape()
+    });
+    let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
+        InputEvent::Change => {
+            let query = input.read(cx).value().trim().to_owned();
+            this.set_query(query, cx);
+        }
+        InputEvent::PressEnter { .. } => this.search_hub(cx),
+        InputEvent::Focus | InputEvent::Blur => {}
+    });
+    (input, subscription)
 }
 
 fn use_model(spec: ModelSpec, cx: &mut App) {

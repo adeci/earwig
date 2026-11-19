@@ -443,10 +443,11 @@
         return text
 
 
-    def click_text(text: str, pick: int = 0, timeout: float = 60) -> tuple[int, int]:
+    def click_text(text: str, pick: int = 0, timeout: float = 60, negate: bool = False) -> tuple[int, int]:
         """Left-click the middle of `text` (its words in a row, case-sensitive) where OCR finds it
         on screen, the `pick`-th match from the top, through QEMU's tablet; waits up to `timeout`
-        seconds for it to show and returns the point clicked."""
+        seconds for it to show and returns the point clicked. `negate` reads light text on a dark
+        ground, such as a filled button's."""
         import re
         import time
         from pathlib import Path
@@ -466,7 +467,8 @@
                 assert header, "the screenshot is not a binary PPM"
                 screen = (int(header[1]), int(header[2]))
                 # Twice as large: tesseract misses a window's small text.
-                subprocess.run(["magick", shot, "-filter", "Catrom", "-resize", "200%", large], check=True)
+                inverted = ["-negate"] if negate else []
+                subprocess.run(["magick", shot, *inverted, "-filter", "Catrom", "-resize", "200%", large], check=True)
             lines = {}
             try:
                 # Sparse text finds most words, the automatic layout some more.

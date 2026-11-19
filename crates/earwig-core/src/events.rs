@@ -74,6 +74,11 @@ pub enum Event {
     Model {
         model: ModelStatus,
     },
+    /// A dictation was asked for while the model is missing or failed to
+    /// load (`model` says which): nothing is recorded.
+    ModelNotReady {
+        model: ModelStatus,
+    },
     /// A non-fatal problem worth showing to the user.
     Error {
         message: String,

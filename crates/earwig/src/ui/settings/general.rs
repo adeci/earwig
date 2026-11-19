@@ -26,7 +26,9 @@ use serde::de::DeserializeOwned;
 use super::pill_preview::PillPreview;
 use super::shortcut::{self, ShortcutField, Target};
 use super::{hinted, is_locked, item, section, spaced};
-use crate::ui::{OverlaySurface, UiState, apply_appearance, config, edit_config, overlay};
+use crate::ui::{
+    OverlaySurface, UiState, apply_appearance, config, edit_config, no_model, overlay,
+};
 
 /// Search words the Hotkey rows' titles don't contain.
 const HOTKEY_KEYWORDS: [&str; 6] = ["hotkey", "shortcut", "key", "bind", "record", "keyboard"];
@@ -51,6 +53,19 @@ pub fn page(
                     "Your settings file has an error, so earwig ignores it and saves no \
                      changes.\n{error}"
                 ))
+            })],
+        ));
+    }
+    if let Some(no_model) = no_model(cx) {
+        let sentence = no_model.sentence("under Models");
+        groups.push(section(
+            "Speech model",
+            None,
+            [SettingItem::render(move |_, _, cx| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().warning)
+                    .child(sentence.clone())
             })],
         ));
     }

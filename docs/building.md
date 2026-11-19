@@ -61,9 +61,9 @@ compositor's config instead.
 
 ## First start
 
-Open `earwig settings`, download a model under Models, and press **Allow**
-under Keyboard access, which installs a udev rule (it asks for your
-password). That rule by hand:
+In the settings window that opens on Models, click **Download** under the
+recommended model. Then, under General, press **Allow** under Keyboard access,
+which installs a udev rule (it asks for your password). That rule by hand:
 
 ```sh
 sudo tee /etc/udev/rules.d/70-earwig.rules <<'EOF'

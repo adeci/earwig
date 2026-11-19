@@ -13,9 +13,9 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
     Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    PlatformDisplay, Point, Render, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
-    StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
+    PlatformDisplay, Point, Render, SharedString, Size, Stateful, StatefulInteractiveElement as _,
+    Styled as _, StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
 use crate::ui::drag::{Grab, Pointer};
@@ -150,8 +150,9 @@ pub struct OverlayView {
     max_lines: u32,
     position: OverlayPosition,
     life: Lifecycle,
-    /// What the pill says while it shows a failure.
-    failure_line: &'static str,
+    /// What the pill says while it shows a failure: the header's word and a sentence.
+    failure_status: &'static str,
+    failure_line: SharedString,
     started_at_ms: u64,
     stopped_at_ms: Option<u64>,
     committed: String,
@@ -253,7 +254,8 @@ impl OverlayView {
             max_lines: config.max_lines.max(1),
             position: config.position,
             life: Lifecycle::default(),
-            failure_line: "",
+            failure_status: "",
+            failure_line: SharedString::default(),
             started_at_ms: now_ms(),
             stopped_at_ms: None,
             committed: String::new(),
@@ -301,8 +303,22 @@ impl OverlayView {
     }
 
     pub fn failed(&mut self, on_clipboard: bool, not_allowed: bool, now: Instant) {
-        self.failure_line = failure_text(on_clipboard, not_allowed);
+        self.failure_status = "Not inserted";
+        self.failure_line = failure_text(on_clipboard, not_allowed).into();
         self.life.failed(on_clipboard, now);
+    }
+
+    /// No dictation started: the pill says why in `line`, then switches off.
+    pub fn not_started(&mut self, line: String, now: Instant) {
+        self.committed.clear();
+        self.tentative.clear();
+        self.started_at_ms = now_ms();
+        self.stopped_at_ms = Some(self.started_at_ms);
+        self.failure_status = "Not started";
+        self.failure_line = line.into();
+        self.life.failed(false, now);
+        // The daemon has nothing more to say about it.
+        self.life.idle();
     }
 
     pub fn idle(&mut self) {
@@ -409,14 +425,16 @@ impl OverlayView {
     }
 
     fn header(&self, theme: &Theme) -> Div {
-        let status = self.failure().map(|_| "Not inserted");
+        let status = self.failure().map(|_| self.failure_status);
         let words = word_count(&self.committed) + word_count(&self.tentative);
         header_row(theme, self.elapsed(), words, status)
     }
 
     fn body(&self, theme: &Theme) -> Div {
         match self.failure() {
-            Some(_) => div().text_color(theme.foreground).child(self.failure_line),
+            Some(_) => div()
+                .text_color(theme.foreground)
+                .child(self.failure_line.clone()),
             None if self.committed.is_empty() && self.tentative.is_empty() => {
                 div().text_color(theme.muted_foreground).child("Listening…")
             }
