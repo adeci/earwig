@@ -13,7 +13,9 @@
 # packaging/windows/sign.ps1 decides how the packages are signed, packaging/windows/tools.psd1
 # pins every tool the jobs download; of actions, only GitHub's own, pinned to commits. Artifacts
 # only hand files on to the next jobs: kept two days, so a failed run can be re-run the next day.
-# Every push runs this; a pull request only from a fork, as a branch here ran on its pushes.
+# Every push runs this; a pull request only from a fork, as a branch here ran on its pushes. A push
+# cancels its branch's older run. Only one build of a commit runs at a time: a v* tag's cancels the
+# others, which otherwise wait their turn.
 name: CI
 
 on:
@@ -38,6 +40,9 @@ jobs:
   build:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: windows-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.sha }}
+      cancel-in-progress: ${{ startsWith(github.ref, 'refs/tags/v') }}
     # About 30 minutes from a cold cache; steps that can hang give up sooner.
     timeout-minutes: 45
     env:
@@ -228,7 +233,7 @@ jobs:
       - name: Smoke test the installer
         run: packaging/windows/smoke.ps1
         timeout-minutes: 10
-      # A tag's commit was tested when it was pushed to its branch.
+      # A tag's commit is tested on its branch, unless the tag cancelled that run.
       - name: Update end to end
         if: "!startsWith(github.ref, 'refs/tags/')"
         run: crates/earwig/tests/update/windows.ps1 -Test
