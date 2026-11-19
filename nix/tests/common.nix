@@ -443,11 +443,14 @@
         return text
 
 
-    def click_text(text: str, pick: int = 0, timeout: float = 60, negate: bool = False) -> tuple[int, int]:
+    def click_text(
+        text: str, pick: int = 0, timeout: float = 60, negate: bool = False, left_of: int | None = None
+    ) -> tuple[int, int]:
         """Left-click the middle of `text` (its words in a row, case-sensitive) where OCR finds it
         on screen, the `pick`-th match from the top, through QEMU's tablet; waits up to `timeout`
         seconds for it to show and returns the point clicked. `negate` reads light text on a dark
-        ground, such as a filled button's."""
+        ground, such as a filled button's; `left_of` clicks that many pixels left of the text
+        instead of its middle."""
         import re
         import time
         from pathlib import Path
@@ -493,7 +496,8 @@
                         top = min(word[2] for word in run)
                         bottom = max(word[2] + word[4] for word in run)
                         right = run[-1][1] + run[-1][3]
-                        x, y = (run[0][1] + right) // 2, (top + bottom) // 2
+                        x = run[0][1] - left_of if left_of is not None else (run[0][1] + right) // 2
+                        y = (top + bottom) // 2
                         # Both layouts read most text: one match per place.
                         if all(abs(x - mx) > 8 or abs(y - my) > 8 for mx, my in matches):
                             matches.append((x, y))

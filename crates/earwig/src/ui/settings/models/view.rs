@@ -182,10 +182,9 @@ fn render(
 fn search_box(page: &ModelsPage, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     div()
-        .px_2()
-        .py_1()
         .border_b_1()
         .border_color(theme.border)
+        // The field fills the row, so a click anywhere in it types there.
         .child(
             Input::new(&page.search_input)
                 .appearance(false)
@@ -194,7 +193,9 @@ fn search_box(page: &ModelsPage, cx: &App) -> impl IntoElement {
                     Icon::new(IconName::Search)
                         .small()
                         .text_color(theme.muted_foreground),
-                ),
+                )
+                .h_10()
+                .pl(px(18.)),
         )
 }
 
