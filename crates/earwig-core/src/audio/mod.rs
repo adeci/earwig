@@ -415,6 +415,7 @@ impl Worker {
         }
         self.feed.publish(Spectrum::default());
         if self.input.is_none() {
+            self.failing = false;
             self.reopen_at = Instant::now();
         }
         if !preroll.is_empty() {
@@ -435,6 +436,10 @@ impl Worker {
                     Raw::Data(pcm) => self.process(&pcm),
                     Raw::Error(e) => self.fail(&e),
                 }
+            }
+            if let Some(input) = &mut self.input {
+                let tail = input.resampler.flush();
+                self.deliver(&tail);
             }
             self.play_clip();
             self.recording = None;
@@ -609,9 +614,12 @@ where
 }
 
 struct StreamResampler {
+    rate: u32,
     fft: Option<rubato::Fft<f32>>,
     pending: Vec<f32>,
     out: Vec<f32>,
+    in_frames: u64,
+    out_frames: u64,
 }
 
 impl StreamResampler {
@@ -631,9 +639,12 @@ impl StreamResampler {
         };
         let out = vec![0.0; fft.as_ref().map_or(0, rubato::Resampler::output_frames_max)];
         Ok(Self {
+            rate,
             fft,
             pending: Vec::new(),
             out,
+            in_frames: 0,
+            out_frames: 0,
         })
     }
 
@@ -641,9 +652,14 @@ impl StreamResampler {
         let Some(fft) = &mut self.fft else {
             return input.to_vec();
         };
+        if input.is_empty() {
+            return Vec::new();
+        }
+        self.in_frames = self.in_frames.saturating_add(input.len() as u64);
         self.pending.extend_from_slice(input);
         let mut result = Vec::new();
         let mut used = 0;
+        let mut failed = false;
         loop {
             let need = fft.input_frames_next();
             if self.pending.len() - used < need {
@@ -664,12 +680,72 @@ impl StreamResampler {
                 }
                 Err(e) => {
                     log::warn!("resampler: {e}");
-                    used = self.pending.len();
+                    failed = true;
                     break;
                 }
             }
         }
-        self.pending.drain(..used);
+        if failed {
+            fft.reset();
+            self.pending.clear();
+            self.in_frames = 0;
+            self.out_frames = 0;
+        } else {
+            self.pending.drain(..used);
+            self.out_frames = self.out_frames.saturating_add(result.len() as u64);
+        }
+        result
+    }
+
+    /// Flush buffered tail samples (`pending`, `rubato`'s internal input
+    /// buffer, and the FFT overlap-add delay) and reset internal state so
+    /// nothing bleeds into the next recording.
+    fn flush(&mut self) -> Vec<f32> {
+        let Some(fft) = &mut self.fft else {
+            return Vec::new();
+        };
+        if self.in_frames == 0 {
+            return Vec::new();
+        }
+        let expected_out = u128::from(self.in_frames)
+            .saturating_mul(u128::from(SAMPLE_RATE))
+            .div_ceil(u128::from(self.rate));
+        let total_want = (fft.output_delay() as u128).saturating_add(expected_out);
+        let want =
+            usize::try_from(total_want.saturating_sub(u128::from(self.out_frames))).unwrap_or(0);
+        let mut result = Vec::with_capacity(want);
+        while result.len() < want {
+            let need = fft.input_frames_next();
+            if self.pending.len() < need {
+                self.pending.resize(need, 0.0);
+            }
+            let frames_out = self.out.len();
+            let chunk = &self.pending[..need];
+            let (Ok(input), Ok(mut output)) = (
+                InterleavedSlice::new(chunk, 1, need),
+                InterleavedSlice::new_mut(&mut self.out, 1, frames_out),
+            ) else {
+                break;
+            };
+            match fft.process_into_buffer(&input, &mut output, None) {
+                Ok((read, written)) => {
+                    self.pending.drain(..read);
+                    if written == 0 {
+                        break;
+                    }
+                    result.extend_from_slice(&self.out[..written]);
+                }
+                Err(e) => {
+                    log::warn!("resampler flush: {e}");
+                    break;
+                }
+            }
+        }
+        result.truncate(want);
+        fft.reset();
+        self.pending.clear();
+        self.in_frames = 0;
+        self.out_frames = 0;
         result
     }
 }
@@ -695,6 +771,46 @@ mod tests {
         }
         // Up to one 20 ms chunk stays buffered.
         assert!((15_600..=16_000).contains(&out.len()), "{}", out.len());
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact zero checks prove no residual bleed
+    fn stream_resampler_flush_preserves_tail_and_prevents_bleed() {
+        let mut passthrough = StreamResampler::new(SAMPLE_RATE).unwrap();
+        assert_eq!(passthrough.process(&[0.25, -0.25]), [0.25, -0.25]);
+        assert_eq!(passthrough.flush(), Vec::<f32>::new());
+
+        for rate in [44_100, 48_000] {
+            let mut r = StreamResampler::new(rate).unwrap();
+            // 100 ms of silence followed by a 15 ms burst right at the end:
+            // smaller than one 20 ms chunk, so `process` alone drops it.
+            let mut input = vec![0.0_f32; rate as usize / 10];
+            input.extend(tone(rate, (rate as usize * 15) / 1000, 0.8));
+            let mut before_flush = Vec::new();
+            for chunk in input.chunks(441) {
+                before_flush.extend(r.process(chunk));
+            }
+            let tail = r.flush();
+            let tail_peak = tail.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+            assert!(
+                tail_peak > 0.3,
+                "{rate} Hz: tail burst lost on flush (peak {tail_peak}, {} samples)",
+                tail.len()
+            );
+            let total = before_flush.len() + tail.len();
+            let expected = (input.len() * SAMPLE_RATE as usize) / rate as usize;
+            assert!(total >= expected, "{rate} Hz: {total} < {expected}");
+            assert_eq!(
+                r.flush(),
+                Vec::<f32>::new(),
+                "{rate} Hz: second flush was not empty"
+            );
+
+            // After flush/reset, silence in the next take carries zero bleed.
+            let next = r.process(&vec![0.0; rate as usize / 10]);
+            let bleed = next.iter().fold(0.0_f32, |m, s| m.max(s.abs()));
+            assert_eq!(bleed, 0.0, "{rate} Hz: previous take bled into next");
+        }
     }
 
     #[test]
@@ -733,6 +849,19 @@ mod tests {
             reported,
             [AudioEvent::Error(format!(
                 "{MIC_ERROR_PREFIX}no audio from the input device"
+            ))]
+        );
+
+        // A new recording with no open input resets the latch so the user hears
+        // why this take fails too, without spamming repeated retries mid-take.
+        worker.start(1);
+        worker.fail("no default input device");
+        worker.fail("no default input device");
+        let reported: Vec<AudioEvent> = rx.try_iter().collect();
+        assert_eq!(
+            reported,
+            [AudioEvent::Error(format!(
+                "{MIC_ERROR_PREFIX}no default input device"
             ))]
         );
     }
