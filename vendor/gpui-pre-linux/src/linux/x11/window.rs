@@ -355,10 +355,7 @@ impl rwh::HasDisplayHandle for X11Window {
         let Some(non_zero) = NonNull::new(connection) else {
             return Err(rwh::HandleError::Unavailable);
         };
-        let screen_id = {
-            let state = self.0.state.borrow();
-            u64::from(state.display.id()) as i32
-        };
+        let screen_id = self.0.state.borrow().x_screen_index as i32;
         let handle = rwh::XcbDisplayHandle::new(Some(non_zero), screen_id);
         Ok(unsafe { rwh::DisplayHandle::borrow_raw(handle.into()) })
     }
@@ -482,7 +479,9 @@ impl X11WindowState {
 
         let x_screen_index = params
             .display_id
-            .map_or(x_main_screen_index, |did| u64::from(did) as usize);
+            .map(X11Display::screen_index)
+            .filter(|&index| index < xcb.setup().roots.len())
+            .unwrap_or(x_main_screen_index);
 
         let visual_set = find_visuals(xcb, x_screen_index);
 
@@ -823,7 +822,14 @@ impl X11WindowState {
                 )?;
             }
 
-            let display = Rc::new(X11Display::new(xcb, scale_factor, x_screen_index)?);
+            let logical_bounds = bounds.to_pixels(scale_factor);
+            let display = Rc::new(X11Display::for_window(
+                xcb,
+                scale_factor,
+                x_screen_index,
+                params.display_id,
+                logical_bounds,
+            )?);
 
             Ok(Self {
                 parent,
@@ -834,7 +840,7 @@ impl X11WindowState {
                 x_root_window: visual_set.root,
                 x_screen_index,
                 visual_id: visual.id,
-                bounds: bounds.to_pixels(scale_factor),
+                bounds: logical_bounds,
                 scale_factor,
                 renderer: Some(renderer),
                 atoms: *atoms,
@@ -1290,6 +1296,19 @@ impl X11WindowStatePtr {
         bounds.map(|b| b.scale(scale_factor))
     }
 
+    pub(crate) fn refresh_display(&self) {
+        let mut state = self.state.borrow_mut();
+        if let Ok(display) = X11Display::for_window(
+            &self.xcb,
+            state.scale_factor,
+            state.x_screen_index,
+            None,
+            state.bounds,
+        ) {
+            state.display = Rc::new(display);
+        }
+    }
+
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
         let (is_resize, content_size, scale_factor) = {
             let mut state = self.state.borrow_mut();
@@ -1304,6 +1323,17 @@ impl X11WindowStatePtr {
                 state.bounds.size = bounds.size;
             } else {
                 state.bounds = bounds;
+                if !state.display.bounds().contains(&state.bounds.center())
+                    && let Ok(display) = X11Display::for_window(
+                        &self.xcb,
+                        state.scale_factor,
+                        state.x_screen_index,
+                        None,
+                        state.bounds,
+                    )
+                {
+                    state.display = Rc::new(display);
+                }
             }
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;

@@ -5,6 +5,7 @@ mod event;
 mod window;
 mod xim_handler;
 
+pub use client::x11_pointer_position;
 pub(crate) use client::*;
 pub(crate) use clipboard::wait_for_clipboard_handovers;
 pub(crate) use display::*;

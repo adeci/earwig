@@ -319,6 +319,23 @@ impl X11ClientStatePtr {
     }
 }
 
+thread_local! {
+    /// The X11 client of this (the main) thread, for [`x11_pointer_position`].
+    static CLIENT: RefCell<Option<X11ClientStatePtr>> = const { RefCell::new(None) };
+}
+
+/// The pointer's position on the root window in logical pixels, when X11 is active.
+pub fn x11_pointer_position() -> Option<Point<Pixels>> {
+    let client = CLIENT.with(|client| client.borrow().as_ref().and_then(|c| c.get_client()))?;
+    let state = client.0.borrow();
+    let root = state.xcb_connection.setup().roots.get(state.x_root_index)?.root;
+    let reply = state.xcb_connection.query_pointer(root).ok()?.reply().ok()?;
+    Some(Point::new(
+        px(f32::from(reply.root_x) / state.scale_factor),
+        px(f32::from(reply.root_y) / state.scale_factor),
+    ))
+}
+
 /// A connection to an X server.
 ///
 /// Not `Clone`: dropping it removes the connection's event-loop sources and forgets its windows.
@@ -335,6 +352,7 @@ impl std::ops::Deref for X11Connection {
 
 impl Drop for X11Connection {
     fn drop(&mut self) {
+        CLIENT.with(|current| current.replace(None));
         let mut state = self.0.0.borrow_mut();
         state.common.borrow_mut().after_runnable = None;
         for token in std::mem::take(&mut state.registrations) {
@@ -487,6 +505,16 @@ impl X11Connection {
 
         let screen = &xcb_connection.setup().roots[x_root_index];
         let compositor_gpu = detect_compositor_gpu(&xcb_connection, screen);
+        for root in &xcb_connection.setup().roots {
+            if let Ok(cookie) = xcb_connection.randr_select_input(
+                root.root,
+                randr::NotifyMask::SCREEN_CHANGE
+                    | randr::NotifyMask::OUTPUT_CHANGE
+                    | randr::NotifyMask::CRTC_CHANGE,
+            ) {
+                cookie.ignore_error();
+            }
+        }
 
         let xcb_connection = Rc::new(xcb_connection);
 
@@ -557,6 +585,7 @@ impl X11Connection {
             })
         })));
         // From here on, `Drop` removes whatever was registered if a later step fails.
+        CLIENT.with(|current| current.replace(Some(connection.0.0.borrow().this.clone())));
         connection.register_sources(&handle, background_executor)?;
         let xcb_connection = connection.0.0.borrow().xcb_connection.clone();
         xcb_flush(&xcb_connection);
@@ -1503,6 +1532,9 @@ impl X11Client {
                     phase: gpui::TouchPhase::Ended,
                 }));
             }
+            Event::RandrScreenChangeNotify(_) | Event::RandrNotify(_) => {
+                self.refresh_window_displays();
+            }
             _ => {}
         };
 
@@ -1644,6 +1676,19 @@ impl X11Client {
         Box::new(state.keyboard_layout.clone())
     }
 
+    fn refresh_window_displays(&self) {
+        let windows: Vec<X11WindowStatePtr> = self
+            .0
+            .borrow()
+            .windows
+            .values()
+            .map(|window| window.window.clone())
+            .collect();
+        for window in windows {
+            window.refresh_display();
+        }
+    }
+
     pub(crate) fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         let state = self.0.borrow();
         let setup = state.xcb_connection.setup();
@@ -1651,17 +1696,18 @@ impl X11Client {
             .roots
             .iter()
             .enumerate()
-            .filter_map(|(root_id, _)| {
-                Some(Rc::new(
-                    X11Display::new(&state.xcb_connection, state.scale_factor, root_id).ok()?,
-                ) as Rc<dyn PlatformDisplay>)
+            .flat_map(|(root_id, _)| {
+                X11Display::all(&state.xcb_connection, state.scale_factor, root_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|display| Rc::new(display) as Rc<dyn PlatformDisplay>)
             })
             .collect()
     }
 
     pub(crate) fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
         let state = self.0.borrow();
-        X11Display::new(
+        X11Display::primary(
             &state.xcb_connection,
             state.scale_factor,
             state.x_root_index,
