@@ -43,11 +43,7 @@ impl Inserter for InputMethodInserter {
     }
 
     fn insert(&mut self, text: &str) -> Result<InsertMethod, InsertError> {
-        if text.contains('\0') {
-            return Err(InsertError::NotApplicable(
-                "text contains NUL, which a Wayland string cannot carry".into(),
-            ));
-        }
+        check_text(text)?;
         let text = text.to_owned();
         self.worker
             .call(move |state, queue| state.commit(&text, queue))?
@@ -109,6 +105,24 @@ impl State {
         queue.roundtrip(self).context("input method roundtrip")?;
         Ok(InsertMethod::InputMethod)
     }
+}
+
+/// Reject strings the input method cannot deliver safely: NUL cannot cross
+/// Wayland, and line breaks committed through `commit_string` reach Wayland
+/// terminals raw (without bracketed paste) and act as Enter — falling back to
+/// paste avoids submitting half a prompt.
+fn check_text(text: &str) -> Result<(), InsertError> {
+    if text.contains('\0') {
+        return Err(InsertError::NotApplicable(
+            "text contains NUL, which a Wayland string cannot carry".into(),
+        ));
+    }
+    if text.contains(['\n', '\r']) {
+        return Err(InsertError::NotApplicable(
+            "text contains a line break, which input-method commits send raw to terminals".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Split `text` into pieces of at most `max` bytes on char boundaries.
@@ -177,7 +191,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
 
 #[cfg(test)]
 mod tests {
-    use super::chunks;
+    use super::{InsertError, check_text, chunks};
 
     #[test]
     fn chunks_respect_the_byte_limit_and_char_boundaries() {
@@ -185,5 +199,22 @@ mod tests {
         assert_eq!(chunks("aé🦀bé", 5).collect::<Vec<_>>(), ["aé", "🦀b", "é"]);
         assert_eq!(chunks("hello", 4000).collect::<Vec<_>>(), ["hello"]);
         assert_eq!(chunks("", 4000).count(), 0);
+    }
+
+    #[test]
+    fn nul_and_line_breaks_fall_back_from_input_method() {
+        assert!(check_text("hello world").is_ok());
+        assert!(matches!(
+            check_text("a\0b"),
+            Err(InsertError::NotApplicable(_))
+        ));
+        assert!(matches!(
+            check_text("line one\nline two"),
+            Err(InsertError::NotApplicable(_))
+        ));
+        assert!(matches!(
+            check_text("line one\rline two"),
+            Err(InsertError::NotApplicable(_))
+        ));
     }
 }
