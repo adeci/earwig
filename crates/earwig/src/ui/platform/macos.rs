@@ -124,7 +124,7 @@ impl Popup {
         ))
     }
 
-    pub(crate) fn move_to(&mut self, origin: Point<Pixels>, _scale: f32) {
+    pub(crate) fn move_to(&self, origin: Point<Pixels>, _scale: f32) {
         let Some(screen) = self.screen() else {
             return;
         };
