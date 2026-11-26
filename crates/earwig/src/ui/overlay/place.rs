@@ -278,6 +278,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn layout_shrink_and_offset_monitors_keep_home_and_remembered_windows_inside() {
+        let large = Bounds::new(point(px(0.), px(0.)), size(px(3840.), px(2160.)));
+        let shrunk = Bounds::new(point(px(0.), px(0.)), size(px(2560.), px(1440.)));
+        let secondary = Bounds::new(point(px(2560.), px(120.)), size(px(1920.), px(1080.)));
+        let window = window_size(3);
+        let pill = size(px(WIDTH), px(124.));
+        for position in POSITIONS {
+            // Saved near the far bottom-right corner of the larger layout.
+            let dragged = point(px(3600.), px(2100.));
+            let left = clamp_spot(dragged, pill, large, position) - large.origin;
+            for area in [shrunk, secondary] {
+                let home = home_spot(area, position);
+                assert!(inside(pill_at(home, 124., position), area, EDGE_GAP));
+                let home_win = window_origin(home, window, area, position);
+                assert!(inside(Bounds::new(home_win, window), area, 0.));
+
+                let spot = remembered_spot(left, area, position);
+                let clamped = clamp_spot(spot, pill, area, position);
+                assert!(inside(pill_at(clamped, 124., position), area, EDGE_GAP));
+                let win = window_origin(spot, window, area, position);
+                assert!(inside(Bounds::new(win, window), area, 0.));
+            }
+        }
+    }
+
     /// Where the flex column lays a pill `height` tall, in window coordinates.
     #[cfg(target_os = "linux")]
     fn laid_out(

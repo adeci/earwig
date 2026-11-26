@@ -29,6 +29,8 @@ pub(crate) use wayland::*;
 pub use wayland::{move_layer_surface, pointer_travel};
 #[cfg(feature = "x11")]
 pub(crate) use x11::*;
+#[cfg(feature = "x11")]
+pub use x11::x11_pointer_position;
 
 use std::rc::Rc;
 
