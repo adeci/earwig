@@ -17,7 +17,7 @@ use crate::replacements;
 const NO_PHRASE: &str = "[replacements] has an entry without a heard phrase";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
     pub audio: AudioConfig,
@@ -47,7 +47,7 @@ pub enum ActivationMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct HotkeyConfig {
     pub mode: ActivationMode,
     /// A release this soon after the press counts as a tap.
@@ -96,7 +96,7 @@ impl Default for HotkeyConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct AudioConfig {
     /// As `earwig devices` lists it (a sound server source on Linux, a device
     /// name on Windows); `None` = system default.
@@ -121,7 +121,7 @@ impl Default for AudioConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ModelConfig {
     /// `None` = the release's default catalog model.
     pub model: Option<ModelSpec>,
@@ -142,7 +142,7 @@ pub enum InsertSetting {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct InsertConfig {
     pub method: InsertSetting,
     /// Extra executables treated as terminals (Ctrl+Shift+V) on top of the
@@ -172,7 +172,7 @@ pub enum AccentSetting {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct AppearanceConfig {
     pub theme: ThemeSetting,
     pub accent: AccentSetting,
@@ -200,7 +200,7 @@ pub enum OverlayAnimation {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct OverlayConfig {
     pub enabled: bool,
     pub position: OverlayPosition,
@@ -266,7 +266,7 @@ impl Default for OverlayConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct HistoryConfig {
     pub enabled: bool,
     /// Entries kept on disk; older ones are dropped.
@@ -285,7 +285,7 @@ impl Default for HistoryConfig {
 /// External commands, the extension point for anything earwig does not do
 /// itself (LLM cleanup, logging, notifications).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct HooksConfig {
     /// argv of a filter: gets the final text on stdin, its stdout is inserted
     /// instead. Non-zero exit or timeout inserts the unfiltered text.
@@ -300,7 +300,7 @@ pub struct HooksConfig {
 /// The Windows and macOS releases look for a newer release on GitHub; other
 /// builds come from Nix, cargo or a package manager and never do.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct UpdatesConfig {
     /// Ask GitHub once a day whether a newer release is out.
     pub check: bool,
@@ -325,6 +325,9 @@ pub struct ConfigStore {
     config: Config,
     /// The path to every leaf key set by a system file.
     locked: BTreeSet<Vec<String>>,
+    /// Unknown keys/tables from the user file, preserved on save so downgrades
+    /// do not lose settings written by newer versions (e.g. `[remote]`).
+    user_unknown: toml::Table,
     /// Why the user file was ignored, if it was.
     user_error: Option<String>,
 }
@@ -340,14 +343,27 @@ impl ConfigStore {
     /// A broken system file is an error (fix it where it is generated); a
     /// broken user file is skipped and reported by [`ConfigStore::user_error`].
     pub fn load_from(paths: ConfigPaths) -> anyhow::Result<Self> {
+        let schema = schema_table();
         let mut merged = toml::Table::try_from(Config::default())?;
+        let mut user_unknown = toml::Table::new();
         let mut user_error = None;
         match read_table(&paths.user) {
             Ok(Some(user)) => {
+                let (unknown, unknown_paths) = split_unknown(&user, &schema);
                 let mut candidate = merged.clone();
                 merge(&mut candidate, user);
                 match candidate.clone().try_into::<Config>() {
-                    Ok(_) => merged = candidate,
+                    Ok(_) => {
+                        if !unknown_paths.is_empty() {
+                            log::warn!(
+                                "{}: ignoring unknown setting(s): {}",
+                                paths.user.display(),
+                                unknown_paths.join(", ")
+                            );
+                        }
+                        merged = candidate;
+                        user_unknown = unknown;
+                    }
                     Err(e) => user_error = Some(format!("{}: {e}", paths.user.display())),
                 }
             }
@@ -362,6 +378,14 @@ impl ConfigStore {
             let table = read_table(path)
                 .with_context(|| format!("reading {}", path.display()))?
                 .unwrap_or_default();
+            let (_, unknown_paths) = split_unknown(&table, &schema);
+            if !unknown_paths.is_empty() {
+                log::warn!(
+                    "{}: ignoring unknown setting(s): {}",
+                    path.display(),
+                    unknown_paths.join(", ")
+                );
+            }
             leaf_keys(&table, &mut Vec::new(), &mut locked);
             merge(&mut merged, table);
         }
@@ -380,6 +404,7 @@ impl ConfigStore {
             paths,
             config,
             locked,
+            user_unknown,
             user_error,
         })
     }
@@ -441,6 +466,7 @@ impl ConfigStore {
         prune(&mut user, &defaults, &mut Vec::new(), &|path| {
             self.locks(&path.iter().map(String::as_str))
         });
+        merge(&mut user, self.user_unknown.clone());
         crate::paths::write_atomic(&self.paths.user, toml::to_string_pretty(&user)?.as_bytes())?;
         *self = Self::load_from(self.paths.clone())?;
         Ok(())
@@ -493,6 +519,108 @@ fn leaf_keys(table: &toml::Table, path: &mut Vec<String>, out: &mut BTreeSet<Vec
             _ => {
                 out.insert(path.clone());
             }
+        }
+        path.pop();
+    }
+}
+
+/// A [`Config`] with every `Option` populated so its serialized TOML table
+/// lists every known key; explicit struct literals ensure new fields are
+/// checked at compile time.
+fn schema_table() -> toml::Table {
+    let sample = Config {
+        hotkey: HotkeyConfig {
+            mode: ActivationMode::default(),
+            hold_threshold_ms: 0,
+            key: String::new(),
+            discard: Some(String::new()),
+            block: false,
+            portal: false,
+            portal_trigger: String::new(),
+        },
+        audio: AudioConfig {
+            device: Some(String::new()),
+            keep_open: false,
+            preroll_ms: 0,
+        },
+        model: ModelConfig {
+            model: Some(ModelSpec::Curated { id: "x".into() }),
+            backend: Backend::default(),
+            language: Some(String::new()),
+        },
+        insert: InsertConfig {
+            method: InsertSetting::default(),
+            terminals: Vec::new(),
+        },
+        appearance: AppearanceConfig {
+            theme: ThemeSetting::default(),
+            accent: AccentSetting::default(),
+        },
+        overlay: OverlayConfig {
+            enabled: false,
+            position: OverlayPosition::default(),
+            max_lines: 0,
+            opacity: 0.,
+            border: 0.,
+            animation: OverlayAnimation::default(),
+            remember_position: false,
+        },
+        history: HistoryConfig {
+            enabled: false,
+            limit: 0,
+        },
+        replacements: BTreeMap::new(),
+        hooks: HooksConfig {
+            filter: Vec::new(),
+            filter_timeout_ms: Some(0),
+            on_insert: Vec::new(),
+        },
+        updates: UpdatesConfig { check: false },
+    };
+    toml::Table::try_from(sample).expect("Config serializes to a TOML table")
+}
+
+/// Extract keys and tables in `table` that are absent from `schema`, along
+/// with their dotted paths for logging. `[replacements]` is a free-form phrase
+/// map, so its keys are never treated as unknown.
+fn split_unknown(table: &toml::Table, schema: &toml::Table) -> (toml::Table, Vec<String>) {
+    let mut out_table = toml::Table::new();
+    let mut out_paths = Vec::new();
+    extract_unknown(
+        table,
+        schema,
+        &mut Vec::new(),
+        &mut out_table,
+        &mut out_paths,
+    );
+    (out_table, out_paths)
+}
+
+fn extract_unknown(
+    table: &toml::Table,
+    schema: &toml::Table,
+    path: &mut Vec<String>,
+    out_table: &mut toml::Table,
+    out_paths: &mut Vec<String>,
+) {
+    for (key, value) in table {
+        if path.is_empty() && key == "replacements" {
+            continue;
+        }
+        path.push(key.clone());
+        match (value, schema.get(key)) {
+            (_, None) => {
+                out_paths.push(path.join("."));
+                out_table.insert(key.clone(), value.clone());
+            }
+            (toml::Value::Table(sub), Some(toml::Value::Table(sub_schema))) => {
+                let mut sub_unknown = toml::Table::new();
+                extract_unknown(sub, sub_schema, path, &mut sub_unknown, out_paths);
+                if !sub_unknown.is_empty() {
+                    out_table.insert(key.clone(), toml::Value::Table(sub_unknown));
+                }
+            }
+            _ => {}
         }
         path.pop();
     }
@@ -615,18 +743,136 @@ mod tests {
 
     #[test]
     fn broken_user_file_is_skipped() {
-        let (_dir, store) = store("[audio]\nkeep_opne = true\n", "");
+        let (_dir, store) = store("[audio]\nkeep_open = \"yes\"\n", "");
         assert!(store.user_error().is_some());
         assert_eq!(store.config(), &Config::default());
     }
 
     #[test]
     fn update_refuses_to_overwrite_a_broken_user_file() {
-        let broken = "[audio]\nkeep_opne = true\n";
+        let broken = "[audio]\nkeep_open = \"yes\"\n";
         let (_dir, mut store) = store(broken, "");
         let err = store.update(|c| c.history.limit = 10).unwrap_err();
         assert!(err.to_string().contains("config.toml"), "{err}");
         assert_eq!(fs::read_to_string(&store.paths().user).unwrap(), broken);
+    }
+
+    #[test]
+    fn unknown_tables_and_keys_in_user_and_system_configs_load_cleanly() {
+        let user = "\
+[audio]
+preroll_ms = 120
+future_flag = true
+
+[remote]
+url = \"ws://leviathan:7313\"
+fallback = true
+
+[serve]
+listen = \"127.0.0.1:7313\"
+";
+        let system = "\
+[overlay]
+position = \"top\"
+future_sys = 42
+
+[remote]
+url = \"ws://system:7313\"
+";
+        let (_dir, store) = store(user, system);
+        assert!(store.user_error().is_none(), "{:?}", store.user_error());
+        assert_eq!(store.config().audio.preroll_ms, 120);
+        assert_eq!(store.config().overlay.position, OverlayPosition::Top);
+        assert!(store.is_locked("overlay.position"));
+    }
+
+    #[test]
+    fn update_preserves_unknown_user_tables_and_keys() {
+        let user = "\
+[audio]
+preroll_ms = 120
+future_flag = true
+
+[remote]
+url = \"ws://leviathan:7313\"
+fallback = true
+
+[serve]
+listen = \"127.0.0.1:7313\"
+";
+        let system = "\
+[remote]
+url = \"ws://system:7313\"
+
+[serve]
+system_only = true
+";
+        let (_dir, mut store) = store(user, system);
+        // Reset known `audio.preroll_ms` to default and edit `history.limit`.
+        store
+            .update(|c| {
+                c.history.limit = 10;
+                c.audio.preroll_ms = AudioConfig::default().preroll_ms;
+            })
+            .unwrap();
+        // A second update after reload must keep preserving them too.
+        store.update(|c| c.history.limit = 12).unwrap();
+
+        let written: toml::Table = fs::read_to_string(&store.paths().user)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(written["history"]["limit"].as_integer(), Some(12));
+        assert_eq!(written["audio"]["future_flag"].as_bool(), Some(true));
+        assert!(
+            written["audio"].get("preroll_ms").is_none(),
+            "known default was pruned"
+        );
+        assert_eq!(
+            written["remote"]["url"].as_str(),
+            Some("ws://leviathan:7313")
+        );
+        assert_eq!(written["remote"]["fallback"].as_bool(), Some(true));
+        assert_eq!(written["serve"]["listen"].as_str(), Some("127.0.0.1:7313"));
+        assert!(
+            written["serve"].get("system_only").is_none(),
+            "system unknown keys never leak into the user file"
+        );
+    }
+
+    #[test]
+    fn every_known_option_field_is_recognized_by_schema() {
+        let user = "\
+[hotkey]
+discard = \"Ctrl+F9\"
+
+[audio]
+device = \"mic0\"
+
+[model]
+model = \"parakeet-tdt-ctc-110m\"
+language = \"en\"
+
+[hooks]
+filter_timeout_ms = 5000
+
+[replacements]
+\"get hub\" = \"GitHub\"
+";
+        let (_dir, mut store) = store(user, "");
+        assert!(store.user_unknown.is_empty(), "{:?}", store.user_unknown);
+        // Clearing every Option field removes it cleanly instead of preserving it as unknown.
+        store
+            .update(|c| {
+                c.hotkey.discard = None;
+                c.audio.device = None;
+                c.model.model = None;
+                c.model.language = None;
+                c.hooks.filter_timeout_ms = None;
+                c.replacements.clear();
+            })
+            .unwrap();
+        assert_eq!(fs::read_to_string(&store.paths().user).unwrap().trim(), "");
     }
 
     #[test]
