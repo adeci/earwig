@@ -83,6 +83,11 @@ fn command(argv: &[String], stdout: Stdio) -> Command {
         .stdin(Stdio::piped())
         .stdout(stdout)
         .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     cmd
 }
 

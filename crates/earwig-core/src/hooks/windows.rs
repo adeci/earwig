@@ -16,7 +16,7 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
 };
 
 use crate::win32::owned;
@@ -26,7 +26,10 @@ pub(super) struct Tree(OwnedHandle);
 pub(super) fn spawn(mut command: Command) -> io::Result<(Child, Tree)> {
     // SAFETY: an unnamed job with default security.
     let job = owned(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) })?;
-    let mut child = command.creation_flags(CREATE_SUSPENDED).spawn()?;
+    // `creation_flags` replaces prior flags, so include `CREATE_NO_WINDOW` here too.
+    let mut child = command
+        .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+        .spawn()?;
     // SAFETY: live job and process handles.
     let joined = if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) }
         == FALSE
