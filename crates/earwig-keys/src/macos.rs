@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::key::{Held, Key, Modifier, Side};
 use crate::listener::{Blocking, Shared, Status};
-use crate::matcher::Edge;
+use crate::matcher::{Action, Edge, Mask};
 use crate::{Event, SYNTHETIC};
 
 type CGEventRef = *mut c_void;
@@ -226,11 +226,17 @@ unsafe extern "C" fn callback(
         // SAFETY: this callback runs on the tap's run loop.
         unsafe { CFRunLoopStop(CFRunLoopGetCurrent()) };
     }
-    if action.swallow {
+    if should_swallow(action) {
         std::ptr::null_mut()
     } else {
         event
     }
+}
+
+/// macOS needs no mask tap for lone Option/Cmd releases, so never swallow a release held back
+/// only for masking (when an active tap is on for another shortcut).
+fn should_swallow(action: Action) -> bool {
+    action.swallow && action.mask != Mask::Release
 }
 
 /// The key and edge of a tap event; a modifier's edge comes from its flag.
@@ -457,6 +463,49 @@ mod tests {
             events("Option+Space", &taps),
             [Event::Pressed, Event::Discard, Event::Released]
         );
+    }
+
+    #[test]
+    fn lone_modifier_releases_are_never_swallowed_even_when_the_tap_filters() {
+        let option = 0x8_0000 | 0x20;
+        let down = (FLAGS_CHANGED, RIGHT_CMD, 0x10_0000 | 0x10);
+        let up = (FLAGS_CHANGED, RIGHT_CMD, 0);
+        let run = |matcher: &mut Matcher, (kind, code, flags): (u32, u16, u64), dictating: bool| {
+            let (key, edge) = edge(kind, code, flags, false).unwrap();
+            let held = held(flags).besides(key);
+            matcher.edge(key, edge, held, dictating)
+        };
+
+        // Lone Cmd hotkey with a non-modifier discard makes the tap active: Cmd's release passes.
+        let mut matcher = Matcher::new(
+            "RightCmd".parse().unwrap(),
+            Some("Option+Space".parse().unwrap()),
+        );
+        let pressed = run(&mut matcher, down, false);
+        assert_eq!(pressed.event, Some(Event::Pressed));
+        assert!(!should_swallow(pressed));
+        let released = run(&mut matcher, up, true);
+        assert_eq!(released.event, Some(Event::Released));
+        assert_eq!(released.mask, Mask::Release);
+        assert!(!should_swallow(released));
+        let discard = run(&mut matcher, (KEY_DOWN, SPACE, option), true);
+        assert_eq!(discard.event, Some(Event::Discard));
+        assert!(should_swallow(discard));
+        assert!(should_swallow(run(
+            &mut matcher,
+            (KEY_UP, SPACE, option),
+            false
+        )));
+
+        // Reverse: non-modifier hotkey with a lone-modifier discard also passes the release.
+        let mut matcher = Matcher::new(
+            "Option+Space".parse().unwrap(),
+            Some("RightCmd".parse().unwrap()),
+        );
+        assert_eq!(run(&mut matcher, down, true).event, Some(Event::Discard));
+        let release = run(&mut matcher, up, false);
+        assert_eq!(release.mask, Mask::Release);
+        assert!(!should_swallow(release));
     }
 
     #[test]
