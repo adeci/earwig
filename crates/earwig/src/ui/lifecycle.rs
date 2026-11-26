@@ -8,11 +8,9 @@ pub const NOTICE: Duration = Duration::from_millis(1800);
 /// Tone of an overlay notice's status badge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeTone {
-    /// Informational (e.g. nothing heard or filtered empty).
-    #[allow(dead_code)]
+    /// Informational (e.g. nothing heard).
     Muted,
     /// Recoverable caution (e.g. silent mic).
-    #[allow(dead_code)]
     Warning,
     /// Failure (e.g. insertion failed, model not ready).
     Danger,
@@ -27,7 +25,6 @@ pub struct Notice {
 }
 
 impl Notice {
-    #[allow(dead_code)]
     pub fn muted(status: &'static str, line: impl Into<String>) -> Self {
         Self {
             status,
@@ -36,7 +33,6 @@ impl Notice {
         }
     }
 
-    #[allow(dead_code)]
     pub fn warning(status: &'static str, line: impl Into<String>) -> Self {
         Self {
             status,

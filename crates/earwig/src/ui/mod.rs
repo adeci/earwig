@@ -23,11 +23,14 @@ use earwig_core::audio::{InputDevice, InputDevices};
 use earwig_core::config::{AppearanceConfig, Config, ThemeSetting};
 use earwig_core::controller::Handle;
 use earwig_core::desktop::DesktopCaps;
-use earwig_core::events::{Command, DictationState, Event, ModelStatus, Status, UpdateState};
+use earwig_core::events::{
+    Command, DictationState, EmptyReason, Event, ModelStatus, Status, UpdateState,
+};
 use earwig_core::models::ModelSpec;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{AnyWindowHandle, App, Context, Entity, Global, QuitMode};
 
+use lifecycle::Notice;
 use overlay::OverlayView;
 
 /// Tray clicks, which don't go through the daemon.
@@ -271,8 +274,12 @@ fn apply(event: Event, cx: &mut App) {
             }
         }
         // Only for socket clients; the pill switched off already.
-        // (`NothingInserted` overlay notices are wired on the UI branch.)
-        Event::Inserted { .. } | Event::NothingInserted { .. } => {}
+        Event::Inserted { .. } => {}
+        Event::NothingInserted { reason } => {
+            if let Some(notice) = empty_notice(reason, UiState::mic_error(cx)) {
+                update_overlay(cx, |o, _| o.notice(notice, Instant::now()));
+            }
+        }
         Event::Transcript {
             committed,
             tentative,
@@ -303,6 +310,11 @@ fn apply(event: Event, cx: &mut App) {
                 cx.global_mut::<UiState>().mic_error = Some(error.to_owned());
                 cx.refresh_windows();
             }
+            if UiState::status(cx).state != DictationState::Idle
+                && let Some(notice) = error_notice(&message)
+            {
+                update_overlay(cx, |o, _| o.notice(notice, Instant::now()));
+            }
         }
         Event::ShowSettings => show_settings(cx),
         Event::Update { update } => {
@@ -311,6 +323,31 @@ fn apply(event: Event, cx: &mut App) {
             cx.refresh_windows();
         }
     }
+}
+
+/// Overlay notice for a take that finished with nothing to insert, if worth interrupting for.
+fn empty_notice(reason: EmptyReason, mic_error: Option<&str>) -> Option<Notice> {
+    match reason {
+        EmptyReason::SilentMic => Some(match mic_error {
+            Some(error) => Notice::danger("Microphone error", error),
+            None => Notice::warning("Silent mic", "No sound reached the microphone."),
+        }),
+        EmptyReason::NothingHeard => {
+            Some(Notice::muted("Nothing heard", "No speech was detected."))
+        }
+        EmptyReason::Filtered => None,
+    }
+}
+
+/// Overlay notice for a mic or transcription error arriving during a dictation.
+fn error_notice(message: &str) -> Option<Notice> {
+    if let Some(error) = message.strip_prefix(earwig_core::audio::MIC_ERROR_PREFIX) {
+        return Some(Notice::danger("Microphone error", error));
+    }
+    if let Some(error) = message.strip_prefix("transcription failed: ") {
+        return Some(Notice::danger("Transcription failed", error));
+    }
+    None
 }
 
 fn set_update(update: Option<&UpdateState>, cx: &App) {
@@ -621,5 +658,38 @@ mod tests {
             NoModel::NoFile.sentence("under Models"),
             "The speech model's file is missing. Choose a model under Models."
         );
+    }
+
+    #[test]
+    fn empty_and_error_events_map_to_expected_overlay_notices() {
+        assert_eq!(
+            empty_notice(EmptyReason::SilentMic, None),
+            Some(Notice::warning(
+                "Silent mic",
+                "No sound reached the microphone."
+            ))
+        );
+        assert_eq!(
+            empty_notice(EmptyReason::SilentMic, Some("no default input device")),
+            Some(Notice::danger(
+                "Microphone error",
+                "no default input device"
+            ))
+        );
+        assert_eq!(
+            empty_notice(EmptyReason::NothingHeard, None),
+            Some(Notice::muted("Nothing heard", "No speech was detected."))
+        );
+        assert_eq!(empty_notice(EmptyReason::Filtered, None), None);
+
+        assert_eq!(
+            error_notice("microphone: device unplugged"),
+            Some(Notice::danger("Microphone error", "device unplugged"))
+        );
+        assert_eq!(
+            error_notice("transcription failed: model crashed"),
+            Some(Notice::danger("Transcription failed", "model crashed"))
+        );
+        assert_eq!(error_notice("config: invalid toml"), None);
     }
 }
