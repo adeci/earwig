@@ -15,7 +15,7 @@ fn key(code: u16, value: i32) -> InputEvent {
 #[test]
 fn other_keys_pass_on_whole() {
     let frame = [scan(0x70004), key(30, 1)];
-    let out = passed_on(&frame, false, Mask::None, 0, InputEvent::syn());
+    let out = passed_on(&frame, false, Mask::None, false, 0, InputEvent::syn());
     assert_eq!(out, [scan(0x70004), key(30, 1), InputEvent::syn()]);
 }
 
@@ -23,7 +23,7 @@ fn other_keys_pass_on_whole() {
 fn a_swallowed_key_leaves_nothing_but_a_mask_tap_behind_super() {
     // Super went through earlier; Space, with its scan code, was swallowed.
     let frame = [scan(0x7002c)];
-    let out = passed_on(&frame, true, Mask::After, 0, InputEvent::syn());
+    let out = passed_on(&frame, true, Mask::After, false, 0, InputEvent::syn());
     let ctrl = codes::KEY_LEFTCTRL;
     assert_eq!(
         out,
@@ -35,14 +35,21 @@ fn a_swallowed_key_leaves_nothing_but_a_mask_tap_behind_super() {
         ]
     );
     assert_eq!(
-        passed_on(&frame, true, Mask::None, 0, InputEvent::syn()),
+        passed_on(&frame, true, Mask::None, false, 0, InputEvent::syn()),
         []
     );
 }
 
 #[test]
 fn a_held_back_release_follows_its_mask_tap() {
-    let out = passed_on(&[], true, Mask::Release, KEY_LEFTMETA, InputEvent::syn());
+    let out = passed_on(
+        &[],
+        true,
+        Mask::Release,
+        false,
+        KEY_LEFTMETA,
+        InputEvent::syn(),
+    );
     assert_eq!(
         out.iter().filter(|e| e.kind == EV_KEY).collect::<Vec<_>>(),
         [
@@ -54,9 +61,31 @@ fn a_held_back_release_follows_its_mask_tap() {
 }
 
 #[test]
+fn a_held_ctrl_skips_the_mask_tap_so_it_is_not_released() {
+    // Ctrl+Alt+Space / Ctrl+Super+Space: Ctrl is already down, so tapping it would release it.
+    let frame = [scan(0x7002c)];
+    assert_eq!(
+        passed_on(&frame, true, Mask::After, true, 0, InputEvent::syn()),
+        []
+    );
+    // Ctrl+RightSuper release while Ctrl stays down: release passes without tapping Ctrl.
+    assert_eq!(
+        passed_on(
+            &[],
+            true,
+            Mask::Release,
+            true,
+            KEY_LEFTMETA,
+            InputEvent::syn()
+        ),
+        [key(KEY_LEFTMETA, 0), InputEvent::syn()]
+    );
+}
+
+#[test]
 fn a_frame_with_another_key_keeps_it_when_the_hotkey_is_swallowed() {
     let frame = [key(30, 1)];
-    let out = passed_on(&frame, true, Mask::None, 0, InputEvent::syn());
+    let out = passed_on(&frame, true, Mask::None, false, 0, InputEvent::syn());
     assert_eq!(out, [key(30, 1), InputEvent::syn()]);
 }
 

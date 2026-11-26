@@ -26,7 +26,7 @@ use self::evdev::{
 pub use self::paste::{PasteKeyboard, modifier_held};
 use crate::Event;
 use crate::hotkey::Hotkey;
-use crate::key::Held;
+use crate::key::{Held, Modifier, Side};
 use crate::listener::{Blocking, Shared, Snapshot, Status};
 use crate::matcher::{Edge, Mask};
 
@@ -533,7 +533,7 @@ impl Keyboard {
                 self.dropping = false;
                 return self.resync(others, shared, events);
             }
-            (EV_SYN, SYN_REPORT) => self.end_frame(event),
+            (EV_SYN, SYN_REPORT) => self.end_frame(event, others),
             _ if self.dropping => {}
             (EV_KEY, _) => return self.key(event, others, shared, events),
             _ => self.frame.push(event),
@@ -575,7 +575,7 @@ impl Keyboard {
     }
 
     /// Pass the frame on through the clone, with a mask key if one is due.
-    fn end_frame(&mut self, syn: InputEvent) {
+    fn end_frame(&mut self, syn: InputEvent, others: Held) {
         if let Grab::Held { clone, since } = &self.grab {
             if syn.micros() < *since {
                 // The compositor saw this frame before the grab: a key that
@@ -584,7 +584,15 @@ impl Keyboard {
                     self.lost_grab = true;
                 }
             } else {
-                let out = passed_on(&self.frame, self.swallowed, self.mask, self.release, syn);
+                let ctrl_held = self.held(others).has(Modifier::Ctrl, Side::Either);
+                let out = passed_on(
+                    &self.frame,
+                    self.swallowed,
+                    self.mask,
+                    ctrl_held,
+                    self.release,
+                    syn,
+                );
                 if !out.is_empty()
                     && let Err(e) = clone.write(&out)
                 {
@@ -661,10 +669,12 @@ impl Keyboard {
 }
 
 /// What the clone sends for one frame: what's left of it, then any mask tap and held-back release.
+/// When Ctrl is already held it masks Alt and Super on its own, and tapping it would release it.
 fn passed_on(
     frame: &[InputEvent],
     swallowed: bool,
     mask: Mask,
+    ctrl_held: bool,
     release: u16,
     syn: InputEvent,
 ) -> Vec<InputEvent> {
@@ -674,7 +684,7 @@ fn passed_on(
         out.extend_from_slice(frame);
         out.push(syn);
     }
-    if mask != Mask::None {
+    if mask != Mask::None && !ctrl_held {
         out.extend([
             InputEvent::new(EV_KEY, codes::KEY_LEFTCTRL, 1),
             InputEvent::syn(),
