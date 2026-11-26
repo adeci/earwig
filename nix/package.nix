@@ -66,6 +66,10 @@ let
     inherit src;
     # Vendored from the real source: the dummy one is IFD, which breaks evaluating other systems.
     cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+    # Keep the workspace's dynamic-backends feature unified across cargoArtifacts, the package,
+    # clippy and tests so transcribe.cpp's C++ and CPU modules build once instead of per edit.
+    cargoExtraArgs =
+      "--locked" + lib.optionalString dynamicBackends " --features earwig/dynamic-backends";
     strictDeps = true;
     nativeBuildInputs = [
       cmake
@@ -128,6 +132,13 @@ craneLib.buildPackage (
           $out/share/applications/io.github.adeci.earwig.desktop
         install -Dm644 assets/io.github.adeci.earwig.svg \
           $out/share/icons/hicolor/scalable/apps/io.github.adeci.earwig.svg
+        install -Dm644 ${../LICENSE} $out/share/licenses/earwig/LICENSE
+        install -Dm644 assets/fonts/LICENSE-IBM-Plex-Sans.txt \
+          $out/share/licenses/earwig/LICENSE-IBM-Plex-Sans.txt
+        install -Dm644 assets/cursors/LICENSE-Lucide.txt \
+          $out/share/licenses/earwig/LICENSE-Lucide.txt
+        install -Dm644 ${../packaging/THIRD-PARTY-NOTICES.txt} \
+          $out/share/licenses/earwig/THIRD-PARTY-NOTICES.txt
       ''
       # libtranscribe and its modules, in one directory: it loads them from beside itself. They
       # come from the install prefix of this build's transcribe-cpp-sys, as its manifest lists it.
@@ -164,6 +175,13 @@ craneLib.buildPackage (
           // {
             inherit cargoArtifacts;
             nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ writableTmpDirAsHomeHook ];
+            # dynamic-backends links libtranscribe dynamically; rustc-link-arg rpath from
+            # transcribe-cpp does not propagate to downstream workspace test binaries.
+            preCheck = lib.optionalString dynamicBackends ''
+              for dir in target/*/build/transcribe-cpp-sys-*/out/lib*; do
+                [ -d "$dir" ] && export LD_LIBRARY_PATH="$PWD/$dir''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              done
+            '';
             cargoTestExtraArgs = "--workspace";
           }
         );
@@ -190,10 +208,11 @@ craneLib.buildPackage (
     meta = {
       description = "Local, instant dictation";
       homepage = "https://github.com/adeci/earwig";
-      # OFL: the IBM Plex Sans compiled into the binary.
+      # OFL: IBM Plex Sans; ISC: Lucide cursor icons (both compiled into the binary).
       license = [
         lib.licenses.mit
         lib.licenses.ofl
+        lib.licenses.isc
       ];
       mainProgram = "earwig";
       platforms = lib.platforms.linux ++ lib.platforms.darwin;
