@@ -5,7 +5,8 @@
 //! allows one compute at a time and a stream borrows the session.
 
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,10 @@ const ASR_ARCHITECTURES: &[&str] = &[
 
 /// Live text for non-streaming models is refreshed at most this often.
 const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Peak amplitude below -60 dBFS (matching `earwig_core::spectrum`'s silence
+/// floor): muted or digitally silent audio that cannot contain speech.
+const SILENCE_PEAK: f32 = 1e-3;
 
 /// Cheap to create: nothing is initialized until a model loads.
 #[derive(Debug, Default)]
@@ -203,6 +208,8 @@ struct TranscribeModel {
     worker: Option<JoinHandle<()>>,
     /// Aborts an in-flight preview decode when the final one is wanted.
     cancel: tc::CancelToken,
+    /// Generation currently permitted to start a preview decode (`0` = none).
+    allow_preview: Arc<AtomicU64>,
     /// Longest audio the model accepts in one run (0 = no limit), in samples.
     max_samples: usize,
     generation: u64,
@@ -268,18 +275,30 @@ impl TranscribeModel {
         }
         let cancel = tc::CancelToken::new();
         session.set_cancel_token(&cancel);
+        let allow_preview = Arc::new(AtomicU64::new(0));
         let (jobs, jobs_rx) = flume::unbounded();
         let (replies_tx, replies) = flume::unbounded();
         let worker_cancel = cancel.clone();
+        let worker_allow = allow_preview.clone();
         let worker = thread::Builder::new()
             .name("earwig-transcribe".into())
-            .spawn(move || worker(session, &run, &worker_cancel, &jobs_rx, &replies_tx))?;
+            .spawn(move || {
+                worker(
+                    session,
+                    &run,
+                    &worker_cancel,
+                    &worker_allow,
+                    &jobs_rx,
+                    &replies_tx,
+                );
+            })?;
         Ok(Self {
             info,
             jobs: Some(jobs),
             replies,
             worker: Some(worker),
             cancel,
+            allow_preview,
             max_samples,
             generation: 0,
             active: false,
@@ -298,7 +317,7 @@ impl TranscribeModel {
     }
 
     /// The next reply for the current recording that `want` accepts.
-    /// Finished previews are noted on the way.
+    /// Finished previews (including stale ones) are noted on the way.
     fn wait(&mut self, want: impl Fn(&Reply) -> bool) -> anyhow::Result<Reply> {
         loop {
             let reply = self
@@ -306,14 +325,14 @@ impl TranscribeModel {
                 .recv()
                 .ok()
                 .context("the transcription worker stopped")?;
+            if matches!(reply, Reply::Preview { .. }) {
+                self.preview_in_flight = false;
+            }
             if reply.generation() != self.generation {
                 continue;
             }
             if want(&reply) {
                 return Ok(reply);
-            }
-            if matches!(reply, Reply::Preview { .. }) {
-                self.preview_in_flight = false;
             }
         }
     }
@@ -327,20 +346,21 @@ impl TranscribeModel {
                 text,
                 took,
             } = reply
-                && generation == self.generation
             {
                 self.preview_in_flight = false;
-                // A slow decode pushes the next one out: never queue decodes
-                // faster than they finish.
-                self.next_preview = Instant::now() + PREVIEW_INTERVAL.max(took);
-                match text {
-                    Ok(text) => {
-                        partial = Some(Partial {
-                            committed: String::new(),
-                            tentative: text.trim().to_owned(),
-                        });
+                if generation == self.generation {
+                    // A slow decode pushes the next one out: never queue decodes
+                    // faster than they finish.
+                    self.next_preview = Instant::now() + PREVIEW_INTERVAL.max(took);
+                    match text {
+                        Ok(text) => {
+                            partial = Some(Partial {
+                                committed: String::new(),
+                                tentative: text.trim().to_owned(),
+                            });
+                        }
+                        Err(e) => log::debug!("live preview: {e}"),
                     }
-                    Err(e) => log::debug!("live preview: {e}"),
                 }
             }
         }
@@ -372,9 +392,11 @@ impl Model for TranscribeModel {
         self.abort();
         self.generation += 1;
         self.recording.clear();
-        self.preview_in_flight = false;
         self.next_preview = Instant::now() + PREVIEW_INTERVAL;
-        self.cancel.reset();
+        // Keep `preview_in_flight` and `cancel` intact: an aborted preview from
+        // the prior take may still be running on the worker, which resets
+        // `cancel` itself before starting a new decode.
+        self.allow_preview.store(self.generation, Ordering::SeqCst);
         self.active = true;
         if self.info.streaming {
             self.send(Job::Begin {
@@ -419,6 +441,7 @@ impl Model for TranscribeModel {
         self.active = false;
         self.streaming_now = false;
         let recording = std::mem::take(&mut self.recording);
+        self.allow_preview.store(0, Ordering::SeqCst);
         if self.preview_in_flight {
             // The worker resets the token before the final decode.
             self.cancel.cancel();
@@ -438,6 +461,7 @@ impl Model for TranscribeModel {
     fn abort(&mut self) {
         if std::mem::take(&mut self.active) {
             self.recording.clear();
+            self.allow_preview.store(0, Ordering::SeqCst);
             if self.preview_in_flight {
                 self.cancel.cancel();
             }
@@ -450,6 +474,7 @@ impl Model for TranscribeModel {
 
 impl Drop for TranscribeModel {
     fn drop(&mut self) {
+        self.allow_preview.store(0, Ordering::SeqCst);
         self.cancel.cancel();
         self.jobs.take();
         if let Some(worker) = self.worker.take() {
@@ -471,6 +496,7 @@ fn worker(
     mut session: tc::Session,
     run: &tc::RunOptions,
     cancel: &tc::CancelToken,
+    allow_preview: &AtomicU64,
     jobs: &flume::Receiver<Job>,
     replies: &flume::Sender<Reply>,
 ) {
@@ -515,7 +541,9 @@ fn worker(
             }
             Job::Preview { generation, pcm } => {
                 let started = Instant::now();
-                let text = decode(&mut session, run, &pcm);
+                let text = run_preview(generation, allow_preview, cancel, || {
+                    decode(&mut session, run, &pcm)
+                });
                 let _ = replies.send(Reply::Preview {
                     generation,
                     text,
@@ -531,6 +559,34 @@ fn worker(
             Job::Abort => {}
         }
     }
+}
+
+/// Run a preview decode only while `generation` is still allowed, resetting
+/// `cancel` on the worker thread with a SeqCst check so `abort()`/`finish()`
+/// never race `reset()`.
+fn run_preview(
+    generation: u64,
+    allow_preview: &AtomicU64,
+    cancel: &tc::CancelToken,
+    decode: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    if allow_preview.load(Ordering::SeqCst) != generation {
+        return Err("preview cancelled".into());
+    }
+    cancel.reset();
+    if allow_preview.load(Ordering::SeqCst) != generation {
+        return Err("preview cancelled".into());
+    }
+    decode()
+}
+
+fn is_silent(pcm: &[f32]) -> bool {
+    pcm.iter().all(|s| s.abs() < SILENCE_PEAK)
+}
+
+/// Whether an empty streaming finalize warrants a full-recording batch fallback.
+fn should_fallback_decode(stream_text: &str, recording: &[f32]) -> bool {
+    stream_text.trim().is_empty() && !is_silent(recording)
 }
 
 fn serve_stream(
@@ -591,16 +647,14 @@ fn serve_stream(
                                 compute.as_millis(),
                                 t.elapsed().as_millis(),
                             );
-                            if !text.trim().is_empty() {
+                            if !should_fallback_decode(&text, &recording) {
                                 let _ = replies.send(Reply::Finished {
                                     generation,
                                     text: Ok(text),
                                 });
                                 return StreamEnd::Done;
                             }
-                            if !recording.is_empty() {
-                                log::info!("stream produced no text; decoding the recording");
-                            }
+                            log::info!("stream produced no text; decoding the recording");
                         }
                         Err(e) => {
                             log::warn!("stream finalize failed; decoding the recording: {e}");
@@ -608,6 +662,13 @@ fn serve_stream(
                     }
                 }
                 log::debug!("stream lived {} ms", started.elapsed().as_millis());
+                if is_silent(&recording) {
+                    let _ = replies.send(Reply::Finished {
+                        generation,
+                        text: Ok(String::new()),
+                    });
+                    return StreamEnd::Done;
+                }
                 return StreamEnd::Fallback(recording);
             }
             Job::Abort => return StreamEnd::Done,
@@ -671,5 +732,110 @@ mod tests {
         assert_eq!(hint("de"), None);
         // A model that lists no languages gets the hint as it is.
         assert_eq!(listed_language("de", &[]).as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn silent_streaming_takes_skip_the_batch_fallback() {
+        assert!(!should_fallback_decode("", &[]));
+        assert!(!should_fallback_decode("  ", &vec![0.0; 16_000]));
+        assert!(!should_fallback_decode("", &vec![5e-4; 16_000]));
+        assert!(should_fallback_decode("", &vec![0.05; 16_000]));
+        assert!(!should_fallback_decode("hello", &vec![0.05; 16_000]));
+    }
+
+    #[test]
+    fn beginning_a_new_take_never_uncancels_an_aborted_preview() {
+        let cancel = tc::CancelToken::new();
+        let allow_preview = Arc::new(AtomicU64::new(0));
+        let (jobs_tx, jobs_rx) = flume::unbounded();
+        let (replies_tx, replies_rx) = flume::unbounded();
+        let (preview_started_tx, preview_started_rx) = flume::bounded(1);
+        let (release_preview_tx, release_preview_rx) = flume::bounded(1);
+
+        let worker_cancel = cancel.clone();
+        let worker_allow = allow_preview.clone();
+        let worker = thread::spawn(move || {
+            while let Ok(job) = jobs_rx.recv() {
+                match job {
+                    Job::Preview { generation, .. } => {
+                        let started = Instant::now();
+                        let text = run_preview(generation, &worker_allow, &worker_cancel, || {
+                            let _ = preview_started_tx.send(generation);
+                            let _ = release_preview_rx.recv();
+                            if worker_cancel.is_cancelled() {
+                                Err("aborted".into())
+                            } else {
+                                Ok("stale preview".into())
+                            }
+                        });
+                        let _ = replies_tx.send(Reply::Preview {
+                            generation,
+                            text,
+                            took: started.elapsed(),
+                        });
+                    }
+                    Job::Finish {
+                        generation,
+                        recording,
+                    } => {
+                        worker_cancel.reset();
+                        let _ = replies_tx.send(Reply::Finished {
+                            generation,
+                            text: Ok(format!("samples={}", recording.len())),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut model = TranscribeModel {
+            info: ModelInfo {
+                architecture: "fake".into(),
+                streaming: false,
+                backend: "cpu".into(),
+            },
+            jobs: Some(jobs_tx),
+            replies: replies_rx,
+            worker: Some(worker),
+            cancel: cancel.clone(),
+            allow_preview,
+            max_samples: 0,
+            generation: 0,
+            active: false,
+            streaming_now: false,
+            recording: Vec::new(),
+            preview_in_flight: false,
+            next_preview: Instant::now(),
+        };
+
+        // Take 1 starts a preview decode.
+        model.begin().unwrap();
+        model.next_preview = Instant::now();
+        assert!(model.feed(&[0.2; 160]).unwrap().is_none());
+        assert_eq!(
+            preview_started_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(1)
+        );
+        assert!(model.preview_in_flight);
+
+        // Abort take 1 and immediately start take 2 while take 1's preview is still running.
+        model.abort();
+        assert!(cancel.is_cancelled());
+        model.begin().unwrap();
+        assert!(
+            cancel.is_cancelled(),
+            "begin() must not reset cancel while take 1's preview is still in flight"
+        );
+        assert!(
+            model.preview_in_flight,
+            "begin() must keep tracking the in-flight preview until the worker replies"
+        );
+
+        // Unblock take 1's preview: it sees cancellation, and take 2 finishes cleanly.
+        release_preview_tx.send(()).unwrap();
+        model.feed(&[0.3; 320]).unwrap();
+        assert_eq!(model.finish().unwrap(), "samples=320");
+        assert!(!model.preview_in_flight);
     }
 }
