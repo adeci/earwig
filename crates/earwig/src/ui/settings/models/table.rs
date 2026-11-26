@@ -1,5 +1,6 @@
 //! The table's rows: the models on disk, the catalog's, Hugging Face's, and which match a search.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use earwig_core::models::{Benchmark, CatalogEntry, InstalledModel, ModelSpec, Role, SearchResult};
@@ -100,9 +101,17 @@ impl Row {
 
     /// Every word of `query` is in the name, summary, id, tag, abilities or languages.
     fn matches(&self, query: &str) -> bool {
-        let mut haystack = format!("{} {} {}", self.name, self.summary, self.spec);
+        let mut words = query.split_whitespace().peekable();
+        if words.peek().is_none() {
+            return true;
+        }
+        let mut haystack = String::with_capacity(
+            self.name.len() + self.summary.len() + self.languages.len() * 10 + 64,
+        );
+        let _ = write!(haystack, "{} {} {}", self.name, self.summary, self.spec);
         if let Some(role) = self.role {
-            haystack = format!("{haystack} {}", role_label(role));
+            haystack.push(' ');
+            haystack.push_str(role_label(role));
         }
         if self.streaming {
             haystack.push_str(" streaming live");
@@ -111,12 +120,11 @@ impl Row {
             haystack.push_str(" multilingual");
         }
         for code in &self.languages {
-            haystack = format!("{haystack} {}", language_name(code));
+            haystack.push(' ');
+            haystack.push_str(language_name(code));
         }
         let haystack = haystack.to_lowercase();
-        query
-            .split_whitespace()
-            .all(|word| haystack.contains(&word.to_lowercase()))
+        words.all(|word| haystack.contains(&word.to_lowercase()))
     }
 }
 
@@ -452,6 +460,7 @@ mod tests {
         let rows =
             |query| ids(&table(&catalog, &[], &spec("none"), None, query, Vec::new()).available);
         assert_eq!(rows("").len(), catalog.len());
+        assert_eq!(rows("   ").len(), catalog.len());
         assert_eq!(rows("ULTRA"), ["parakeet-ultra"]);
         assert_eq!(rows("more accurate"), ["Qwen3-ASR-1.7B"]);
         assert_eq!(
