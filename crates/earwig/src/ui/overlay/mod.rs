@@ -640,8 +640,11 @@ impl OverlayView {
             area,
             self.position,
         );
+        if self.origin == Some(origin) {
+            return;
+        }
         self.origin = Some(origin);
-        if let Some(popup) = &mut self.popup {
+        if let Some(popup) = &self.popup {
             popup.move_to(origin, window.scale_factor());
         }
     }

@@ -58,8 +58,6 @@ pub(crate) fn home_display(cx: &App) -> Option<std::rc::Rc<dyn PlatformDisplay>>
 
 pub(crate) struct Popup {
     hwnd: HWND,
-    /// Origin last asked for, `None` while the window is where it opened.
-    origin: Option<Point<Pixels>>,
 }
 
 impl Popup {
@@ -79,7 +77,7 @@ impl Popup {
             }
         }
         set_input_region(window, None);
-        Ok(Self { hwnd, origin: None })
+        Ok(Self { hwnd })
     }
 
     /// The pointer on the screen, in logical pixels.
@@ -97,11 +95,7 @@ impl Popup {
         ))
     }
 
-    pub(crate) fn move_to(&mut self, origin: Point<Pixels>, scale: f32) {
-        if self.origin == Some(origin) {
-            return;
-        }
-        self.origin = Some(origin);
+    pub(crate) fn move_to(&self, origin: Point<Pixels>, scale: f32) {
         #[allow(clippy::cast_possible_truncation)]
         let device = |value: Pixels| (f32::from(value) * scale).round() as i32;
         // WM_MOVE arrives at once, which GPUI can't take mid-render: post the move to ourselves.

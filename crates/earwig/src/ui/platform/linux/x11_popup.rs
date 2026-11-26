@@ -10,8 +10,6 @@ use x11rb::rust_connection::RustConnection;
 pub struct X11Popup {
     conn: RustConnection,
     window: u32,
-    /// Origin last asked for, `None` while the window is where it opened.
-    origin: Option<Point<Pixels>>,
 }
 
 impl X11Popup {
@@ -23,7 +21,6 @@ impl X11Popup {
         Ok(Self {
             conn,
             window: handle.window.get(),
-            origin: None,
         })
     }
 
@@ -36,11 +33,7 @@ impl X11Popup {
         ))
     }
 
-    pub fn move_to(&mut self, origin: Point<Pixels>, scale: f32) {
-        if self.origin == Some(origin) {
-            return;
-        }
-        self.origin = Some(origin);
+    pub fn move_to(&self, origin: Point<Pixels>, scale: f32) {
         #[allow(clippy::cast_possible_truncation)]
         let device = |value: Pixels| (f32::from(value) * scale).round() as i32;
         let aux = ConfigureWindowAux::new()
