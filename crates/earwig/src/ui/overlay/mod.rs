@@ -13,13 +13,13 @@ use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Div,
     Entity, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
-    PlatformDisplay, Point, Render, SharedString, Size, Stateful, StatefulInteractiveElement as _,
-    Styled as _, StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
+    PlatformDisplay, Point, Render, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
+    StyledText, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowId, WindowKind, WindowOptions, canvas, div, point, px, size,
 };
 
 use crate::ui::drag::{Grab, Pointer};
-use crate::ui::lifecycle::{Lifecycle, Stage};
+use crate::ui::lifecycle::{Lifecycle, Notice, NoticeTone, Stage};
 use crate::ui::pill::{self, Clock, Edge, Look, Motion};
 use crate::ui::platform::Popup;
 use crate::ui::{OverlaySurface, accent, crt, font, now_ms};
@@ -150,9 +150,6 @@ pub struct OverlayView {
     max_lines: u32,
     position: OverlayPosition,
     life: Lifecycle,
-    /// What the pill says while it shows a failure: the header's word and a sentence.
-    failure_status: &'static str,
-    failure_line: SharedString,
     started_at_ms: u64,
     stopped_at_ms: Option<u64>,
     committed: String,
@@ -254,8 +251,6 @@ impl OverlayView {
             max_lines: config.max_lines.max(1),
             position: config.position,
             life: Lifecycle::default(),
-            failure_status: "",
-            failure_line: SharedString::default(),
             started_at_ms: now_ms(),
             stopped_at_ms: None,
             committed: String::new(),
@@ -302,23 +297,32 @@ impl OverlayView {
         self.life.finish(now, self.switch_off());
     }
 
-    pub fn failed(&mut self, on_clipboard: bool, not_allowed: bool, now: Instant) {
-        self.failure_status = "Not inserted";
-        self.failure_line = failure_text(on_clipboard, not_allowed).into();
-        self.life.failed(on_clipboard, now);
+    /// Show `notice` for the current dictation (queued if switching off).
+    pub fn notice(&mut self, notice: Notice, now: Instant) {
+        self.life.notice(notice, now);
     }
 
-    /// No dictation started: the pill says why in `line`, then switches off.
-    pub fn not_started(&mut self, line: String, now: Instant) {
+    /// Show a standalone `notice` when no dictation is running, then switch off.
+    pub fn notice_alone(&mut self, notice: Notice, now: Instant) {
         self.committed.clear();
         self.tentative.clear();
         self.started_at_ms = now_ms();
         self.stopped_at_ms = Some(self.started_at_ms);
-        self.failure_status = "Not started";
-        self.failure_line = line.into();
-        self.life.failed(false, now);
+        self.life.notice(notice, now);
         // The daemon has nothing more to say about it.
         self.life.idle();
+    }
+
+    pub fn failed(&mut self, on_clipboard: bool, not_allowed: bool, now: Instant) {
+        self.notice(
+            Notice::danger("Not inserted", failure_text(on_clipboard, not_allowed)),
+            now,
+        );
+    }
+
+    /// No dictation started: the pill says why in `line`, then switches off.
+    pub fn not_started(&mut self, line: String, now: Instant) {
+        self.notice_alone(Notice::danger("Not started", line), now);
     }
 
     pub fn idle(&mut self) {
@@ -335,7 +339,7 @@ impl OverlayView {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.life.stage() == Stage::Closed
+        *self.life.stage() == Stage::Closed
     }
 
     /// Instant when the pill holds still (spares a CPU-drawn window) or the setting says so.
@@ -359,7 +363,7 @@ impl OverlayView {
     /// Seconds into the switch-off, while it lasts.
     fn switching_off(&self, now: Instant) -> Option<f32> {
         match self.life.stage() {
-            Stage::SwitchingOff { since, .. } => Some(now.duration_since(since).as_secs_f32()),
+            Stage::SwitchingOff { since, .. } => Some(now.duration_since(*since).as_secs_f32()),
             _ => None,
         }
     }
@@ -373,7 +377,7 @@ impl OverlayView {
     }
 
     pub fn is_recording(&self) -> bool {
-        self.life.stage() == Stage::Live
+        *self.life.stage() == Stage::Live
     }
 
     /// Whether a new reading of the voice should be drawn right away.
@@ -381,19 +385,19 @@ impl OverlayView {
         self.is_recording() && !self.still
     }
 
-    /// Live or showing a failure; never while switching off.
+    /// Live or showing a notice; never while switching off.
     fn takes_pointer(&self) -> bool {
-        matches!(self.life.stage(), Stage::Live | Stage::Failed { .. })
+        matches!(self.life.stage(), Stage::Live | Stage::Notice { .. })
     }
 
-    /// The failure on show (or switching off): whether the text is on the clipboard.
-    fn failure(&self) -> Option<bool> {
+    /// The notice on show (or collapsing).
+    fn current_notice(&self) -> Option<&Notice> {
         match self.life.stage() {
-            Stage::Failed { on_clipboard, .. }
+            Stage::Notice { notice, .. }
             | Stage::SwitchingOff {
-                failure: Some(on_clipboard),
+                notice: Some(notice),
                 ..
-            } => Some(on_clipboard),
+            } => Some(notice),
             _ => None,
         }
     }
@@ -425,16 +429,18 @@ impl OverlayView {
     }
 
     fn header(&self, theme: &Theme) -> Div {
-        let status = self.failure().map(|_| self.failure_status);
+        let status = self
+            .current_notice()
+            .map(|notice| (notice.status, notice.tone));
         let words = word_count(&self.committed) + word_count(&self.tentative);
         header_row(theme, self.elapsed(), words, status)
     }
 
     fn body(&self, theme: &Theme) -> Div {
-        match self.failure() {
-            Some(_) => div()
+        match self.current_notice() {
+            Some(notice) => div()
                 .text_color(theme.foreground)
-                .child(self.failure_line.clone()),
+                .child(notice.line.clone()),
             None if self.committed.is_empty() && self.tentative.is_empty() => {
                 div().text_color(theme.muted_foreground).child("Listening…")
             }
@@ -751,7 +757,7 @@ impl OverlayView {
                     .opacity(content)
                     .child(self.body(theme)),
             )
-            .when(self.failure().is_none(), |this| {
+            .when(self.current_notice().is_none(), |this| {
                 this.child(discard_button(theme, self.is_recording()).opacity(content))
             })
     }
@@ -813,7 +819,7 @@ fn failure_text(on_clipboard: bool, not_allowed: bool) -> &'static str {
 
 impl Render for OverlayView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.life.stage() == Stage::Off {
+        if *self.life.stage() == Stage::Off {
             // Off screen: click-through until a failure brings the pill back or the window closes.
             if self.painted.take().is_some() {
                 set_pointer_region(window, None);
@@ -890,9 +896,14 @@ pub(crate) fn header_row(
     theme: &Theme,
     elapsed: Duration,
     words: usize,
-    status: Option<&'static str>,
+    status: Option<(&'static str, NoticeTone)>,
 ) -> Div {
-    let dot = theme.danger;
+    let tone_color = |tone| match tone {
+        NoticeTone::Muted => theme.muted_foreground,
+        NoticeTone::Warning => theme.warning,
+        NoticeTone::Danger => theme.danger,
+    };
+    let dot = status.map_or(theme.danger, |(_, tone)| tone_color(tone));
     div()
         .flex()
         .items_center()
@@ -912,8 +923,8 @@ pub(crate) fn header_row(
             "{words} {}",
             if words == 1 { "word" } else { "words" }
         ))
-        .when_some(status, |this, status| {
-            this.child(div().text_color(dot).child(status))
+        .when_some(status, |this, (label, tone)| {
+            this.child(div().text_color(tone_color(tone)).child(label))
         })
 }
 
