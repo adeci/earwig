@@ -40,27 +40,26 @@ pub(crate) enum Request {
     Installing,
     /// The new app to start, or why installing failed.
     Done(Result<PathBuf, String>),
+    /// Stop the updater thread cleanly when the daemon quits.
+    Shutdown,
 }
 
 pub(crate) fn spawn(
     updates: Updates,
     shared: Arc<Shared>,
-    requests: flume::Sender<Request>,
     incoming: flume::Receiver<Request>,
-) -> io::Result<()> {
+) -> io::Result<thread::JoinHandle<()>> {
     let service = Service {
         enabled: checks_enabled(&shared),
         updates,
         shared,
-        requests,
         machine: Machine::default(),
         next: SystemTime::now() + FIRST_CHECK,
         cleaned: false,
     };
     thread::Builder::new()
         .name("earwig-update".into())
-        .spawn(move || service.run(&incoming))?;
-    Ok(())
+        .spawn(move || service.run(&incoming))
 }
 
 fn checks_enabled(shared: &Shared) -> bool {
@@ -76,8 +75,6 @@ fn checks_enabled(shared: &Shared) -> bool {
 struct Service {
     updates: Updates,
     shared: Arc<Shared>,
-    /// For the install worker's reports.
-    requests: flume::Sender<Request>,
     machine: Machine,
     /// `[updates] check`.
     enabled: bool,
@@ -94,9 +91,9 @@ impl Service {
                 .unwrap_or_default()
                 .min(WAKE);
             match incoming.recv_timeout(wait) {
+                Ok(Request::Shutdown) | Err(flume::RecvTimeoutError::Disconnected) => return,
                 Ok(request) => self.handle(request),
                 Err(flume::RecvTimeoutError::Timeout) => self.tick(),
-                Err(flume::RecvTimeoutError::Disconnected) => return,
             }
         }
     }
@@ -161,6 +158,7 @@ impl Service {
                     self.publish();
                 }
             }
+            Request::Shutdown => {}
         }
     }
 
@@ -188,11 +186,13 @@ impl Service {
         if self.machine.busy() {
             return Ok(self.machine.state.clone());
         }
+        let Some(report) = self.shared.updates.clone() else {
+            return Err(super::NOT_UPDATING.to_owned());
+        };
         let offer = self.machine.start()?;
         self.publish();
         log::info!("updating to earwig {}", offer.version);
         let updates = self.updates.clone();
-        let report = self.requests.clone();
         let spawned = thread::Builder::new()
             .name("earwig-update-install".into())
             .spawn(move || {

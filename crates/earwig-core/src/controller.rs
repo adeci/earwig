@@ -107,6 +107,20 @@ pub(crate) struct Shared {
     pub relaunch: Mutex<Option<PathBuf>>,
 }
 
+impl Shared {
+    fn status(&self) -> Status {
+        let mut status = self
+            .status
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        // These change on their own, outside earwig.
+        status.permissions = crate::permissions::check();
+        status.hotkey = crate::hotkey::status();
+        status
+    }
+}
+
 impl Handle {
     pub(crate) fn new(shared: Arc<Shared>) -> Self {
         Self { shared }
@@ -135,16 +149,7 @@ impl Handle {
     }
 
     pub fn status(&self) -> Status {
-        let mut status = self
-            .shared
-            .status
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        // These change on their own, outside earwig.
-        status.permissions = crate::permissions::check();
-        status.hotkey = crate::hotkey::status();
-        status
+        self.shared.status()
     }
 
     /// Settings. Edit through [`ConfigStore::update`], then send
@@ -239,7 +244,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         models,
         history,
         engine: engine.clone(),
-        updates: updates.as_ref().map(|_| updates_tx.clone()),
+        updates: updates.as_ref().map(|_| updates_tx),
         relaunch: Mutex::new(None),
     });
 
@@ -272,6 +277,11 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
             );
         })?;
 
+    let mut workers = vec![engine_worker, output_worker];
+    if let Some(updates) = updates {
+        workers.push(update::spawn(updates, shared.clone(), updates_rx)?);
+    }
+
     let mut controller = Controller {
         shared: shared.clone(),
         session: Session::new(settings.hotkey.mode, settings.hotkey.hold_threshold_ms),
@@ -280,7 +290,7 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         capture: Some(capture),
         engine: engine_tx,
         output: output_tx,
-        workers: vec![engine_worker, output_worker],
+        workers,
         recording: 0,
         started: Instant::now(),
         started_at_ms: 0,
@@ -295,9 +305,6 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
     thread::Builder::new()
         .name("earwig-controller".into())
         .spawn(move || controller.run(&commands, &audio, &engine_events, &output_events))?;
-    if let Some(updates) = updates {
-        update::spawn(updates, shared.clone(), updates_tx, updates_rx)?;
-    }
     Ok(Handle::new(shared))
 }
 
@@ -694,6 +701,9 @@ impl Controller {
         } = self;
         drop(capture);
         drop((engine, output));
+        if let Some(updates) = &shared.updates {
+            let _ = updates.send(update::Request::Shutdown);
+        }
         // The model must be freed before the process exits: GPU backends
         // crash in their static destructors while a model is still alive.
         for worker in workers {
@@ -739,11 +749,10 @@ impl Controller {
     /// The insertion methods have no event of their own: front ends get a
     /// fresh snapshot.
     fn set_insert_methods(&self, methods: Vec<InsertMethod>) {
-        let status = self.update_status(|s| {
-            s.insert_methods = methods;
-            Box::new(s.clone())
+        self.update_status(|s| s.insert_methods = methods);
+        self.publish(&Event::Status {
+            status: Box::new(self.shared.status()),
         });
-        self.publish(&Event::Status { status });
     }
 
     fn model_status(&self) -> ModelStatus {
@@ -1600,9 +1609,14 @@ mod tests {
             d.handle.send(Command::ReloadConfig);
         };
         edit(|c| c.insert.method = InsertSetting::Paste);
-        d.wait_for(|e| {
+        let Event::Status { status } = d.wait_for(|e| {
             matches!(e, Event::Status { status } if status.insert_methods == [InsertMethod::Paste])
-        });
+        }) else {
+            unreachable!()
+        };
+        assert!(!status.hotkey.source.is_empty(), "{:?}", status.hotkey);
+        assert_eq!(status.hotkey, crate::hotkey::status());
+        assert_eq!(status.permissions, crate::permissions::check());
         assert_eq!(d.handle.status().insert_methods, [InsertMethod::Paste]);
 
         // Other settings leave it alone. The output thread takes jobs in
@@ -1679,5 +1693,26 @@ mod tests {
             d.handle.install_update(),
             Ok(UpdateState::Downloading { .. })
         ));
+    }
+
+    #[test]
+    fn quit_stops_the_updater_and_releases_shared_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (data, sha256) = update::testing::data();
+        let feed = update::testing::releases(data, sha256, 300_000);
+        let d = Daemon::start_with(false, Some(feed.updates("0.1.0", dir.path())));
+        let shared = Arc::downgrade(&d.handle.shared);
+        d.handle.send(Command::Quit);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while d.events.recv_deadline(deadline).is_ok() {}
+        assert!(Instant::now() < deadline, "subscription stayed open");
+        let stopped = d.handle.check_for_updates().unwrap_err();
+        assert!(stopped.contains("updater stopped"), "{stopped}");
+        drop(d);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shared.strong_count() > 0 {
+            assert!(Instant::now() < deadline, "shared controller state leaked");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
