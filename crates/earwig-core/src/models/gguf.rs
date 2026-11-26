@@ -20,6 +20,7 @@ const MAGIC: &[u8; 4] = b"GGUF";
 const MAX_KEYS: u64 = 1 << 20;
 const MAX_STRING: u64 = 1 << 24;
 const MAX_ARRAY: u64 = 1 << 28;
+const MAX_DEPTH: usize = 32;
 
 const TYPE_STRING: u32 = 8;
 const TYPE_ARRAY: u32 = 9;
@@ -65,7 +66,7 @@ fn scan(r: &mut Reader<'_>, key: &str) -> Result<Scan, Stop> {
                 .map(Scan::Found)
                 .map_err(|_| Stop::Invalid("value is not UTF-8"));
         }
-        r.skip_value(ty)?;
+        r.skip_value(ty, 0)?;
     }
     Ok(Scan::Absent)
 }
@@ -101,7 +102,10 @@ impl<'a> Reader<'a> {
         self.take(usize::try_from(len).map_err(|_| Stop::Invalid("overflow"))?)
     }
 
-    fn skip_value(&mut self, ty: u32) -> Result<(), Stop> {
+    fn skip_value(&mut self, ty: u32, depth: usize) -> Result<(), Stop> {
+        if depth >= MAX_DEPTH {
+            return Err(Stop::Invalid("implausible array nesting"));
+        }
         match ty {
             TYPE_STRING => {
                 self.string()?;
@@ -120,7 +124,7 @@ impl<'a> Reader<'a> {
                     self.take(bytes)?;
                 } else {
                     for _ in 0..count {
-                        self.skip_value(item)?;
+                        self.skip_value(item, depth + 1)?;
                     }
                 }
             }
@@ -269,6 +273,45 @@ mod tests {
         assert!(matches!(
             find_string(&unknown, "general.architecture"),
             Scan::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn deeply_nested_arrays_are_refused() {
+        // Shallow nested array (array of string arrays) still skips cleanly.
+        let mut shallow = TYPE_ARRAY.to_le_bytes().to_vec();
+        shallow.extend(1u64.to_le_bytes());
+        shallow.extend(string_array(&["a", "b"]));
+        let ok = header(
+            3,
+            &[
+                ("nested", TYPE_ARRAY, shallow),
+                ("general.architecture", TYPE_STRING, str_bytes("parakeet")),
+            ],
+        );
+        assert_eq!(
+            find_string(&ok, "general.architecture"),
+            Scan::Found("parakeet".into())
+        );
+
+        // Deeply nested arrays stop at MAX_DEPTH instead of overflowing the stack.
+        let mut deep = Vec::new();
+        for _ in 0..MAX_DEPTH + 32 {
+            deep.extend(TYPE_ARRAY.to_le_bytes());
+            deep.extend(1u64.to_le_bytes());
+        }
+        deep.extend(TYPE_STRING.to_le_bytes());
+        deep.extend(0u64.to_le_bytes());
+        let hostile = header(
+            3,
+            &[
+                ("nested", TYPE_ARRAY, deep),
+                ("general.architecture", TYPE_STRING, str_bytes("parakeet")),
+            ],
+        );
+        assert!(matches!(
+            find_string(&hostile, "general.architecture"),
+            Scan::Invalid("implausible array nesting")
         ));
     }
 }
