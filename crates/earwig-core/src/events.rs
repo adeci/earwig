@@ -71,6 +71,10 @@ pub enum Event {
         reason: String,
         on_clipboard: bool,
     },
+    /// A dictation finished with nothing to insert.
+    NothingInserted {
+        reason: EmptyReason,
+    },
     Model {
         model: ModelStatus,
     },
@@ -117,6 +121,18 @@ pub enum InsertMethod {
     /// Clipboard set without focus, then one paste chord through earwig's own
     /// keyboard (uinput); GNOME and KDE with keyboard access.
     UinputPaste,
+}
+
+/// Why a finished dictation produced nothing to insert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmptyReason {
+    /// No sound reached the microphone (muted, unplugged, or digital silence).
+    SilentMic,
+    /// Sound reached the microphone, but the model heard no speech.
+    NothingHeard,
+    /// Replacements or `[hooks] filter` turned the transcript empty.
+    Filtered,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -224,4 +240,33 @@ pub enum KeyboardState {
     /// Not watching (yet).
     #[default]
     Stopped,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_inserted_wire_format_is_kebab_case() {
+        for (reason, expected) in [
+            (
+                EmptyReason::SilentMic,
+                r#"{"event":"nothing-inserted","reason":"silent-mic"}"#,
+            ),
+            (
+                EmptyReason::NothingHeard,
+                r#"{"event":"nothing-inserted","reason":"nothing-heard"}"#,
+            ),
+            (
+                EmptyReason::Filtered,
+                r#"{"event":"nothing-inserted","reason":"filtered"}"#,
+            ),
+        ] {
+            let event = Event::NothingInserted { reason };
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(json, expected);
+            let parsed: Event = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, event);
+        }
+    }
 }

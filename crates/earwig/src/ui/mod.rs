@@ -271,7 +271,8 @@ fn apply(event: Event, cx: &mut App) {
             }
         }
         // Only for socket clients; the pill switched off already.
-        Event::Inserted { .. } => {}
+        // (`NothingInserted` overlay notices are wired on the UI branch.)
+        Event::Inserted { .. } | Event::NothingInserted { .. } => {}
         Event::Transcript {
             committed,
             tentative,

@@ -15,7 +15,7 @@ use crate::audio::{AudioEvent, Capture, Source};
 use crate::config::{AudioConfig, Config, ConfigStore, InsertConfig, InsertSetting};
 use crate::engine::{EngineFactory, EngineOptions, Model, ModelInfo, Partial};
 use crate::events::{
-    Command, DictationState, Event, InsertMethod, ModelStatus, Status, UpdateState,
+    Command, DictationState, EmptyReason, Event, InsertMethod, ModelStatus, Status, UpdateState,
 };
 use crate::history::{History, HistoryEntry};
 use crate::hooks;
@@ -25,6 +25,15 @@ use crate::replacements;
 use crate::session::{Action, Input, Phase, Session};
 use crate::spectrum::Feed;
 use crate::update::{self, Updates};
+
+/// Recordings shorter than this stay silent when nothing was heard, so an
+/// accidental brush of the hotkey does not pop up a notice.
+const MIN_NOTICE_MS: u64 = 150;
+/// Windowed RMS level (`0..1` over `-60..0` dBFS) above which audio reached
+/// the microphone.
+const SILENT_LEVEL: f32 = 0.02;
+/// Peak PCM amplitude (`-60` dBFS) above which audio reached the microphone.
+const SILENT_SAMPLE: f32 = 1e-3;
 
 /// Builds the inserter for `[insert]`. Never fails (where nothing works, a
 /// stand-in fails each insertion instead).
@@ -296,6 +305,8 @@ pub fn spawn_with_source(parts: Parts, source: Source) -> anyhow::Result<Handle>
         started_at_ms: 0,
         stopped: Instant::now(),
         duration_ms: 0,
+        peak_level: 0.0,
+        peak_sample: 0.0,
         output_cancel: None,
         loaded: None,
         load_id: 0,
@@ -577,9 +588,18 @@ fn waits_for_access(config: &InsertConfig, inserter: &dyn Inserter) -> bool {
 
 /// Replace, filter, insert, record, announce.
 fn deliver(inserter: &mut dyn Inserter, shared: &Shared, job: &Delivery) {
+    if job.cancel.load(Ordering::Relaxed) {
+        return;
+    }
     let text = replacements::apply(&job.config.replacements, &job.text);
     let text = hooks::filter(&job.config.hooks, &text);
-    if text.trim().is_empty() || job.cancel.load(Ordering::Relaxed) {
+    if job.cancel.load(Ordering::Relaxed) {
+        return;
+    }
+    if text.trim().is_empty() {
+        shared.bus.publish(&Event::NothingInserted {
+            reason: EmptyReason::Filtered,
+        });
         return;
     }
     let result = inserter.insert(&text);
@@ -646,6 +666,9 @@ struct Controller {
     /// When the newest recording stopped, for latency logs.
     stopped: Instant,
     duration_ms: u64,
+    /// Loudest windowed level and PCM sample heard during the active recording.
+    peak_level: f32,
+    peak_sample: f32,
     /// Set to drop the result being inserted.
     output_cancel: Option<Arc<AtomicBool>>,
     /// The model last sent to the engine, with its load id.
@@ -834,6 +857,8 @@ impl Controller {
         }
         self.started = Instant::now();
         self.started_at_ms = unix_ms();
+        self.peak_level = 0.0;
+        self.peak_sample = 0.0;
         log::debug!("recording {id} started");
         self.set_state(DictationState::Recording {
             latched,
@@ -878,12 +903,16 @@ impl Controller {
     fn audio(&mut self, event: AudioEvent) {
         match event {
             AudioEvent::Samples { recording, pcm } if self.is_current(recording) => {
+                for &s in &pcm {
+                    self.peak_sample = self.peak_sample.max(s.abs());
+                }
                 let _ = self.engine.send(EngineJob::Feed { id: recording, pcm });
             }
             AudioEvent::Level { recording, level }
                 if self.is_current(recording)
                     && matches!(self.session.phase(), Phase::Recording { .. }) =>
             {
+                self.peak_level = self.peak_level.max(level);
                 self.publish(&Event::Level { level });
             }
             AudioEvent::Stopped { recording }
@@ -953,6 +982,14 @@ impl Controller {
             tentative: String::new(),
         });
         if text.is_empty() {
+            if self.duration_ms >= MIN_NOTICE_MS {
+                let reason = if self.peak_level > SILENT_LEVEL || self.peak_sample > SILENT_SAMPLE {
+                    EmptyReason::NothingHeard
+                } else {
+                    EmptyReason::SilentMic
+                };
+                self.publish(&Event::NothingInserted { reason });
+            }
             self.idle();
             return;
         }
@@ -1115,15 +1152,18 @@ mod tests {
 
     const TEXT: &str = "hello from the fake engine";
 
-    /// Counts the models alive.
-    struct FakeEngine(Arc<AtomicUsize>);
+    /// Counts the models alive and returns `output` when audio arrived.
+    struct FakeEngine {
+        live: Arc<AtomicUsize>,
+        output: &'static str,
+    }
 
     impl EngineFactory for FakeEngine {
         fn supports_architecture(&self, arch: &str) -> bool {
             arch == "fake"
         }
         fn load(&self, _path: &Path, _options: &EngineOptions) -> anyhow::Result<Box<dyn Model>> {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            self.live.fetch_add(1, Ordering::SeqCst);
             Ok(Box::new(FakeModel {
                 info: ModelInfo {
                     architecture: "fake".into(),
@@ -1131,7 +1171,8 @@ mod tests {
                     backend: "cpu".into(),
                 },
                 samples: 0,
-                live: self.0.clone(),
+                live: self.live.clone(),
+                output: self.output,
             }))
         }
     }
@@ -1140,6 +1181,7 @@ mod tests {
         info: ModelInfo,
         samples: usize,
         live: Arc<AtomicUsize>,
+        output: &'static str,
     }
 
     impl Drop for FakeModel {
@@ -1158,6 +1200,9 @@ mod tests {
         }
         fn feed(&mut self, pcm: &[f32]) -> anyhow::Result<Option<Partial>> {
             self.samples += pcm.len();
+            if self.output.is_empty() {
+                return Ok(None);
+            }
             Ok(Some(Partial {
                 committed: String::new(),
                 tentative: "hello".into(),
@@ -1166,7 +1211,7 @@ mod tests {
         fn finish(&mut self) -> anyhow::Result<String> {
             // Text only when audio arrived, so insertion proves it flowed.
             Ok(if self.samples > 0 {
-                TEXT.into()
+                self.output.into()
             } else {
                 String::new()
             })
@@ -1221,6 +1266,19 @@ mod tests {
         }
 
         fn start_with(fail_insert: bool, updates: Option<Updates>) -> Self {
+            Self::start_custom(fail_insert, updates, vec![0.25; 1_600], TEXT)
+        }
+
+        fn start_with_audio(clip: Vec<f32>, output: &'static str) -> Self {
+            Self::start_custom(false, None, clip, output)
+        }
+
+        fn start_custom(
+            fail_insert: bool,
+            updates: Option<Updates>,
+            clip: Vec<f32>,
+            output: &'static str,
+        ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let model = dir.path().join("fake.gguf");
             fs::write(&model, b"").unwrap();
@@ -1233,7 +1291,13 @@ mod tests {
                 ),
             )
             .unwrap();
-            Self::spawn(dir, vec![system], fail_insert, updates)
+            let daemon =
+                Self::launch_with_audio(dir, vec![system], fail_insert, updates, clip, output);
+            daemon.wait_for(|e| {
+                matches!(e, Event::Model { model: ModelStatus::Ready { .. } })
+                    || matches!(e, Event::Status { status } if matches!(status.model, ModelStatus::Ready { .. }))
+            });
+            daemon
         }
 
         /// Start with `user.toml` in `dir` and the given system files, and
@@ -1256,6 +1320,17 @@ mod tests {
             fail_insert: bool,
             updates: Option<Updates>,
         ) -> Self {
+            Self::launch_with_audio(dir, system, fail_insert, updates, vec![0.25; 1_600], TEXT)
+        }
+
+        fn launch_with_audio(
+            dir: tempfile::TempDir,
+            system: Vec<PathBuf>,
+            fail_insert: bool,
+            updates: Option<Updates>,
+            clip: Vec<f32>,
+            output: &'static str,
+        ) -> Self {
             let config = ConfigStore::load_from(ConfigPaths {
                 user: dir.path().join("user.toml"),
                 system,
@@ -1268,7 +1343,10 @@ mod tests {
                 config,
                 models: Arc::new(ModelManager::new(dir.path().join("models"))),
                 history: Arc::new(History::open(dir.path().join("history.jsonl"), 50).unwrap()),
-                engine: Arc::new(FakeEngine(live_models.clone())),
+                engine: Arc::new(FakeEngine {
+                    live: live_models.clone(),
+                    output,
+                }),
                 inserter: Box::new(move |config: &InsertConfig| -> Box<dyn Inserter> {
                     inserter_calls.lock().unwrap().built.push(config.method);
                     Box::new(FakeInserter {
@@ -1286,7 +1364,7 @@ mod tests {
                 hotkey_sources: Vec::new(),
                 updates,
             };
-            let clip: Arc<[f32]> = vec![0.25; 1_600].into();
+            let clip: Arc<[f32]> = clip.into();
             let handle = spawn_with_source(parts, Source::Clip(clip)).unwrap();
             let events = handle.subscribe();
             Self {
@@ -1295,6 +1373,24 @@ mod tests {
                 calls,
                 live_models,
                 _dir: dir,
+            }
+        }
+
+        fn collect_until_idle(&self) -> Vec<Event> {
+            let mut seen = Vec::new();
+            loop {
+                let event = self
+                    .events
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("event did not arrive");
+                let done = event
+                    == Event::State {
+                        state: DictationState::Idle,
+                    };
+                seen.push(event);
+                if done {
+                    return seen;
+                }
             }
         }
 
@@ -1713,6 +1809,143 @@ mod tests {
         while shared.strong_count() > 0 {
             assert!(Instant::now() < deadline, "shared controller state leaked");
             thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn silent_mic_emits_nothing_inserted_silent_mic() {
+        let d = Daemon::start_with_audio(vec![0.0; 1_600], "");
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        thread::sleep(Duration::from_millis(200));
+        d.handle.send(Command::Toggle);
+        let events = d.collect_until_idle();
+        let notice = events.iter().position(|e| {
+            *e == Event::NothingInserted {
+                reason: EmptyReason::SilentMic,
+            }
+        });
+        assert!(notice.is_some(), "{events:?}");
+        assert!(notice.unwrap() < events.len() - 1);
+        assert_eq!(d.calls.lock().unwrap().inserted, Vec::<String>::new());
+        assert_eq!(d.handle.history().entries(), Vec::new());
+    }
+
+    #[test]
+    fn sound_with_empty_transcript_emits_nothing_inserted_nothing_heard() {
+        let d = Daemon::start_with_audio(vec![0.25; 1_600], "");
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        thread::sleep(Duration::from_millis(200));
+        d.handle.send(Command::Toggle);
+        let events = d.collect_until_idle();
+        let notice = events.iter().position(|e| {
+            *e == Event::NothingInserted {
+                reason: EmptyReason::NothingHeard,
+            }
+        });
+        assert!(notice.is_some(), "{events:?}");
+        assert!(notice.unwrap() < events.len() - 1);
+        assert_eq!(d.calls.lock().unwrap().inserted, Vec::<String>::new());
+        assert_eq!(d.handle.history().entries(), Vec::new());
+    }
+
+    #[test]
+    fn empty_replacement_emits_nothing_inserted_filtered() {
+        let d = Daemon::start(false);
+        d.handle
+            .config()
+            .write()
+            .unwrap()
+            .update(|c| {
+                c.replacements.insert(TEXT.into(), String::new());
+            })
+            .unwrap();
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        thread::sleep(Duration::from_millis(200));
+        d.handle.send(Command::Toggle);
+        let events = d.collect_until_idle();
+        let notice = events.iter().position(|e| {
+            *e == Event::NothingInserted {
+                reason: EmptyReason::Filtered,
+            }
+        });
+        assert!(notice.is_some(), "{events:?}");
+        assert!(notice.unwrap() < events.len() - 1);
+        assert_eq!(d.calls.lock().unwrap().inserted, Vec::<String>::new());
+        assert_eq!(d.handle.history().entries(), Vec::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_filter_hook_emits_nothing_inserted_filtered() {
+        let d = Daemon::start(false);
+        let drop_all = ["sh", "-c", "true"].map(String::from).to_vec();
+        d.handle
+            .config()
+            .write()
+            .unwrap()
+            .update(|c| {
+                c.hooks.filter = drop_all;
+            })
+            .unwrap();
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        thread::sleep(Duration::from_millis(200));
+        d.handle.send(Command::Toggle);
+        let events = d.collect_until_idle();
+        let notice = events.iter().position(|e| {
+            *e == Event::NothingInserted {
+                reason: EmptyReason::Filtered,
+            }
+        });
+        assert!(notice.is_some(), "{events:?}");
+        assert!(notice.unwrap() < events.len() - 1);
+        assert_eq!(d.calls.lock().unwrap().inserted, Vec::<String>::new());
+        assert_eq!(d.handle.history().entries(), Vec::new());
+    }
+
+    #[test]
+    fn brief_empty_take_suppresses_nothing_inserted() {
+        let d = Daemon::start_with_audio(vec![0.0; 1_600], "");
+        d.handle.send(Command::Toggle);
+        d.recording(true);
+        d.handle.send(Command::Toggle);
+        let events = d.collect_until_idle();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::NothingInserted { .. })),
+            "{events:?}"
+        );
+        let after = d.quiet(150);
+        assert!(
+            !after
+                .iter()
+                .any(|e| matches!(e, Event::NothingInserted { .. })),
+            "{after:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_and_chord_never_emit_nothing_inserted() {
+        let d = Daemon::start_with_audio(vec![0.0; 1_600], "");
+        for stop in [Command::Cancel, Command::Chord] {
+            d.handle.send(Command::Press);
+            d.recording(false);
+            thread::sleep(Duration::from_millis(200));
+            d.handle.send(stop);
+            let events = d.collect_until_idle();
+            d.handle.send(Command::Release);
+            let after = d.quiet(150);
+            assert!(
+                !events
+                    .iter()
+                    .chain(&after)
+                    .any(|e| matches!(e, Event::NothingInserted { .. })),
+                "{events:?} {after:?}"
+            );
         }
     }
 }
